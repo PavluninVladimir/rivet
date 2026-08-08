@@ -1,0 +1,1154 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rivet · EPIC-42 · Implement Keycloak authentication</title>
+<style>
+/* ─── tokens — the only place colors are defined ─────────────────────── */
+:root {
+  --bg:      oklch(15.5% 0.010 255);
+  --surface: oklch(18.5% 0.012 255);
+  --fg:      oklch(92% 0.006 255);
+  --muted:   oklch(64% 0.014 255);
+  --border:  oklch(26.5% 0.013 255);
+  --accent:  oklch(67% 0.155 248);   /* one accent = "running / primary action" */
+
+  /* status scale — color carries state, nothing else */
+  --c-done:   oklch(70% 0.135 152);
+  --c-test:   oklch(74% 0.105 200);
+  --c-review: oklch(76% 0.125 85);
+  --c-fix:    oklch(72% 0.135 60);
+  --c-block:  oklch(66% 0.185 27);
+  --c-fail:   oklch(58% 0.185 27);
+  --c-queue:  oklch(55% 0.015 255);
+  --c-ready:  oklch(70% 0.055 248);
+  --c-run:    var(--accent);
+
+  /* derived */
+  --raised:      color-mix(in oklch, var(--surface) 88%, white);
+  --accent-soft: color-mix(in oklch, var(--accent) 15%, transparent);
+  --fg-soft:     color-mix(in oklch, var(--fg) 6%, transparent);
+  --term-bg:     color-mix(in oklch, var(--bg) 72%, black);
+  --shadow:      0 8px 32px oklch(0% 0 0 / .5);
+
+  /* type — utilitarian tool: display face = UI sans by design */
+  --font-ui:      -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-display: var(--font-ui);
+  --font-mono:    ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+
+  --fs-body: 13px;
+  --fs-meta: 11.5px;
+  --r: 6px; --r-lg: 8px;
+}
+
+/* ─── reset ──────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 400 var(--fs-body)/1.45 var(--font-ui);
+  -webkit-font-smoothing: antialiased; overflow: hidden;
+}
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; padding: 0; }
+input, select { font: inherit; color: inherit; }
+h1,h2,h3,h4 { margin: 0; font-family: var(--font-display); }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+
+/* ─── app shell ──────────────────────────────────────────────────────── */
+#app { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
+
+/* sidebar */
+#sidebar { display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--surface); }
+.side-brand { display: flex; align-items: center; gap: 8px; padding: 14px 14px 12px; }
+.side-brand .glyph {
+  width: 20px; height: 20px; border-radius: 5px; background: var(--accent);
+  display: grid; place-items: center; color: var(--bg); font: 700 11px var(--font-mono);
+}
+.side-brand b { font-size: 13.5px; letter-spacing: -0.01em; }
+.side-brand .env { margin-left: auto; font: 500 9.5px var(--font-mono); color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; }
+#sidebar nav { padding: 4px 8px; display: flex; flex-direction: column; gap: 1px; }
+.nav-item {
+  display: flex; align-items: center; gap: 9px; padding: 6px 8px; border-radius: var(--r);
+  color: var(--muted); font-weight: 500; font-size: 12.5px; text-align: left; width: 100%;
+}
+.nav-item svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.6; flex: none; }
+.nav-item:hover { color: var(--fg); background: var(--fg-soft); }
+.nav-item.active { color: var(--fg); background: var(--fg-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.nav-item .count { margin-left: auto; font: 500 10px var(--font-mono); color: var(--muted); }
+.nav-item .count.warn { color: var(--c-block); }
+.side-foot { margin-top: auto; padding: 10px 14px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--muted); }
+.side-foot .line { display: flex; align-items: center; gap: 7px; }
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.dot.ok { background: var(--c-done); }
+.pulse { animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+
+/* main column */
+#main { display: flex; flex-direction: column; min-width: 0; }
+#topbar {
+  display: flex; align-items: center; gap: 12px; height: 42px; flex: none;
+  padding: 0 14px; border-bottom: 1px solid var(--border); background: var(--surface);
+}
+.crumb { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); min-width: 0; }
+.crumb .sep { opacity: .45; }
+.crumb b { color: var(--fg); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kbtn {
+  margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted);
+  border: 1px solid var(--border); border-radius: var(--r); padding: 4px 9px; font-size: 12px;
+}
+.kbtn:hover { color: var(--fg); border-color: color-mix(in oklch, var(--border) 40%, var(--muted)); }
+.kbd { font: 500 10px var(--font-mono); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 1px 4px; color: var(--muted); }
+
+#viewport { flex: 1; min-height: 0; position: relative; }
+.view { position: absolute; inset: 0; display: none; overflow: auto; }
+.view.on { display: block; }
+#view-epic.on { display: flex; flex-direction: column; overflow: hidden; }
+
+/* ─── buttons / pills ────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px;
+  border-radius: var(--r); border: 1px solid var(--border); background: var(--raised);
+  font-size: 12px; font-weight: 500; box-shadow: 0 1px 2px oklch(0% 0 0 / .3);
+  transition: border-color .12s, background .12s;
+}
+.btn:hover { border-color: color-mix(in oklch, var(--border) 30%, var(--muted)); }
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+.btn.primary:hover { background: color-mix(in oklch, var(--accent) 88%, white); }
+.btn.sm { padding: 3px 8px; font-size: 11.5px; }
+.btn.icon { padding: 5px 7px; }
+
+.st {
+  display: inline-flex; align-items: center; gap: 5px;
+  font: 600 9.5px var(--font-mono); letter-spacing: .07em; white-space: nowrap;
+}
+.st::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.st-running, .st-fixing { color: var(--c-run); }
+.st-running::before, .st-testing::before, .st-fixing::before { animation: pulse 1.4s infinite; }
+.st-testing { color: var(--c-test); }
+.st-review  { color: var(--c-review); }
+.st-blocked { color: var(--c-block); }
+.st-failed  { color: var(--c-fail); }
+.st-done    { color: var(--c-done); }
+.st-queued  { color: var(--c-queue); }
+.st-ready   { color: var(--c-ready); }
+.st-idle, .st-offline { color: var(--c-queue); }
+.st-offline::before { background: transparent; border: 1px solid currentColor; }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; padding: 2px 9px 2px 7px;
+  border: 1px solid var(--border); border-radius: 999px; font-size: 11.5px; color: var(--muted);
+}
+.chip .n { font: 600 11px var(--font-mono); color: var(--fg); }
+
+/* ─── epic header ────────────────────────────────────────────────────── */
+.epic-head { flex: none; padding: 14px 18px 12px; border-bottom: 1px solid var(--border); }
+.epic-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.epic-id { font: 600 11px var(--font-mono); color: var(--accent); background: var(--accent-soft); border-radius: 4px; padding: 2px 7px; }
+.epic-title-row h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+.epic-actions { margin-left: auto; display: flex; gap: 7px; }
+.epic-meta-row { display: flex; align-items: center; gap: 14px; margin-top: 10px; flex-wrap: wrap; }
+.progress { display: flex; width: 260px; height: 6px; border-radius: 3px; overflow: hidden; background: var(--fg-soft); }
+.progress i { display: block; height: 100%; }
+.epic-meta-row .pct { font: 600 13px var(--font-mono); }
+.epic-meta-row .sub { font-size: 12px; color: var(--muted); }
+.epic-chips { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+
+/* ─── needs attention ────────────────────────────────────────────────── */
+.attention { flex: none; padding: 10px 18px; border-bottom: 1px solid var(--border); background: color-mix(in oklch, var(--c-block) 4%, var(--bg)); }
+.attention-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.attention-head h2 { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.attention-head .n { font: 600 10.5px var(--font-mono); color: var(--c-block); background: color-mix(in oklch, var(--c-block) 16%, transparent); border-radius: 999px; padding: 1px 7px; }
+.attention-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.att-card {
+  display: flex; flex-direction: column; gap: 4px; padding: 9px 11px;
+  background: var(--surface); border: 1px solid var(--border); border-left: 2px solid var(--c-block);
+  border-radius: var(--r); text-align: left; min-width: 0;
+}
+.att-card:hover { border-color: color-mix(in oklch, var(--border) 40%, var(--muted)); border-left-color: var(--c-block); }
+.att-card.warn { border-left-color: var(--c-review); }
+.att-top { display: flex; align-items: center; gap: 8px; }
+.att-top .tid { font: 600 11px var(--font-mono); }
+.att-reason { font: 600 9.5px var(--font-mono); letter-spacing: .06em; color: var(--c-block); }
+.att-card.warn .att-reason { color: var(--c-review); }
+.att-msg { font-size: 12px; color: var(--muted); line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.att-act { margin-top: 2px; font-size: 11.5px; font-weight: 500; color: var(--accent); }
+
+/* ─── epic body: dag + rail ──────────────────────────────────────────── */
+.epic-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 292px; }
+
+.dag-panel { display: flex; flex-direction: column; min-width: 0; border-right: 1px solid var(--border); }
+.dag-toolbar {
+  flex: none; display: flex; align-items: center; gap: 6px; padding: 7px 12px;
+  border-bottom: 1px solid var(--border); flex-wrap: wrap;
+}
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; }
+.seg button { padding: 4px 10px; font-size: 11.5px; font-weight: 500; color: var(--muted); }
+.seg button:hover { color: var(--fg); }
+.seg button.on { background: var(--fg-soft); color: var(--fg); }
+.seg button + button { border-left: 1px solid var(--border); }
+.tglbtn { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border: 1px solid var(--border); border-radius: var(--r); font-size: 11.5px; color: var(--muted); }
+.tglbtn:hover { color: var(--fg); }
+.tglbtn.on { color: var(--fg); border-color: var(--accent); background: var(--accent-soft); }
+.dag-toolbar .zoom { margin-left: auto; display: inline-flex; gap: 4px; }
+
+.dag-canvas { flex: 1; position: relative; overflow: hidden; cursor: grab; background:
+  radial-gradient(color-mix(in oklch, var(--fg) 5%, transparent) 1px, transparent 1px);
+  background-size: 22px 22px; }
+.dag-canvas.panning { cursor: grabbing; }
+.dag-world { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+.dag-world svg { position: absolute; top: 0; left: 0; overflow: visible; }
+.edge { fill: none; stroke: color-mix(in oklch, var(--border) 55%, var(--muted)); stroke-width: 1.2; }
+.edge.to-blocked { stroke: color-mix(in oklch, var(--c-block) 55%, transparent); stroke-dasharray: 4 3; }
+.edge.done-done { stroke: var(--border); }
+.edge.cp-edge { stroke: var(--accent); stroke-width: 1.8; }
+.edge.dim, .node.dim { opacity: .13; }
+
+.node {
+  position: absolute; width: 204px; height: 66px; padding: 7px 10px 6px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+  display: flex; flex-direction: column; gap: 2px; text-align: left;
+  transition: opacity .15s, border-color .12s; box-shadow: 0 1px 3px oklch(0% 0 0 / .25);
+}
+.node:hover { border-color: color-mix(in oklch, var(--border) 30%, var(--muted)); }
+.node.sel { border-color: var(--accent); }
+.node.cp { box-shadow: 0 0 0 1px var(--accent), 0 1px 3px oklch(0% 0 0 / .25); }
+.node .n-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.node .n-id { font: 600 10.5px var(--font-mono); color: var(--muted); }
+.node .n-title { font-size: 12px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.node .n-meta { display: flex; justify-content: space-between; gap: 8px; font: 400 10px var(--font-mono); color: var(--muted); }
+.node .n-meta .who { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.node[data-status="done"] { opacity: .62; }
+.node[data-status="done"]:hover { opacity: 1; }
+.node[data-status="blocked"] { border-left: 2px solid var(--c-block); }
+.node[data-status="running"], .node[data-status="fixing"] { border-left: 2px solid var(--c-run); }
+.node[data-status="testing"] { border-left: 2px solid var(--c-test); }
+.node[data-status="review"] { border-left: 2px solid var(--c-review); }
+
+/* epic list view */
+.epic-list { padding: 12px 16px; overflow: auto; height: 100%; }
+
+/* ─── right rail: runners ────────────────────────────────────────────── */
+.rail { display: flex; flex-direction: column; min-height: 0; background: var(--surface); }
+.rail-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 14px 8px; }
+.rail-head h2 { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.rail-head .n { font: 600 10.5px var(--font-mono); color: var(--muted); }
+.rail-head a { margin-left: auto; font-size: 11.5px; color: var(--accent); cursor: pointer; }
+.rail-body { overflow: auto; padding: 0 10px 12px; display: flex; flex-direction: column; gap: 7px; }
+.runner-card {
+  text-align: left; padding: 9px 11px; border: 1px solid var(--border); border-radius: var(--r-lg);
+  background: var(--bg); display: flex; flex-direction: column; gap: 6px;
+}
+.runner-card:hover { border-color: color-mix(in oklch, var(--border) 35%, var(--muted)); }
+.rc-top { display: flex; align-items: center; gap: 8px; }
+.rc-top .name { font: 600 11.5px var(--font-mono); }
+.rc-top .st { margin-left: auto; }
+.rc-task { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; }
+.rc-task .tid { font: 500 11px var(--font-mono); color: var(--fg); }
+.rc-task .dur { font: 400 11px var(--font-mono); color: var(--muted); }
+.rc-action { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rc-foot { display: flex; align-items: center; gap: 8px; font: 400 10px var(--font-mono); color: var(--muted); }
+.ctx-bar { flex: 1; height: 3px; border-radius: 2px; background: var(--fg-soft); overflow: hidden; }
+.ctx-bar i { display: block; height: 100%; background: var(--muted); }
+.ctx-bar i.hot { background: var(--c-review); }
+
+/* ─── drawer ─────────────────────────────────────────────────────────── */
+#drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; width: 480px; max-width: 92vw; z-index: 40;
+  background: var(--surface); border-left: 1px solid var(--border); box-shadow: var(--shadow);
+  transform: translateX(102%); transition: transform .18s ease; display: flex; flex-direction: column;
+}
+#drawer.open { transform: none; }
+.dw-head { flex: none; padding: 14px 16px 12px; border-bottom: 1px solid var(--border); }
+.dw-top { display: flex; align-items: center; gap: 10px; }
+.dw-top .tid { font: 600 12px var(--font-mono); color: var(--muted); }
+.dw-top .close { margin-left: auto; color: var(--muted); padding: 4px; border-radius: 4px; }
+.dw-top .close:hover { color: var(--fg); background: var(--fg-soft); }
+.dw-head h2 { font-size: 15px; font-weight: 600; margin-top: 6px; letter-spacing: -0.01em; }
+.dw-actions { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.dw-body { flex: 1; overflow: auto; padding: 0 16px 20px; }
+.dw-sec { padding-top: 14px; }
+.dw-sec > h3 { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+.meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; }
+.meta-grid .kv { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--fg-soft); font-size: 12px; }
+.meta-grid .kv b { font: 500 11.5px var(--font-mono); color: var(--fg); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meta-grid .kv span { color: var(--muted); flex: none; }
+.crit { display: flex; gap: 9px; padding: 5px 0; font-size: 12.5px; align-items: baseline; }
+.crit .m { font: 600 11px var(--font-mono); flex: none; }
+.crit.ok .m { color: var(--c-done); }
+.crit.pend .m { color: var(--c-queue); }
+.tl { border-left: 1px solid var(--border); margin-left: 4px; padding-left: 14px; display: flex; flex-direction: column; gap: 7px; }
+.tl-row { display: flex; gap: 10px; font-size: 12px; position: relative; }
+.tl-row::before { content: ''; position: absolute; left: -17.5px; top: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--border); }
+.tl-row.warn::before { background: var(--c-review); }
+.tl-row.bad::before { background: var(--c-block); }
+.tl-row.now::before { background: var(--c-run); animation: pulse 1.4s infinite; }
+.tl-row .t { font: 400 11px var(--font-mono); color: var(--muted); flex: none; width: 38px; }
+.live { display: flex; flex-direction: column; gap: 4px; }
+.live-row { display: flex; align-items: baseline; gap: 9px; font-size: 12.5px; padding: 2px 0; }
+.live-row .m { font: 600 11px var(--font-mono); flex: none; width: 12px; }
+.live-row.ok .m { color: var(--c-done); }
+.live-row.bad .m { color: var(--c-block); }
+.live-row.now .m { color: var(--c-run); animation: pulse 1.2s infinite; }
+.live-row .d { margin-left: auto; font: 400 10.5px var(--font-mono); color: var(--muted); }
+.term {
+  margin-top: 8px; background: var(--term-bg); border: 1px solid var(--border); border-radius: var(--r);
+  padding: 10px 12px; font: 400 11px/1.6 var(--font-mono); color: var(--muted);
+  white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto;
+}
+.term .ok { color: var(--c-done); } .term .bad { color: var(--c-block); } .term .cmd { color: var(--fg); }
+.tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.tag { font: 500 10.5px var(--font-mono); color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; }
+
+/* ─── generic page + tables ──────────────────────────────────────────── */
+.page { padding: 16px 20px 28px; max-width: 1160px; }
+.page-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.page-head h1 { font-size: 15.5px; font-weight: 600; letter-spacing: -0.01em; }
+.page-head .sub { font-size: 12px; color: var(--muted); }
+.page-head .right { margin-left: auto; display: flex; gap: 7px; align-items: center; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.tbl th { text-align: left; font: 500 10px var(--font-mono); letter-spacing: .07em; text-transform: uppercase; color: var(--muted); padding: 7px 10px; border-bottom: 1px solid var(--border); }
+.tbl td { padding: 8px 10px; border-bottom: 1px solid color-mix(in oklch, var(--border) 55%, transparent); vertical-align: middle; }
+.tbl tbody tr { cursor: pointer; }
+.tbl tbody tr:hover { background: var(--fg-soft); }
+.tbl .num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.tbl .id { font: 500 11.5px var(--font-mono); }
+.bar-cell { display: flex; align-items: center; gap: 8px; }
+.bar-cell .bar { flex: 1; height: 5px; border-radius: 3px; background: var(--fg-soft); overflow: hidden; min-width: 60px; }
+.bar-cell .bar i { display: block; height: 100%; background: var(--muted); }
+.filters { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.sel { background: var(--raised); border: 1px solid var(--border); border-radius: var(--r); padding: 4px 8px; font-size: 12px; color: var(--fg); }
+.search { background: var(--raised); border: 1px solid var(--border); border-radius: var(--r); padding: 4px 10px; font-size: 12px; color: var(--fg); width: 180px; }
+.search:focus, .sel:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+
+/* stat strip (usage) — deliberately small */
+.stat-strip { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin-bottom: 16px; }
+.mini-stat { border: 1px solid var(--border); border-radius: var(--r-lg); padding: 9px 12px; background: var(--surface); }
+.mini-stat .v { font: 600 16px var(--font-mono); letter-spacing: -0.02em; }
+.mini-stat .v em { font-style: normal; font-size: 11px; color: var(--muted); margin-left: 3px; }
+.mini-stat .l { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+.mini-stat.hl { border-color: color-mix(in oklch, var(--accent) 45%, var(--border)); }
+.panel { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); padding: 12px 14px; }
+.panel h3 { font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+@media (max-width: 1000px) { .two-col, .stat-strip { grid-template-columns: 1fr 1fr; } .attention-row { grid-template-columns: 1fr; } .epic-body { grid-template-columns: 1fr; } .rail { display: none; } }
+
+/* activity */
+.act-row { display: grid; grid-template-columns: 44px 130px 1fr auto; gap: 12px; padding: 7px 10px; border-bottom: 1px solid color-mix(in oklch, var(--border) 55%, transparent); font-size: 12.5px; align-items: baseline; border-radius: 4px; }
+.act-row:hover { background: var(--fg-soft); }
+.act-row .t { font: 400 11px var(--font-mono); color: var(--muted); }
+.act-row .who { font: 500 11px var(--font-mono); }
+.act-row .scope { font: 400 10.5px var(--font-mono); color: var(--muted); }
+.evt { font: 600 9px var(--font-mono); letter-spacing: .06em; padding: 1px 6px; border-radius: 4px; }
+.evt-merge { color: var(--c-done); background: color-mix(in oklch, var(--c-done) 13%, transparent); }
+.evt-review { color: var(--c-review); background: color-mix(in oklch, var(--c-review) 13%, transparent); }
+.evt-start { color: var(--c-run); background: var(--accent-soft); }
+.evt-block, .evt-fail { color: var(--c-block); background: color-mix(in oklch, var(--c-block) 13%, transparent); }
+.evt-test { color: var(--c-test); background: color-mix(in oklch, var(--c-test) 13%, transparent); }
+.evt-pr { color: var(--c-ready); background: color-mix(in oklch, var(--c-ready) 13%, transparent); }
+
+/* settings */
+.set-row { display: flex; align-items: center; gap: 14px; padding: 10px 2px; border-bottom: 1px solid color-mix(in oklch, var(--border) 55%, transparent); }
+.set-row .lbl { width: 260px; }
+.set-row .lbl b { display: block; font-size: 12.5px; font-weight: 500; }
+.set-row .lbl span { font-size: 11.5px; color: var(--muted); }
+.sw { width: 30px; height: 17px; border-radius: 999px; background: var(--border); position: relative; transition: background .15s; flex: none; }
+.sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: var(--fg); transition: left .15s; }
+.sw.on { background: var(--accent); }
+.sw.on::after { left: 15px; }
+
+/* ─── command palette ────────────────────────────────────────────────── */
+#pal-wrap { position: fixed; inset: 0; z-index: 60; display: none; background: oklch(0% 0 0 / .45); }
+#pal-wrap.open { display: block; }
+#pal {
+  width: 560px; max-width: 92vw; margin: 90px auto 0; background: var(--surface);
+  border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); overflow: hidden;
+}
+#pal input { width: 100%; background: none; border: 0; outline: none; padding: 13px 16px; font-size: 14px; border-bottom: 1px solid var(--border); }
+#pal-list { max-height: 380px; overflow: auto; padding: 6px; }
+.pal-group { font: 600 9.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 8px 10px 4px; }
+.pal-item { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; padding: 7px 10px; border-radius: var(--r); font-size: 13px; }
+.pal-item .mono { font-size: 11.5px; color: var(--muted); }
+.pal-item .hint { margin-left: auto; font: 400 10.5px var(--font-mono); color: var(--muted); }
+.pal-item.sel, .pal-item:hover { background: var(--fg-soft); }
+.pal-item .st { font-size: 9px; }
+
+/* toast */
+#toast { position: fixed; bottom: 18px; right: 18px; z-index: 70; background: var(--raised); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 9px 14px; font-size: 12.5px; box-shadow: var(--shadow); opacity: 0; transform: translateY(6px); transition: all .18s; pointer-events: none; }
+#toast.show { opacity: 1; transform: none; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ══ sidebar ══ -->
+  <aside id="sidebar" data-od-id="sidebar">
+    <div class="side-brand">
+      <span class="glyph">R</span><b>Rivet</b><span class="env">PROD</span>
+    </div>
+    <nav>
+      <button class="nav-item" data-view="projects"><svg viewBox="0 0 24 24"><path d="M3 7l4-3h4l2 3h8v13H3z"/></svg>Projects</button>
+      <button class="nav-item active" data-view="epics"><svg viewBox="0 0 24 24"><path d="M4 5h16M4 12h10M4 19h14"/></svg>Epics</button>
+      <button class="nav-item" data-view="tasks"><svg viewBox="0 0 24 24"><path d="M5 12l4 4L19 6"/></svg>Tasks<span class="count warn" id="nav-att">3</span></button>
+      <button class="nav-item" data-view="runners"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="6" rx="1.5"/><rect x="3" y="13" width="18" height="6" rx="1.5"/></svg>Runners<span class="count">4/5</span></button>
+      <button class="nav-item" data-view="activity"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Activity</button>
+      <button class="nav-item" data-view="usage"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-6M21 20H3"/></svg>Usage</button>
+      <button class="nav-item" data-view="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.2 2.2M16.9 16.9l2.2 2.2M19.1 4.9l-2.2 2.2M7.1 16.9l-2.2 2.2"/></svg>Settings</button>
+    </nav>
+    <div class="side-foot">
+      <div class="line"><span class="dot ok"></span>Connected</div>
+      <div class="line" style="margin-top:3px"><span style="width:7px"></span><span class="mono" style="font-size:10.5px">4 runners online</span></div>
+    </div>
+  </aside>
+
+  <!-- ══ main ══ -->
+  <div id="main">
+    <header id="topbar" data-od-id="topbar">
+      <div class="crumb" id="crumb"><span class="mono">AUTH</span><span class="sep">/</span><b>EPIC-42 · Implement Keycloak authentication</b></div>
+      <button class="kbtn" id="open-pal">Search or run a command… <span class="kbd">⌘K</span></button>
+    </header>
+
+    <div id="viewport">
+
+      <!-- ── EPIC DASHBOARD ── -->
+      <section class="view on" id="view-epic">
+        <div class="epic-head" data-od-id="epic-header" id="epic-head"></div>
+
+        <div class="attention" data-od-id="needs-attention">
+          <div class="attention-head"><h2>Needs attention</h2><span class="n">3</span><span style="margin-left:auto;font-size:10.5px;color:var(--muted)">all projects</span></div>
+          <div class="attention-row" id="attention-row"></div>
+        </div>
+
+        <div class="epic-body">
+          <div class="dag-panel" data-od-id="dag-panel">
+            <div class="dag-toolbar" data-od-id="dag-toolbar">
+              <div class="seg" id="mode-seg">
+                <button class="on" data-mode="graph">Graph</button>
+                <button data-mode="list">List</button>
+              </div>
+              <div class="seg" id="status-seg">
+                <button class="on" data-f="all">All</button>
+                <button data-f="active">Active</button>
+                <button data-f="review">Review</button>
+                <button data-f="blocked">Blocked</button>
+                <button data-f="done">Done</button>
+              </div>
+              <button class="tglbtn" id="tgl-hide-done">Hide completed</button>
+              <button class="tglbtn" id="tgl-cp">Critical path</button>
+              <div class="zoom">
+                <button class="btn sm icon" id="z-out" title="Zoom out">−</button>
+                <button class="btn sm icon" id="z-in" title="Zoom in">+</button>
+                <button class="btn sm" id="z-fit" title="Fit graph">Fit</button>
+              </div>
+            </div>
+            <div class="dag-canvas" id="dag-canvas" data-od-id="dag-canvas">
+              <div class="dag-world" id="dag-world"></div>
+            </div>
+            <div class="epic-list" id="epic-list" style="display:none"></div>
+          </div>
+
+          <aside class="rail" data-od-id="runners-rail">
+            <div class="rail-head"><h2>Runners</h2><span class="n" id="rail-count"></span><a data-view-link="runners">Manage</a></div>
+            <div class="rail-body" id="rail-body"></div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ── other views ── -->
+      <section class="view" id="view-runners" data-od-id="view-runners"><div class="page" id="runners-page"></div></section>
+      <section class="view" id="view-activity" data-od-id="view-activity"><div class="page" id="activity-page"></div></section>
+      <section class="view" id="view-usage" data-od-id="view-usage"><div class="page" id="usage-page"></div></section>
+      <section class="view" id="view-projects" data-od-id="view-projects"><div class="page" id="projects-page"></div></section>
+      <section class="view" id="view-epics" data-od-id="view-epics"><div class="page" id="epics-page"></div></section>
+      <section class="view" id="view-tasks" data-od-id="view-tasks"><div class="page" id="tasks-page"></div></section>
+      <section class="view" id="view-settings" data-od-id="view-settings"><div class="page" id="settings-page"></div></section>
+    </div>
+  </div>
+</div>
+
+<!-- drawer -->
+<aside id="drawer" data-od-id="detail-drawer"></aside>
+
+<!-- command palette -->
+<div id="pal-wrap" data-od-id="command-palette">
+  <div id="pal">
+    <input id="pal-input" placeholder="Type a command, TASK-142, EPIC-12, codex-01…" autocomplete="off" />
+    <div id="pal-list"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ════════ data model (demo) ════════ */
+const ST = {
+  queued:{l:'QUEUED'}, ready:{l:'READY'}, running:{l:'RUNNING'}, testing:{l:'TESTING'},
+  review:{l:'REVIEW'}, fixing:{l:'FIXING'}, blocked:{l:'BLOCKED'}, done:{l:'DONE'}, failed:{l:'FAILED'},
+  idle:{l:'IDLE'}, offline:{l:'OFFLINE'}
+};
+const STC = { queued:'--c-queue', ready:'--c-ready', running:'--c-run', testing:'--c-test',
+  review:'--c-review', fixing:'--c-fix', blocked:'--c-block', done:'--c-done', failed:'--c-fail' };
+
+const TASKS = [
+ {id:'TASK-118',t:'Auth package scaffolding',s:'done',ep:'EPIC-42',deps:[],r:'codex-01',m:'GPT-5.2',dur:'14:02',tok:'41k'},
+ {id:'TASK-119',t:'Keycloak dev realm',s:'done',ep:'EPIC-42',deps:['TASK-118'],r:'pi-01',m:'Kimi K2',dur:'09:14',tok:'18k'},
+ {id:'TASK-120',t:'OIDC discovery client',s:'done',ep:'EPIC-42',deps:['TASK-119'],r:'codex-01',m:'GPT-5.2',dur:'21:40',tok:'66k'},
+ {id:'TASK-121',t:'Keycloak configuration',s:'done',ep:'EPIC-42',deps:['TASK-119'],r:'claude-01',m:'Claude Opus',dur:'17:22',tok:'52k'},
+ {id:'TASK-122',t:'Token validation',s:'done',ep:'EPIC-42',deps:['TASK-120','TASK-121'],r:'claude-01',m:'Claude Opus',dur:'26:05',tok:'88k',pr:'#181'},
+ {id:'TASK-123',t:'User mapping',s:'running',ep:'EPIC-42',deps:['TASK-122'],r:'codex-01',m:'GPT-5.2',live:162,tok:'96k',br:'agent/task-123',att:'1 / 3'},
+ {id:'TASK-124',t:'Refresh token rotation',s:'review',ep:'EPIC-42',deps:['TASK-122'],r:'claude-01',m:'Claude Opus',dur:'08:42',tok:'184k',br:'agent/task-124',pr:'#183',att:'2 / 3'},
+ {id:'TASK-126',t:'Session middleware',s:'done',ep:'EPIC-42',deps:['TASK-122'],r:'claude-01',m:'Claude Opus',dur:'19:11',tok:'61k',pr:'#182'},
+ {id:'TASK-127',t:'Logout flow',s:'done',ep:'EPIC-42',deps:['TASK-126'],r:'pi-01',m:'Kimi K2',dur:'12:30',tok:'24k'},
+ {id:'TASK-128',t:'Role claims parsing',s:'done',ep:'EPIC-42',deps:['TASK-122'],r:'codex-01',m:'GPT-5.2',dur:'16:47',tok:'43k'},
+ {id:'TASK-129',t:'Admin role guard',s:'review',ep:'EPIC-42',deps:['TASK-128'],r:'—',m:'awaiting reviewer',dur:'11:03',tok:'38k',pr:'#185',att:'1 / 3'},
+ {id:'TASK-130',t:'Frontend auth guard',s:'ready',ep:'EPIC-42',deps:['TASK-126'],r:'—',m:'needs: frontend',dur:'—',tok:'—',wait:'No free runner with capability "frontend"'},
+ {id:'TASK-131',t:'Auth API e2e tests',s:'testing',ep:'EPIC-42',deps:['TASK-126','TASK-128'],r:'kimi-02',m:'Kimi K2',live:47,tok:'23k',br:'agent/task-131',att:'1 / 3'},
+ {id:'TASK-132',t:'Token cache layer',s:'done',ep:'EPIC-42',deps:['TASK-122'],r:'kimi-02',m:'Kimi K2',dur:'14:55',tok:'31k'},
+ {id:'TASK-133',t:'Audit log events',s:'done',ep:'EPIC-42',deps:['TASK-126'],r:'pi-01',m:'Kimi K2',dur:'10:18',tok:'19k'},
+ {id:'TASK-134',t:'Rate limiting',s:'done',ep:'EPIC-42',deps:['TASK-120'],r:'codex-01',m:'GPT-5.2',dur:'13:26',tok:'37k'},
+ {id:'TASK-135',t:'Config & runbook docs',s:'done',ep:'EPIC-42',deps:['TASK-121'],r:'kimi-02',m:'Kimi K2',dur:'08:01',tok:'12k'},
+ {id:'TASK-125',t:'Integration tests',s:'blocked',ep:'EPIC-42',deps:['TASK-123','TASK-124','TASK-131'],r:'—',m:'—',dur:'—',tok:'6k',
+   block:'Agent cannot determine expected behaviour when Keycloak is unavailable: fail-closed or serve cached sessions? Acceptance criteria are ambiguous.'},
+ /* EPIC-41 · CI pipeline migration (INFRA) — completed */
+ {id:'TASK-101',t:'Inventory Jenkins jobs',s:'done',ep:'EPIC-41',deps:[],r:'pi-01',m:'Kimi K2',dur:'11:20',tok:'21k'},
+ {id:'TASK-102',t:'GitHub Actions bootstrap',s:'done',ep:'EPIC-41',deps:['TASK-101'],r:'codex-01',m:'GPT-5.2',dur:'19:05',tok:'63k'},
+ {id:'TASK-103',t:'Service build matrix',s:'done',ep:'EPIC-41',deps:['TASK-102'],r:'codex-01',m:'GPT-5.2',dur:'24:18',tok:'82k'},
+ {id:'TASK-104',t:'Cache & artifact strategy',s:'done',ep:'EPIC-41',deps:['TASK-102'],r:'kimi-02',m:'Kimi K2',dur:'16:40',tok:'44k'},
+ {id:'TASK-105',t:'Test parallelization',s:'done',ep:'EPIC-41',deps:['TASK-103'],r:'claude-01',m:'Claude Opus',dur:'21:12',tok:'76k'},
+ {id:'TASK-106',t:'Docker layer caching',s:'done',ep:'EPIC-41',deps:['TASK-104'],r:'kimi-02',m:'Kimi K2',dur:'14:03',tok:'38k'},
+ {id:'TASK-107',t:'Staging deploy workflow',s:'done',ep:'EPIC-41',deps:['TASK-103','TASK-104'],r:'claude-01',m:'Claude Opus',dur:'26:50',tok:'94k'},
+ {id:'TASK-108',t:'Production deploy workflow',s:'done',ep:'EPIC-41',deps:['TASK-107'],r:'claude-01',m:'Claude Opus',dur:'18:22',tok:'57k',pr:'#164'},
+ {id:'TASK-109',t:'Secrets migration',s:'done',ep:'EPIC-41',deps:['TASK-102'],r:'codex-01',m:'GPT-5.2',dur:'13:44',tok:'35k'},
+ {id:'TASK-110',t:'Status checks & notifications',s:'done',ep:'EPIC-41',deps:['TASK-107'],r:'pi-01',m:'Kimi K2',dur:'09:31',tok:'17k'},
+ {id:'TASK-111',t:'Jenkins decommission',s:'done',ep:'EPIC-41',deps:['TASK-108','TASK-109'],r:'codex-01',m:'GPT-5.2',dur:'12:15',tok:'29k'},
+ {id:'TASK-112',t:'CI docs & runbook',s:'done',ep:'EPIC-41',deps:['TASK-111'],r:'kimi-02',m:'Kimi K2',dur:'07:48',tok:'11k'},
+ /* EPIC-43 · Payment provider webhooks (BILL) — in progress, runner-starved */
+ {id:'TASK-136',t:'Webhook ingestion endpoint',s:'done',ep:'EPIC-43',deps:[],r:'codex-01',m:'GPT-5.2',dur:'18:24',tok:'58k'},
+ {id:'TASK-137',t:'Provider config registry',s:'done',ep:'EPIC-43',deps:['TASK-136'],r:'kimi-02',m:'Kimi K2',dur:'12:10',tok:'27k'},
+ {id:'TASK-138',t:'Idempotency keys',s:'done',ep:'EPIC-43',deps:['TASK-136'],r:'codex-01',m:'GPT-5.2',dur:'22:10',tok:'74k'},
+ {id:'TASK-139',t:'Event schema validation',s:'done',ep:'EPIC-43',deps:['TASK-137'],r:'claude-01',m:'Claude Opus',dur:'15:02',tok:'49k'},
+ {id:'TASK-140',t:'Retry with backoff',s:'done',ep:'EPIC-43',deps:['TASK-138'],r:'codex-01',m:'GPT-5.2',dur:'17:44',tok:'52k'},
+ {id:'TASK-141',t:'Webhook signature verification',s:'failed',ep:'EPIC-43',deps:['TASK-137'],r:'claude-01',m:'Claude Opus',dur:'42:18',tok:'412k',att:'3 / 3',br:'agent/task-141',pr:'#204',fail:'Review failed 3 times — attempt limit reached.'},
+ {id:'TASK-142',t:'Stripe adapter',s:'ready',ep:'EPIC-43',deps:['TASK-137','TASK-139'],r:'—',m:'',dur:'—',tok:'—',wait:'All runners busy — queued for next free slot.'},
+ {id:'TASK-143',t:'PayPal adapter',s:'blocked',ep:'EPIC-43',deps:['TASK-137','TASK-141'],r:'—',m:'',dur:'—',tok:'—',block:'Dependency TASK-141 failed — signature verification is required by this adapter.'},
+ {id:'TASK-144',t:'Ledger posting',s:'done',ep:'EPIC-43',deps:['TASK-139','TASK-140'],r:'claude-01',m:'Claude Opus',dur:'24:31',tok:'91k',pr:'#207'},
+ {id:'TASK-145',t:'Webhook replay tool',s:'ready',ep:'EPIC-43',deps:['TASK-140'],r:'—',m:'',dur:'—',tok:'—',wait:'All runners busy — queued for next free slot.'},
+ {id:'TASK-146',t:'Provider health dashboard',s:'queued',ep:'EPIC-43',deps:['TASK-137'],r:'—',m:'',dur:'—',tok:'—'},
+ {id:'TASK-147',t:'Webhook e2e tests',s:'failed',ep:'EPIC-43',deps:['TASK-144'],r:'kimi-02',m:'Kimi K2',dur:'18:40',tok:'176k',att:'2 / 3',br:'agent/task-147',fail:'Integration environment unavailable.'},
+ {id:'TASK-148',t:'Dead-letter queue',s:'done',ep:'EPIC-43',deps:['TASK-140'],r:'kimi-02',m:'Kimi K2',dur:'13:19',tok:'33k'},
+ {id:'TASK-149',t:'Inbound rate limiting',s:'queued',ep:'EPIC-43',deps:['TASK-136'],r:'—',m:'',dur:'—',tok:'—'},
+ {id:'TASK-150',t:'Webhook docs & runbook',s:'queued',ep:'EPIC-43',deps:['TASK-137'],r:'—',m:'',dur:'—',tok:'—'},
+ {id:'TASK-151',t:'Load test · 1k events/s',s:'queued',ep:'EPIC-43',deps:['TASK-147','TASK-148'],r:'—',m:'',dur:'—',tok:'—'},
+ /* EPIC-44 · Audit log service (INFRA) — planned, not started */
+ {id:'TASK-152',t:'Audit event schema',s:'ready',ep:'EPIC-44',deps:[],r:'—',m:'',dur:'—',tok:'—',wait:'Epic not started — will schedule on start.'},
+ {id:'TASK-153',t:'Ingestion API',s:'queued',ep:'EPIC-44',deps:['TASK-152'],r:'—',m:'',dur:'—',tok:'—'},
+ {id:'TASK-154',t:'Storage & retention policy',s:'queued',ep:'EPIC-44',deps:['TASK-152'],r:'—',m:'',dur:'—',tok:'—'},
+ {id:'TASK-155',t:'Query API',s:'queued',ep:'EPIC-44',deps:['TASK-153','TASK-154'],r:'—',m:'',dur:'—',tok:'—'},
+ {id:'TASK-156',t:'SDK middleware emitters',s:'queued',ep:'EPIC-44',deps:['TASK-153'],r:'—',m:'',dur:'—',tok:'—'},
+ {id:'TASK-157',t:'SIEM export',s:'queued',ep:'EPIC-44',deps:['TASK-155'],r:'—',m:'',dur:'—',tok:'—'},
+ {id:'TASK-158',t:'Access control & PII redaction',s:'queued',ep:'EPIC-44',deps:['TASK-154'],r:'—',m:'',dur:'—',tok:'—'},
+ {id:'TASK-159',t:'Load & retention tests',s:'queued',ep:'EPIC-44',deps:['TASK-155','TASK-156'],r:'—',m:'',dur:'—',tok:'—'},
+ {id:'TASK-160',t:'Rollout plan & docs',s:'queued',ep:'EPIC-44',deps:['TASK-157','TASK-158'],r:'—',m:'',dur:'—',tok:'—'},
+];
+let curEpic = 'EPIC-42';
+const epTasks = () => TASKS.filter(x=>x.ep===curEpic);
+const Tk = id => TASKS.find(x=>x.id===id);
+
+const CRITERIA = {
+ 'TASK-124':[{ok:1,t:'Old refresh token becomes invalid'},{ok:1,t:'Concurrent refresh works correctly'},{ok:1,t:'Existing authentication tests pass'}],
+ 'TASK-123':[{ok:1,t:'Keycloak groups map to internal roles'},{ok:1,t:'Unknown groups are ignored with a warning'},{ok:0,t:'Nested group hierarchies resolve correctly'}],
+ 'TASK-125':[{ok:0,t:'Full login → refresh → logout flow passes against real Keycloak'},{ok:0,t:'Behaviour on Keycloak outage is covered'}],
+};
+const TIMELINE = {
+ 'TASK-124':[['10:42','Task started'],['10:43','Tests created'],['10:46','Implementation completed'],['10:47','Tests passed'],['10:48','PR #183 created'],['10:49','Review started'],['10:51','Review found 2 issues','warn'],['10:52','Fix started'],['10:55','Tests passed'],['10:56','Review started','now']],
+ 'TASK-123':[['12:12','Task started'],['12:14','Tests created'],['12:31','Implementation completed'],['12:32','3 tests failed','bad'],['12:33','Fixing implementation'],['12:38','27 tests passed'],['12:40','Running integration tests','now']],
+ 'TASK-125':[['11:58','Dependencies pending — queued'],['12:36','Runner pi-01 picked task'],['12:37','Blocked: ambiguous acceptance criteria','bad']],
+ 'TASK-141':[['09:12','Task started'],['09:40','Review found 6 issues','warn'],['10:05','Review found 4 issues','warn'],['10:38','Review found 3 issues','warn'],['10:39','Attempt limit reached — failed','bad']],
+};
+const LIVE_123 = [
+ ['ok','Reading repository','0:04'],['ok','Analyzing authentication package','0:31'],
+ ['ok','Creating tests','2:10'],['ok','Editing user_mapping.go','6:44'],
+ ['ok','Running tests','7:02'],['bad','3 tests failed','7:20'],
+ ['ok','Fixing implementation','9:15'],['ok','27 tests passed','11:48'],
+ ['now','Running auth integration tests','']];
+const RAW_123 =
+`<span class="cmd">$ go test ./internal/auth/... -run TestUserMapping -v</span>
+=== RUN  TestUserMapping_GroupsToRoles        <span class="ok">ok</span>
+--- FAIL: TestUserMapping_NestedGroups (0.02s)
+    user_mapping_test.go:114: expected role "billing-admin", got ""
+<span class="bad">FAIL    authsvc/internal/auth   2.41s</span>
+<span class="cmd">$ apply_patch internal/auth/user_mapping.go</span>
+<span class="cmd">$ go test ./internal/auth/...</span>
+<span class="ok">ok      authsvc/internal/auth   3.87s   (27 tests)</span>
+<span class="cmd">$ go test ./test/integration/auth -run TestKeycloak -v</span>
+=== RUN  TestKeycloakUserSync  … running`;
+
+const RUNNERS = [
+ {id:'codex-01',agent:'Codex',model:'GPT-5.2',host:'Mac Studio',s:'running',task:'TASK-123',live:162,rt:261,tok:'82k',ctx:62,act:'Running auth integration tests',caps:['coding','frontend','fast','large-context']},
+ {id:'claude-01',agent:'Claude Code',model:'Claude Opus',host:'MacBook Pro',s:'review',task:'TASK-124',live:76,rt:114,tok:'41k',ctx:48,act:'Reviewing PR #183',caps:['coding','review','large-context']},
+ {id:'kimi-02',agent:'Pi.dev',model:'Kimi K2',host:'Linux Worker 1',s:'testing',task:'TASK-131',live:47,rt:390,tok:'23k',ctx:31,act:'Running e2e suite: auth_api_test.go',caps:['coding','cheap','local']},
+ {id:'pi-01',agent:'Pi.dev',model:'Kimi K2',host:'Linux Worker 1',s:'idle',task:null,tok:'—',ctx:0,act:'Waiting for schedulable task',caps:['coding','cheap','local']},
+ {id:'opencode-01',agent:'OpenCode',model:'Qwen3-Coder',host:'Linux Worker 2',s:'offline',task:null,tok:'—',ctx:0,act:'Last seen 2h ago',caps:['coding','local','cheap']},
+];
+const Rn = id => RUNNERS.find(r=>r.id===id);
+
+const EPICS = [
+ {id:'EPIC-41',t:'CI pipeline migration',proj:'INFRA',s:'done',pct:100,stats:'6.8M tok · $88.20 · completed Aug 5',repo:'github.com/acme/infra-tools'},
+ {id:'EPIC-42',t:'Implement Keycloak authentication',proj:'AUTH',s:'running',pct:68,stats:'1.9M tok · $31.40 · elapsed 6h 12m',repo:'github.com/acme/authsvc'},
+ {id:'EPIC-43',t:'Payment provider webhooks',proj:'BILL',s:'running',pct:41,stats:'4.1M tok · $52.10 · elapsed 2d 4h',repo:'github.com/acme/billing-core'},
+ {id:'EPIC-44',t:'Audit log service',proj:'INFRA',s:'queued',pct:0,stats:'not started · 9 tasks planned',repo:'github.com/acme/infra-tools'},
+];
+const epicOf = id => EPICS.find(e=>e.id===id);
+const epicCounts = id => { const c={}; TASKS.forEach(t=>{ if(t.ep===id) c[t.s]=(c[t.s]||0)+1; }); return c; };
+const PROJECTS = [
+ {id:'AUTH',t:'Auth Platform',repo:'authsvc',epics:3,active:1},
+ {id:'BILL',t:'Billing',repo:'billing-core',epics:4,active:1},
+ {id:'INFRA',t:'Infrastructure',repo:'infra-tools',epics:5,active:0},
+];
+
+const ATTENTION = [
+ {task:'TASK-125',reason:'BLOCKED',warn:0,msg:'Agent cannot determine expected behaviour when Keycloak is unavailable.',act:'Open task'},
+ {task:'TASK-141',reason:'REVIEW LIMIT',warn:1,msg:'Review failed 3 times. Manual review required before retry.',act:'Inspect'},
+ {task:'TASK-147',reason:'TEST FAILED',warn:1,msg:'Integration environment unavailable.',act:'Inspect'},
+];
+
+const ACTIVITY = [
+ {t:'12:41',type:'merge',who:'system',task:'TASK-122',ep:'EPIC-42',proj:'AUTH',txt:'TASK-122 merged to main'},
+ {t:'12:40',type:'review',who:'claude-01',task:'TASK-126',ep:'EPIC-42',proj:'AUTH',txt:'Review passed — PR #182 approved'},
+ {t:'12:38',type:'start',who:'kimi-02',task:'TASK-131',ep:'EPIC-42',proj:'AUTH',txt:'Started e2e test run for TASK-131'},
+ {t:'12:37',type:'block',who:'pi-01',task:'TASK-125',ep:'EPIC-42',proj:'AUTH',txt:'TASK-125 blocked — ambiguous acceptance criteria'},
+ {t:'12:35',type:'test',who:'kimi-02',task:'TASK-132',ep:'EPIC-42',proj:'AUTH',txt:'Finished tests — 31 passed'},
+ {t:'12:32',type:'fail',who:'codex-01',task:'TASK-123',ep:'EPIC-42',proj:'AUTH',txt:'3 tests failed — fixing implementation'},
+ {t:'12:31',type:'pr',who:'claude-01',task:'TASK-129',ep:'EPIC-42',proj:'AUTH',txt:'PR #185 created, awaiting reviewer'},
+ {t:'12:12',type:'start',who:'codex-01',task:'TASK-123',ep:'EPIC-42',proj:'AUTH',txt:'Started TASK-123 · User mapping'},
+ {t:'11:58',type:'start',who:'scheduler',task:'TASK-125',ep:'EPIC-42',proj:'AUTH',txt:'TASK-125 queued — waiting on 3 dependencies'},
+ {t:'11:40',type:'merge',who:'system',task:'TASK-134',ep:'EPIC-42',proj:'AUTH',txt:'TASK-134 merged to main'},
+ {t:'11:22',type:'fail',who:'kimi-02',task:'TASK-147',ep:'EPIC-43',proj:'BILL',txt:'TASK-147 failed — integration environment unavailable'},
+ {t:'10:39',type:'fail',who:'claude-01',task:'TASK-141',ep:'EPIC-43',proj:'BILL',txt:'TASK-141 failed — review limit reached (3/3)'},
+ {t:'10:12',type:'review',who:'claude-01',task:'TASK-138',ep:'EPIC-43',proj:'BILL',txt:'Review passed — TASK-138 approved'},
+ {t:'09:47',type:'merge',who:'system',task:'TASK-133',ep:'EPIC-42',proj:'AUTH',txt:'TASK-133 merged to main'},
+];
+
+/* ════════ utils ════════ */
+const $ = s => document.querySelector(s);
+const el = (h) => { const d = document.createElement('div'); d.innerHTML = h.trim(); return d.firstChild; };
+const fmt = s => { s=Math.floor(s); const m=Math.floor(s/60), sec=s%60; return (m<60? String(m).padStart(2,'0') : Math.floor(m/60)+':'+String(m%60).padStart(2,'0')) + ':' + String(sec).padStart(2,'0'); };
+const stHtml = s => `<span class="st st-${s}">${ST[s].l}</span>`;
+let toastTimer;
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove('show'),2400); }
+
+/* ════════ navigation ════════ */
+const CRUMBS = {
+  runners:'<b>Runners</b>', activity:'<b>Activity</b>', usage:'<b>Usage</b>', epics:'<b>Epics</b>',
+  projects:'<b>Projects</b>', tasks:'<b>Tasks</b>', settings:'<b>Settings</b>'
+};
+function show(view){
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('on', v.id==='view-'+view));
+  document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',
+    b.dataset.view===view || (view==='epic' && b.dataset.view==='epics')));
+  if(view==='epic'){ const e=epicOf(curEpic);
+    $('#crumb').innerHTML = `<span class="mono">${e.proj}</span><span class="sep">/</span><span data-view-link="epics" style="cursor:pointer">Epics</span><span class="sep">/</span><b>${e.id} · ${e.t}</b>`;
+  } else $('#crumb').innerHTML = CRUMBS[view] || '<b>Rivet</b>';
+  try { localStorage.setItem('rivet.view', view); } catch(e){}
+}
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>show(b.dataset.view)));
+document.addEventListener('click', e=>{ const l=e.target.closest('[data-view-link]'); if(l) show(l.dataset.viewLink); });
+
+/* ════════ epic header ════════ */
+const SEG_ORDER = ['done','running','testing','fixing','review','ready','queued','blocked','failed'];
+function renderEpicHead(){
+  const e = epicOf(curEpic), c = epicCounts(curEpic);
+  const total = epTasks().length, done = c.done||0;
+  const segs = SEG_ORDER.filter(s=>c[s]).map(s=>`<i style="width:${c[s]/total*100}%;background:var(${STC[s]})"></i>`).join('');
+  const chips = SEG_ORDER.filter(s=>s!=='done'&&c[s]).map(s=>
+    `<span class="chip"><span class="dot" style="background:var(${STC[s]})"></span>${s[0].toUpperCase()+s.slice(1)} <span class="n">${c[s]}</span></span>`).join('');
+  const primary = e.s==='running' ? ['pause','Pause Epic'] : e.s==='done' ? ['archive','Archive Epic'] : ['start','Start Epic'];
+  $('#epic-head').innerHTML = `
+    <div class="epic-title-row">
+      <span class="epic-id">${e.id}</span>
+      <h1>${e.t}</h1>
+      ${stHtml(e.s)}
+      <div class="epic-actions">
+        <button class="btn" data-act="${primary[0]}">${primary[1]}</button>
+        <button class="btn" data-act="addtask">Add Task</button>
+        <button class="btn" data-act="repo">Open Repository</button>
+        <button class="btn icon" data-act="more">⋯</button>
+      </div>
+    </div>
+    <div class="epic-meta-row">
+      <span class="pct">${e.pct}%</span>
+      <div class="progress">${segs}</div>
+      <span class="sub">${done} / ${total} tasks completed · weighted by estimate</span>
+      <span class="sub mono">${e.stats}</span>
+      <div class="epic-chips">${chips}</div>
+    </div>`;
+}
+$('#epic-head').addEventListener('click', e=>{
+  const b=e.target.closest('[data-act]'); if(!b) return;
+  const ep=epicOf(curEpic);
+  const acts={pause:`${ep.id} paused — runners will finish current steps`,start:`${ep.id} started — scheduling ready tasks`,
+    archive:`${ep.id} archived`,addtask:'New task form (demo)',repo:`Opening ${ep.repo}…`,more:'Epic menu (demo)'};
+  toast(acts[b.dataset.act]);
+});
+function openEpic(id){
+  if(!epicOf(id)) return;
+  curEpic=id; renderEpicHead(); buildDag(); applyFilters(); renderEpicList();
+  show('epic'); requestAnimationFrame(fit);
+}
+
+/* ════════ needs attention ════════ */
+$('#attention-row').innerHTML = ATTENTION.map(a=>`
+  <button class="att-card ${a.warn?'warn':''}" data-open-task="${a.task}" data-od-id="attention-${a.task.toLowerCase()}">
+    <div class="att-top"><span class="tid mono">${a.task}</span><span class="att-reason">${a.reason}</span></div>
+    <div class="att-msg">${a.msg}</div>
+    <div class="att-act">${a.act} →</div>
+  </button>`).join('');
+
+/* ════════ DAG ════════ */
+const NW=204, NH=66, GX=64, GY=16, PAD=28;
+let pos={}, edges=[], worldW=0, worldH=0;
+const view = {x:0,y:0,k:1};
+const world = $('#dag-world'), canvas = $('#dag-canvas');
+const CPS = {
+  'EPIC-41':['TASK-101','TASK-102','TASK-103','TASK-107','TASK-108','TASK-111','TASK-112'],
+  'EPIC-42':['TASK-118','TASK-119','TASK-121','TASK-122','TASK-123','TASK-125'],
+  'EPIC-43':['TASK-136','TASK-138','TASK-140','TASK-144','TASK-147','TASK-151'],
+  'EPIC-44':['TASK-152','TASK-153','TASK-155','TASK-157','TASK-160'],
+};
+
+function buildDag(){
+  const ts = epTasks();
+  pos = {};
+  const memo={};
+  const L=t=> memo[t.id] ?? (memo[t.id] = t.deps.length ? 1+Math.max(...t.deps.map(d=>L(Tk(d)))) : 0);
+  ts.forEach(L);
+  const layers={};
+  ts.forEach(t=>{ (layers[memo[t.id]] ||= []).push(t); });
+  const maxCount = Math.max(...Object.values(layers).map(a=>a.length));
+  const maxH = maxCount*NH + (maxCount-1)*GY;
+  Object.entries(layers).forEach(([li,arr])=>{
+    const totalH = arr.length*NH + (arr.length-1)*GY;
+    arr.forEach((t,i)=>{ pos[t.id] = { x: PAD + li*(NW+GX), y: PAD + (maxH-totalH)/2 + i*(NH+GY) }; });
+  });
+  const nLayers = Math.max(...Object.keys(layers).map(Number))+1;
+  worldW = PAD*2 + nLayers*NW + (nLayers-1)*GX;
+  worldH = PAD*2 + maxH;
+  world.style.width = worldW+'px'; world.style.height = worldH+'px';
+
+  let paths='';
+  ts.forEach(t=> t.deps.forEach(d=>{
+    const a=pos[d], b=pos[t.id];
+    const x1=a.x+NW, y1=a.y+NH/2, x2=b.x, y2=b.y+NH/2, mx=(x1+x2)/2;
+    let cls='edge';
+    if(t.s==='blocked') cls+=' to-blocked';
+    else if(t.s==='done' && Tk(d).s==='done') cls+=' done-done';
+    paths += `<path class="${cls}" data-from="${d}" data-to="${t.id}" d="M${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}"/>`;
+  }));
+  world.innerHTML = `<svg width="${worldW}" height="${worldH}">${paths}</svg>` + ts.map(t=>{
+    const p=pos[t.id];
+    const dur = t.live!=null ? `<span class="n-dur" data-live-sec="${t.live}">${fmt(t.live)}</span>` : (t.dur||'—');
+    const who = t.r==='—' ? (t.m||'') : `${t.r} · ${t.m}`;
+    return `<button class="node" data-status="${t.s}" data-task="${t.id}" data-od-id="node-${t.id.toLowerCase()}" style="left:${p.x}px;top:${p.y}px">
+      <span class="n-top"><span class="n-id">${t.id}</span>${stHtml(t.s)}</span>
+      <span class="n-title">${t.t}</span>
+      <span class="n-meta"><span class="who">${who}</span>${dur}</span></button>`;
+  }).join('');
+}
+function applyView(){ world.style.transform = `translate(${view.x}px,${view.y}px) scale(${view.k})`; }
+function fit(){
+  const r = canvas.getBoundingClientRect();
+  view.k = Math.min((r.width-24)/worldW, (r.height-24)/worldH, 1.15);
+  view.x = (r.width - worldW*view.k)/2; view.y = (r.height - worldH*view.k)/2;
+  applyView();
+}
+function zoomAt(f, px, py){
+  const k2 = Math.min(2.2, Math.max(0.3, view.k*f)); f = k2/view.k;
+  view.x = px-(px-view.x)*f; view.y = py-(py-view.y)*f; view.k = k2; applyView();
+}
+canvas.addEventListener('wheel', e=>{
+  e.preventDefault();
+  const r=canvas.getBoundingClientRect();
+  zoomAt(Math.exp(-e.deltaY*0.0016), e.clientX-r.left, e.clientY-r.top);
+},{passive:false});
+let drag=null;
+canvas.addEventListener('pointerdown', e=>{ drag={x:e.clientX,y:e.clientY,vx:view.x,vy:view.y,moved:false}; canvas.classList.add('panning'); canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener('pointermove', e=>{ if(!drag) return;
+  const dx=e.clientX-drag.x, dy=e.clientY-drag.y;
+  if(Math.abs(dx)+Math.abs(dy)>4) drag.moved=true;
+  view.x=drag.vx+dx; view.y=drag.vy+dy; applyView(); });
+canvas.addEventListener('pointerup', e=>{
+  const wasDrag = drag && drag.moved; drag=null; canvas.classList.remove('panning');
+  if(!wasDrag){ const n=e.target.closest('.node'); if(n) openTask(n.dataset.task); }
+});
+$('#z-in').onclick = ()=>{ const r=canvas.getBoundingClientRect(); zoomAt(1.25, r.width/2, r.height/2); };
+$('#z-out').onclick = ()=>{ const r=canvas.getBoundingClientRect(); zoomAt(0.8, r.width/2, r.height/2); };
+$('#z-fit').onclick = fit;
+
+/* dag filters */
+const dagState = { f:'all', hideDone:false, cp:false };
+const FMATCH = { all:()=>true, active:t=>['running','testing','fixing','ready','queued'].includes(t.s),
+  review:t=>t.s==='review', blocked:t=>['blocked','failed'].includes(t.s), done:t=>t.s==='done' };
+function applyFilters(){
+  const vis = {}, cp = CPS[curEpic] || [];
+  epTasks().forEach(t=>{ vis[t.id] = FMATCH[dagState.f](t) && !(dagState.hideDone && t.s==='done'); });
+  world.querySelectorAll('.node').forEach(n=>{
+    n.classList.toggle('dim', !vis[n.dataset.task]);
+    n.classList.toggle('cp', dagState.cp && cp.includes(n.dataset.task));
+  });
+  world.querySelectorAll('.edge').forEach(p=>{
+    p.classList.toggle('dim', !(vis[p.dataset.from] && vis[p.dataset.to]));
+    const i = cp.indexOf(p.dataset.from);
+    p.classList.toggle('cp-edge', dagState.cp && i>-1 && cp[i+1]===p.dataset.to);
+  });
+}
+$('#status-seg').addEventListener('click', e=>{ const b=e.target.closest('[data-f]'); if(!b) return;
+  dagState.f=b.dataset.f;
+  $('#status-seg').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
+  applyFilters(); });
+$('#tgl-hide-done').onclick = function(){ dagState.hideDone=!dagState.hideDone; this.classList.toggle('on'); applyFilters(); };
+$('#tgl-cp').onclick = function(){ dagState.cp=!dagState.cp; this.classList.toggle('on'); applyFilters(); };
+$('#mode-seg').addEventListener('click', e=>{ const b=e.target.closest('[data-mode]'); if(!b) return;
+  $('#mode-seg').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
+  const g = b.dataset.mode==='graph';
+  canvas.style.display = g?'':'none'; $('#epic-list').style.display = g?'none':'';
+  if(!g) renderEpicList(); });
+
+function renderEpicList(){
+  $('#epic-list').innerHTML = `<table class="tbl"><thead><tr>
+    <th>Task</th><th>Title</th><th>Status</th><th>Runner</th><th>Model</th><th class="num">Duration</th><th class="num">Tokens</th></tr></thead><tbody>` +
+    epTasks().map(t=>`<tr data-open-task="${t.id}"><td class="id">${t.id}</td><td>${t.t}</td><td>${stHtml(t.s)}</td>
+      <td class="mono" style="font-size:11.5px">${t.r}</td><td class="mono muted" style="font-size:11.5px">${t.m}</td>
+      <td class="num">${t.live!=null?`<span data-live-sec="${t.live}">${fmt(t.live)}</span>`:(t.dur||'—')}</td><td class="num">${t.tok||'—'}</td></tr>`).join('') + '</tbody></table>';
+}
+
+/* ════════ runners rail ════════ */
+function renderRail(){
+  const online = RUNNERS.filter(r=>r.s!=='offline');
+  $('#rail-count').textContent = online.length + ' online';
+  $('#rail-body').innerHTML = online.map(r=>{
+    const task = r.task ? `<div class="rc-task"><span class="tid">${r.task}</span><span class="dur" data-live-sec="${r.live}">${fmt(r.live)}</span></div>` : '';
+    const ctx = r.s==='idle' ? '' :
+      `<div class="rc-foot"><span>ctx</span><div class="ctx-bar"><i class="${r.ctx>60?'hot':''}" style="width:${r.ctx}%"></i></div><span>${r.ctx}%</span><span style="margin-left:6px">${r.tok} tok</span></div>`;
+    return `<button class="runner-card" data-open-runner="${r.id}" data-od-id="rail-${r.id}">
+      <div class="rc-top"><span class="name">${r.id}</span><span class="muted" style="font-size:10.5px">${r.model}</span>${stHtml(r.s)}</div>
+      ${task}<div class="rc-action">${r.act}</div>${ctx}</button>`;
+  }).join('');
+}
+
+/* ════════ drawer ════════ */
+const drawer = $('#drawer');
+function closeDrawer(){ drawer.classList.remove('open'); world.querySelectorAll('.node.sel').forEach(n=>n.classList.remove('sel')); }
+function drawerShell(head, body){
+  drawer.innerHTML = `<div class="dw-head">${head}</div><div class="dw-body">${body}</div>`;
+  drawer.classList.add('open');
+  drawer.querySelector('.close').onclick = closeDrawer;
+}
+function kv(k,v){ return v ? `<div class="kv"><span>${k}</span><b>${v}</b></div>` : ''; }
+
+function openTask(id){
+  const t = Tk(id); if(!t) return;
+  world.querySelectorAll('.node').forEach(n=>n.classList.toggle('sel', n.dataset.task===id));
+  const crit = CRITERIA[id], tl = TIMELINE[id];
+  const dur = t.live!=null ? `<span data-live-sec="${t.live}">${fmt(t.live)}</span>` : t.dur;
+  const head = `
+    <div class="dw-top"><span class="tid">${t.id}</span>${stHtml(t.s)}<button class="close" title="Close (Esc)">✕</button></div>
+    <h2>${t.t}</h2>
+    <div class="dw-actions">
+      ${t.pr?`<button class="btn sm" data-toast="Opening PR ${t.pr}…">Open PR ${t.pr}</button>`:''}
+      ${['blocked','failed'].includes(t.s)?`<button class="btn sm primary" data-toast="${t.id}: answer requested from you (demo)">Answer / Unblock</button>`:''}
+      ${['failed','blocked'].includes(t.s)?`<button class="btn sm" data-toast="${t.id} re-queued">Retry</button>`:''}
+      <button class="btn sm" data-toast="Reassign dialog (demo)">Reassign</button>
+      <button class="btn sm" data-toast="Opening branch ${t.br||''}">Logs</button>
+    </div>`;
+  let body = `<div class="dw-sec"><div class="meta-grid">
+      ${kv('Runner', t.r!=='—'?t.r:null)}${kv('Model', t.m!=='—'?t.m:null)}
+      ${kv('Branch', t.br)}${kv('PR', t.pr)}${kv('Attempt', t.att)}
+      ${kv('Duration', dur!=='—'?dur:null)}${kv('Tokens', t.tok!=='—'?t.tok:null)}${kv('Epic', t.ep)}
+    </div></div>`;
+  if(t.block) body += `<div class="dw-sec"><h3>Blocked — needs your decision</h3>
+    <div class="att-msg" style="-webkit-line-clamp:6;color:var(--fg);font-size:12.5px">${t.block}</div></div>`;
+  if(t.fail) body += `<div class="dw-sec"><h3>Failure</h3><div style="font-size:12.5px">${t.fail}</div></div>`;
+  if(t.wait) body += `<div class="dw-sec"><h3>Waiting</h3><div style="font-size:12.5px">${t.wait}</div></div>`;
+  if(crit) body += `<div class="dw-sec"><h3>Acceptance criteria</h3>` +
+    crit.map(c=>`<div class="crit ${c.ok?'ok':'pend'}"><span class="m">${c.ok?'✓':'○'}</span>${c.t}</div>`).join('') + '</div>';
+  if(['running','testing','fixing'].includes(t.s) && id==='TASK-123'){
+    body += `<div class="dw-sec"><h3>Live · structured events</h3><div class="live">` +
+      LIVE_123.map(([m,txt,d])=>`<div class="live-row ${m}"><span class="m">${m==='ok'?'✓':m==='bad'?'✕':'●'}</span>${txt}<span class="d">${d}</span></div>`).join('') +
+      `</div><button class="btn sm" id="raw-tgl" style="margin-top:10px">View raw output</button>
+      <div class="term" id="raw-out" style="display:none">${RAW_123}</div></div>`;
+  }
+  if(tl) body += `<div class="dw-sec"><h3>Timeline</h3><div class="tl">` +
+    tl.map(([tm,txt,cls])=>`<div class="tl-row ${cls||''}"><span class="t">${tm}</span><span>${txt}</span></div>`).join('') + '</div></div>';
+  drawerShell(head, body);
+  const rt = $('#raw-tgl');
+  if(rt) rt.onclick = ()=>{ const o=$('#raw-out'); const off=o.style.display==='none'; o.style.display=off?'':'none'; rt.textContent=off?'Hide raw output':'View raw output'; };
+}
+
+function openRunner(id){
+  const r = Rn(id); if(!r) return;
+  const t = r.task ? Tk(r.task) : null;
+  const head = `
+    <div class="dw-top"><span class="tid">${r.id}</span>${stHtml(r.s)}<button class="close" title="Close (Esc)">✕</button></div>
+    <h2>${r.agent} · ${r.model}</h2>
+    <div class="dw-actions">
+      <button class="btn sm" data-toast="${r.id}: pause requested">Pause</button>
+      <button class="btn sm" data-toast="${r.id}: drain — will stop after current task">Drain</button>
+      <button class="btn sm" data-toast="${r.id}: restart requested">Restart</button>
+    </div>`;
+  let body = `<div class="dw-sec"><div class="meta-grid">
+      ${kv('Agent', r.agent)}${kv('Model', r.model)}${kv('Host', r.host)}
+      ${kv('Task', r.task)}${kv('Tokens (session)', r.tok!=='—'?r.tok:null)}
+      ${kv('Runtime', r.rt?`<span data-live-sec="${r.rt}">${fmt(r.rt)}</span>`:null)}
+    </div></div>`;
+  if(r.s!=='offline' && r.s!=='idle') body += `<div class="dw-sec"><h3>Context usage</h3>
+    <div class="rc-foot" style="font-size:11px"><div class="ctx-bar" style="height:5px"><i class="${r.ctx>60?'hot':''}" style="width:${r.ctx}%"></i></div><span class="mono">${r.ctx}%</span></div></div>`;
+  body += `<div class="dw-sec"><h3>Current action</h3><div style="font-size:12.5px" class="mono">${r.act}</div></div>`;
+  body += `<div class="dw-sec"><h3>Capabilities</h3><div class="tags">${r.caps.map(c=>`<span class="tag">${c}</span>`).join('')}</div>
+    <div class="muted" style="font-size:11px;margin-top:8px">Used by the scheduler to match tasks to runners.</div></div>`;
+  if(t) body += `<div class="dw-sec"><h3>Assigned task</h3>
+    <button class="btn sm" data-open-task="${t.id}">${t.id} · ${t.t} →</button></div>`;
+  drawerShell(head, body);
+}
+
+document.addEventListener('click', e=>{
+  const ot = e.target.closest('[data-open-task]'); if(ot){ openTask(ot.dataset.openTask); return; }
+  const or = e.target.closest('[data-open-runner]'); if(or){ openRunner(or.dataset.openRunner); return; }
+  const oe = e.target.closest('[data-open-epic]'); if(oe){ openEpic(oe.dataset.openEpic); return; }
+  const op = e.target.closest('[data-open-proj]'); if(op){ epicsProj=op.dataset.openProj; renderEpics(); show('epics'); return; }
+  const tb = e.target.closest('[data-toast]'); if(tb) toast(tb.dataset.toast);
+});
+
+/* ════════ runners page ════════ */
+function renderRunnersPage(){
+  $('#runners-page').innerHTML = `
+    <div class="page-head"><h1>Runners</h1><span class="sub">4 online · 1 offline</span>
+      <div class="right"><button class="btn" data-toast="Register runner (demo)">Add Runner</button></div></div>
+    <table class="tbl" data-od-id="runners-table"><thead><tr>
+      <th>Runner</th><th>Agent</th><th>Model</th><th>Host</th><th>Status</th><th>Task</th><th>Capabilities</th><th class="num">Tokens</th><th class="num">Runtime</th></tr></thead><tbody>` +
+    RUNNERS.map(r=>`<tr data-open-runner="${r.id}">
+      <td class="id">${r.id}</td><td>${r.agent}</td><td class="mono muted" style="font-size:11.5px">${r.model}</td>
+      <td class="muted">${r.host}</td><td>${stHtml(r.s)}</td>
+      <td class="mono" style="font-size:11.5px">${r.task||'—'}</td>
+      <td><div class="tags">${r.caps.slice(0,3).map(c=>`<span class="tag">${c}</span>`).join('')}${r.caps.length>3?`<span class="tag">+${r.caps.length-3}</span>`:''}</div></td>
+      <td class="num">${r.tok}</td><td class="num">${r.rt?`<span data-live-sec="${r.rt}">${fmt(r.rt)}</span>`:'—'}</td></tr>`).join('') +
+    `</tbody></table>`;
+}
+
+/* ════════ activity page ════════ */
+const actState = { proj:'all', ep:'all', runner:'all', type:'all', q:'' };
+function renderActivity(){
+  const opts = (arr,cur)=>['all',...arr].map(v=>`<option value="${v}" ${v===cur?'selected':''}>${v==='all'?'All':v}</option>`).join('');
+  $('#activity-page').innerHTML = `
+    <div class="page-head"><h1>Activity</h1><span class="sub">unified event stream</span></div>
+    <div class="filters">
+      <select class="sel" data-f="proj">${opts(PROJECTS.map(p=>p.id), actState.proj)}</select>
+      <select class="sel" data-f="ep">${opts(EPICS.map(e=>e.id), actState.ep)}</select>
+      <select class="sel" data-f="runner">${opts(RUNNERS.map(r=>r.id).concat('system','scheduler'), actState.runner)}</select>
+      <select class="sel" data-f="type">${opts(['merge','review','start','block','test','fail','pr'], actState.type)}</select>
+      <input class="search" data-f="q" placeholder="Filter by task…" value="${actState.q}" />
+    </div>
+    <div data-od-id="activity-stream">` +
+    ACTIVITY.filter(a=>
+      (actState.proj==='all'||a.proj===actState.proj) && (actState.ep==='all'||a.ep===actState.ep) &&
+      (actState.runner==='all'||a.who===actState.runner) && (actState.type==='all'||a.type===actState.type) &&
+      (!actState.q || a.task.toLowerCase().includes(actState.q.toLowerCase()) || a.txt.toLowerCase().includes(actState.q.toLowerCase()))
+    ).map(a=>`<div class="act-row" data-open-task="${a.task}">
+      <span class="t">${a.t}</span>
+      <span><span class="evt evt-${a.type}">${a.type.toUpperCase()}</span> <span class="who">${a.who}</span></span>
+      <span>${a.txt}</span>
+      <span class="scope">${a.proj} · ${a.ep}</span></div>`).join('') + '</div>';
+  $('#activity-page').querySelectorAll('[data-f]').forEach(c=>{
+    c.addEventListener(c.tagName==='INPUT'?'input':'change', ()=>{ actState[c.dataset.f]=c.value; renderActivity(); });
+  });
+}
+
+/* ════════ usage page ════════ */
+const USAGE_BD = {
+  model:[['Claude Opus','4.6M',39],['GPT-5.2','3.4M',29],['Kimi K2','2.1M',18],['Qwen3-Coder','1.7M',14]],
+  agent:[['Claude Code','4.6M',39],['Codex','3.4M',29],['Pi.dev','2.1M',18],['OpenCode','1.7M',14]],
+  project:[['AUTH','6.2M',53],['BILL','3.1M',26],['INFRA','2.5M',21]],
+  task:[['TASK-141','412k',34],['TASK-124','184k',15],['TASK-147','176k',15],['TASK-123','96k',8],['TASK-122','88k',7]],
+};
+let usageTab='model';
+function renderUsage(){
+  const bd = USAGE_BD[usageTab];
+  $('#usage-page').innerHTML = `
+    <div class="page-head"><h1>Usage</h1><span class="sub">tokens & cost · last 7 days</span></div>
+    <div class="stat-strip" data-od-id="usage-stats">
+      <div class="mini-stat"><div class="v">2.4M</div><div class="l">Tokens today</div></div>
+      <div class="mini-stat"><div class="v">11.8M</div><div class="l">Tokens this week</div></div>
+      <div class="mini-stat"><div class="v">$184<em>/wk</em></div><div class="l">Cost ($38.20 today)</div></div>
+      <div class="mini-stat"><div class="v">34</div><div class="l">Tasks completed</div></div>
+      <div class="mini-stat"><div class="v">347k</div><div class="l">Avg tokens / task</div></div>
+      <div class="mini-stat hl"><div class="v">291k</div><div class="l">Tokens / successful task</div></div>
+    </div>
+    <div class="two-col">
+      <div class="panel" data-od-id="usage-breakdown">
+        <div style="display:flex;align-items:center;margin-bottom:10px"><h3 style="margin:0">Breakdown</h3>
+          <div class="seg" style="margin-left:auto" id="usage-seg">${['model','agent','project','task'].map(k=>`<button class="${k===usageTab?'on':''}" data-u="${k}">${k}</button>`).join('')}</div></div>
+        <table class="tbl"><tbody>` +
+        bd.map(([n,v,p])=>`<tr style="cursor:default"><td class="${usageTab==='task'?'id':''}" style="width:130px">${n}</td>
+          <td><div class="bar-cell"><div class="bar"><i style="width:${p}%;background:var(--accent)"></i></div><span class="mono muted" style="font-size:11px">${p}%</span></div></td>
+          <td class="num" style="width:70px">${v}</td></tr>`).join('') +
+        `</tbody></table></div>
+      <div class="panel" data-od-id="usage-waste">
+        <h3>High-spend failures · needs review</h3>
+        <table class="tbl"><thead><tr><th>Task</th><th>Outcome</th><th class="num">Tokens</th><th class="num">Cost</th></tr></thead><tbody>` +
+        [['TASK-141','failed','412k','$6.80'],['TASK-147','failed','176k','$1.10'],['TASK-125','blocked','6k','$0.09']]
+          .map(([id,s,tok,c])=>`<tr data-open-task="${id}"><td class="id">${id}</td><td>${stHtml(s)}</td><td class="num">${tok}</td><td class="num">${c}</td></tr>`).join('') +
+        `</tbody></table>
+        <div class="muted" style="font-size:11px;margin-top:10px">16% of this week's tokens went to tasks that did not complete.</div>
+      </div>
+    </div>`;
+  $('#usage-seg').addEventListener('click', e=>{ const b=e.target.closest('[data-u]'); if(b){ usageTab=b.dataset.u; renderUsage(); } });
+}
+
+/* ════════ projects / epics / tasks / settings ════════ */
+function renderProjects(){
+  $('#projects-page').innerHTML = `
+    <div class="page-head"><h1>Projects</h1><span class="sub">${PROJECTS.length} repositories under orchestration</span>
+      <div class="right"><button class="btn" data-toast="New project (demo)">New Project</button></div></div>
+    <table class="tbl" data-od-id="projects-table"><thead><tr><th>Key</th><th>Name</th><th>Repository</th><th class="num">Epics</th><th class="num">Active</th><th class="num">Attention</th></tr></thead><tbody>` +
+    PROJECTS.map(p=>{
+      const eps = EPICS.filter(e=>e.proj===p.id);
+      const att = ATTENTION.filter(a=>{ const t=Tk(a.task); return t && epicOf(t.ep)?.proj===p.id; }).length;
+      return `<tr data-open-proj="${p.id}"><td class="id">${p.id}</td><td>${p.t}</td>
+      <td class="mono muted" style="font-size:11.5px">${p.repo}</td><td class="num">${eps.length}</td>
+      <td class="num">${eps.filter(e=>e.s==='running').length}</td>
+      <td class="num" style="color:var(${att?'--c-block':'--muted'})">${att||'—'}</td></tr>`; }).join('') +
+    `</tbody></table>
+    <div class="muted" style="font-size:11.5px;margin-top:10px">Click a project to see its epics.</div>`;
+}
+let epicsProj='all';
+function renderEpics(){
+  const rows = EPICS.filter(e=>epicsProj==='all'||e.proj===epicsProj);
+  $('#epics-page').innerHTML = `
+    <div class="page-head"><h1>Epics</h1><span class="sub">${rows.length} of ${EPICS.length}</span>
+      <div class="right"><button class="btn primary" data-toast="New epic form (demo)">Create Epic</button></div></div>
+    <div class="filters">${['all',...PROJECTS.map(p=>p.id)].map(v=>
+      `<button class="tglbtn ${v===epicsProj?'on':''}" data-ef="${v}">${v==='all'?'All projects':v}</button>`).join('')}</div>
+    <table class="tbl" data-od-id="epics-table"><thead><tr>
+      <th>Epic</th><th>Title</th><th>Project</th><th>Status</th><th style="width:220px">Progress</th><th class="num">Tasks</th><th class="num">Attention</th><th>Usage</th></tr></thead><tbody>` +
+    rows.map(e=>{
+      const c = epicCounts(e.id), total = Object.values(c).reduce((a,b)=>a+b,0), done = c.done||0;
+      const att = ATTENTION.filter(a=>Tk(a.task)?.ep===e.id).length;
+      const segs = SEG_ORDER.filter(s=>c[s]).map(s=>`<i style="width:${c[s]/total*100}%;background:var(${STC[s]})"></i>`).join('');
+      return `<tr data-open-epic="${e.id}">
+      <td class="id">${e.id}</td><td>${e.t}</td><td class="mono muted" style="font-size:11.5px">${e.proj}</td><td>${stHtml(e.s)}</td>
+      <td><div class="bar-cell"><div class="bar" style="height:6px;display:flex;overflow:hidden">${segs}</div><span class="mono muted" style="font-size:11px">${e.pct}%</span></div></td>
+      <td class="num">${done} / ${total}</td>
+      <td class="num" style="color:var(${att?'--c-block':'--muted'})">${att||'—'}</td>
+      <td class="mono muted" style="font-size:10.5px;white-space:nowrap">${e.stats}</td></tr>`; }).join('') + '</tbody></table>';
+  $('#epics-page').querySelectorAll('[data-ef]').forEach(b=>b.addEventListener('click',()=>{ epicsProj=b.dataset.ef; renderEpics(); }));
+}
+let taskFilter='all', taskEpic='all';
+function renderTasks(){
+  const rows = TASKS.filter(t=>(taskFilter==='all'||t.s===taskFilter)&&(taskEpic==='all'||t.ep===taskEpic));
+  $('#tasks-page').innerHTML = `
+    <div class="page-head"><h1>Tasks</h1><span class="sub">${rows.length} of ${TASKS.length} across all epics</span></div>
+    <div class="filters">
+      <select class="sel" id="task-epic-sel">${['all',...EPICS.map(e=>e.id)].map(v=>
+        `<option value="${v}" ${v===taskEpic?'selected':''}>${v==='all'?'All epics':v}</option>`).join('')}</select>
+      ${['all','queued','running','testing','review','ready','blocked','failed','done'].map(s=>
+      `<button class="tglbtn ${s===taskFilter?'on':''}" data-tf="${s}">${s==='all'?'All':ST[s].l}</button>`).join('')}</div>
+    <table class="tbl"><thead><tr><th>Task</th><th>Title</th><th>Epic</th><th>Status</th><th>Runner</th><th class="num">Attempt</th><th class="num">Duration</th><th class="num">Tokens</th></tr></thead><tbody>` +
+    rows.map(t=>`<tr data-open-task="${t.id}"><td class="id">${t.id}</td><td>${t.t}</td>
+      <td class="mono muted" style="font-size:11.5px">${t.ep}</td><td>${stHtml(t.s)}</td>
+      <td class="mono" style="font-size:11.5px">${t.r}</td><td class="num">${t.att||'—'}</td>
+      <td class="num">${t.live!=null?`<span data-live-sec="${t.live}">${fmt(t.live)}</span>`:(t.dur||'—')}</td><td class="num">${t.tok||'—'}</td></tr>`).join('') + '</tbody></table>';
+  $('#tasks-page').querySelectorAll('[data-tf]').forEach(b=>b.addEventListener('click',()=>{ taskFilter=b.dataset.tf; renderTasks(); }));
+  $('#task-epic-sel').addEventListener('change', e=>{ taskEpic=e.target.value; renderTasks(); });
+}
+function renderSettings(){
+  $('#settings-page').innerHTML = `
+    <div class="page-head"><h1>Settings</h1><span class="sub">orchestrator policy</span></div>
+    <div class="panel" style="max-width:640px">
+      <div class="set-row"><div class="lbl"><b>Attempt limit</b><span>Auto-fail a task after N coding attempts</span></div><input class="search" style="width:64px" value="3" /></div>
+      <div class="set-row"><div class="lbl"><b>Review limit</b><span>Escalate to a human after N failed reviews</span></div><input class="search" style="width:64px" value="3" /></div>
+      <div class="set-row"><div class="lbl"><b>Daily token budget</b><span>Pause scheduling when exceeded</span></div><input class="search" style="width:96px" value="5M" /></div>
+      <div class="set-row"><div class="lbl"><b>Escalate blocked tasks</b><span>Add to Needs Attention immediately</span></div><button class="sw on" data-sw></button></div>
+      <div class="set-row"><div class="lbl"><b>Auto-merge on green review</b><span>Merge PR when review + tests pass</span></div><button class="sw on" data-sw></button></div>
+      <div class="set-row" style="border:0"><div class="lbl"><b>Notify on attention events</b><span>Desktop notification for blocked / failed</span></div><button class="sw" data-sw></button></div>
+    </div>`;
+  $('#settings-page').querySelectorAll('[data-sw]').forEach(s=>s.addEventListener('click',()=>s.classList.toggle('on')));
+}
+
+/* ════════ command palette ════════ */
+const COMMANDS = [
+ {l:'Create Epic',hint:'⇧⌘E',run:()=>toast('New epic form (demo)')},
+ {l:'Create Task',hint:'⇧⌘T',run:()=>toast('New task form (demo)')},
+ {l:'Pause Epic — EPIC-42',run:()=>toast('EPIC-42 paused')},
+ {l:'Resume Epic — EPIC-42',run:()=>toast('EPIC-42 resumed')},
+ {l:'Retry Task…',run:()=>toast('Pick a failed task to retry')},
+ {l:'Assign Runner…',run:()=>toast('Runner assignment (demo)')},
+ {l:'Open Logs — TASK-123',run:()=>{ show('epic'); openTask('TASK-123'); }},
+ {l:'Open Pull Request — #183',run:()=>toast('Opening PR #183…')},
+ {l:'Go to Projects',run:()=>show('projects')},
+ {l:'Go to Epics',run:()=>show('epics')},
+ {l:'Go to Runners',run:()=>show('runners')},
+ {l:'Go to Activity',run:()=>show('activity')},
+ {l:'Go to Usage',run:()=>show('usage')},
+];
+const palWrap=$('#pal-wrap'), palInput=$('#pal-input'), palList=$('#pal-list');
+let palIdx=0, palItems=[];
+function palOpen(){ palWrap.classList.add('open'); palInput.value=''; palRender(''); palInput.focus(); }
+function palClose(){ palWrap.classList.remove('open'); }
+function palRender(q){
+  q=q.trim().toLowerCase();
+  const match = s => !q || s.toLowerCase().includes(q);
+  palItems=[];
+  let html='';
+  const cmds = COMMANDS.filter(c=>match(c.l));
+  if(cmds.length){ html+='<div class="pal-group">Commands</div>'+cmds.map(c=>{ palItems.push({run:c.run});
+    return `<div class="pal-item" data-pi="${palItems.length-1}">${c.l}${c.hint?`<span class="hint">${c.hint}</span>`:''}</div>`; }).join(''); }
+  const ts = TASKS.filter(t=>match(t.id)||match(t.t)).slice(0,6);
+  if(ts.length){ html+='<div class="pal-group">Tasks</div>'+ts.map(t=>{ palItems.push({run:()=>{ show('epic'); openTask(t.id); }});
+    return `<div class="pal-item" data-pi="${palItems.length-1}"><span class="mono">${t.id}</span>${t.t}<span class="hint">${stHtml(t.s)}</span></div>`; }).join(''); }
+  const rs = RUNNERS.filter(r=>match(r.id)||match(r.agent)).slice(0,4);
+  if(rs.length){ html+='<div class="pal-group">Runners</div>'+rs.map(r=>{ palItems.push({run:()=>{ show('runners'); openRunner(r.id); }});
+    return `<div class="pal-item" data-pi="${palItems.length-1}"><span class="mono">${r.id}</span>${r.agent} · ${r.model}<span class="hint">${stHtml(r.s)}</span></div>`; }).join(''); }
+  const es = EPICS.filter(e=>match(e.id)||match(e.t)).slice(0,4);
+  if(es.length){ html+='<div class="pal-group">Epics</div>'+es.map(e=>{ palItems.push({run:()=>openEpic(e.id)});
+    return `<div class="pal-item" data-pi="${palItems.length-1}"><span class="mono">${e.id}</span>${e.t}<span class="hint">${e.pct}%</span></div>`; }).join(''); }
+  palList.innerHTML = html || '<div class="pal-group">No results</div>';
+  palIdx=0; palHi();
+}
+function palHi(){ palList.querySelectorAll('.pal-item').forEach((n,i)=>n.classList.toggle('sel', i===palIdx)); }
+palInput.addEventListener('input', ()=>palRender(palInput.value));
+palInput.addEventListener('keydown', e=>{
+  const n=palList.querySelectorAll('.pal-item').length;
+  if(e.key==='ArrowDown'){ e.preventDefault(); palIdx=Math.min(n-1,palIdx+1); palHi(); }
+  else if(e.key==='ArrowUp'){ e.preventDefault(); palIdx=Math.max(0,palIdx-1); palHi(); }
+  else if(e.key==='Enter'){ const it=palItems[palIdx]; if(it){ palClose(); it.run(); } }
+});
+palList.addEventListener('click', e=>{ const n=e.target.closest('[data-pi]'); if(n){ palClose(); palItems[+n.dataset.pi].run(); } });
+palWrap.addEventListener('click', e=>{ if(e.target===palWrap) palClose(); });
+$('#open-pal').onclick = palOpen;
+document.addEventListener('keydown', e=>{
+  if((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); palWrap.classList.contains('open')?palClose():palOpen(); }
+  else if(e.key==='Escape'){ if(palWrap.classList.contains('open')) palClose(); else closeDrawer(); }
+});
+
+/* ════════ live ticker ════════ */
+let tick=0;
+setInterval(()=>{ tick++;
+  document.querySelectorAll('[data-live-sec]').forEach(n=>{ n.textContent = fmt(+n.dataset.liveSec + tick); });
+},1000);
+
+/* ════════ boot ════════ */
+renderEpicHead(); buildDag(); applyFilters(); renderRail();
+renderRunnersPage(); renderActivity(); renderUsage(); renderProjects(); renderEpics(); renderTasks(); renderSettings();
+show('epic');
+requestAnimationFrame(fit);
+window.addEventListener('resize', ()=>{ if($('#view-epic').classList.contains('on')) fit(); });
+try { const v=localStorage.getItem('rivet.view'); if(v && (v==='epic'||CRUMBS[v])) show(v); } catch(e){}
+</script>
+</body>
+</html>
