@@ -1,2 +1,7 @@
 .DS_Store
 .claude/settings.local.json
+
+# вложенные клиентские репозитории (отдельные git-репо, не часть rivet)
+/rivet-web/
+/rivet-android/
+/rivet-ios/
