@@ -1,4 +1,4 @@
-schema: spec-driven
+schema: rivet
 
 context: |
   Продукт: Rivet — консоль оркестрации AI-агентов (управление эпиками и
