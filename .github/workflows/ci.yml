@@ -8,6 +8,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rivet-service
     services:
       postgres:
         image: postgres:17-alpine
@@ -25,7 +28,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version-file: rivet-service/go.mod
       - run: go build ./...
       - run: go test ./...
         env:
@@ -33,3 +36,4 @@ jobs:
       - uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+          working-directory: rivet-service

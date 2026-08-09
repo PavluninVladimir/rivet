@@ -24,5 +24,5 @@ proto:
 		pkg/protocol/rivet.proto
 
 ui:
-	cd rivet-web && npm run build
-	rm -rf internal/webui/dist && cp -r rivet-web/dist internal/webui/dist
+	cd ../rivet-web && npm run build
+	rm -rf internal/webui/dist && cp -r ../rivet-web/dist internal/webui/dist
