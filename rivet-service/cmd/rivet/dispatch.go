@@ -24,6 +24,12 @@ func dispatch(cmd string, args []string) error {
 			return fmt.Errorf("usage: rivet createdb <имя>")
 		}
 		return createDB(ctx, cfg.DatabaseURL, args[0])
+	case "projects":
+		return cmdProjects(args)
+	case "epics":
+		return cmdEpics(args)
+	case "tasks":
+		return cmdTasks(args)
 	default:
 		return fmt.Errorf("неизвестная команда %q", cmd)
 	}
