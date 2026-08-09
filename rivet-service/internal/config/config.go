@@ -26,8 +26,14 @@ type Config struct {
 	GitHubToken string
 	// SCM — провайдер хостинга: github (по умолчанию) или fake (e2e-стенды).
 	SCM string
+	// LLMProvider — провайдер модели декомпозиции: anthropic или deepseek.
+	// Без RIVET_LLM_PROVIDER выбирается по наличию ключа, при обоих ключах anthropic.
+	LLMProvider string
 	// AnthropicAPIKey — ключ модели для декомпозиции Epic.
 	AnthropicAPIKey string
+	// DeepSeekAPIKey и DeepSeekModel — DeepSeek API (по умолчанию deepseek-reasoner).
+	DeepSeekAPIKey string
+	DeepSeekModel  string
 
 	// RunnerHeartbeatTimeout — тишина от runner'а, после которой он offline.
 	RunnerHeartbeatTimeout time.Duration
@@ -47,9 +53,19 @@ func FromEnv() (Config, error) {
 		S3UseSSL:               os.Getenv("RIVET_S3_SSL") == "true",
 		GitHubToken:            os.Getenv("RIVET_GITHUB_TOKEN"),
 		SCM:                    getenv("RIVET_SCM", "github"),
+		LLMProvider:            os.Getenv("RIVET_LLM_PROVIDER"),
 		AnthropicAPIKey:        os.Getenv("ANTHROPIC_API_KEY"),
+		DeepSeekAPIKey:         os.Getenv("DEEPSEEK_API_KEY"),
+		DeepSeekModel:          os.Getenv("RIVET_DEEPSEEK_MODEL"),
 		RunnerHeartbeatTimeout: 90 * time.Second,
 		DefaultAttemptLimit:    3,
+	}
+	if c.LLMProvider == "" {
+		if c.AnthropicAPIKey != "" {
+			c.LLMProvider = "anthropic"
+		} else if c.DeepSeekAPIKey != "" {
+			c.LLMProvider = "deepseek"
+		}
 	}
 	if v := os.Getenv("RIVET_RUNNER_HEARTBEAT_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)

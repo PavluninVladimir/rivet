@@ -62,8 +62,15 @@ func run(ctx context.Context, cfg config.Config) error {
 	}
 
 	var pl *planner.Planner
-	if cfg.AnthropicAPIKey != "" {
-		pl = planner.New(cfg.AnthropicAPIKey)
+	switch cfg.LLMProvider {
+	case "deepseek":
+		if cfg.DeepSeekAPIKey != "" {
+			pl = planner.NewDeepSeek(cfg.DeepSeekAPIKey, cfg.DeepSeekModel)
+		}
+	case "anthropic":
+		if cfg.AnthropicAPIKey != "" {
+			pl = planner.New(cfg.AnthropicAPIKey)
+		}
 	}
 	root := http.NewServeMux()
 	root.Handle("/api/", (&api.Server{St: st, Engine: engine, Hub: hub, Planner: pl}).Handler())

@@ -14,7 +14,7 @@ import (
 // и ждёт просмотра и запуска человеком (спека backend/epic-decomposition).
 func (s *Server) decompose(w http.ResponseWriter, r *http.Request) {
 	if s.Planner == nil {
-		writeErr(w, errors.New("декомпозиция недоступна: не задан ANTHROPIC_API_KEY"))
+		writeErr(w, errors.New("декомпозиция недоступна: не задан ключ модели (ANTHROPIC_API_KEY или DEEPSEEK_API_KEY)"))
 		return
 	}
 	epic, err := s.St.GetEpic(r.Context(), r.PathValue("id"))

@@ -9,21 +9,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
-
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
 
-const model = "claude-opus-5"
-
 type Planner struct {
-	client anthropic.Client
-}
-
-func New(apiKey string) *Planner {
-	return &Planner{client: anthropic.NewClient(option.WithAPIKey(apiKey))}
+	c Completer
 }
 
 // PlannedTask — элемент плана от модели; deps ссылаются на индексы задач плана.
@@ -38,28 +29,9 @@ type PlannedTask struct {
 
 // Decompose запрашивает у модели план Epic и валидирует его.
 func (p *Planner) Decompose(ctx context.Context, epic domain.Epic, project domain.Project) ([]PlannedTask, error) {
-	prompt := buildPrompt(epic, project)
-
-	adaptive := anthropic.ThinkingConfigAdaptiveParam{}
-	resp, err := p.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     model,
-		MaxTokens: 16000,
-		Thinking:  anthropic.ThinkingConfigParamUnion{OfAdaptive: &adaptive},
-		Messages: []anthropic.MessageParam{
-			anthropic.NewUserMessage(anthropic.NewTextBlock(prompt)),
-		},
-	})
+	text, err := p.c.Complete(ctx, buildPrompt(epic, project))
 	if err != nil {
 		return nil, fmt.Errorf("model: %w", err)
-	}
-	if resp.StopReason == anthropic.StopReasonRefusal {
-		return nil, fmt.Errorf("модель отклонила запрос (refusal)")
-	}
-	var text string
-	for _, block := range resp.Content {
-		if b, ok := block.AsAny().(anthropic.TextBlock); ok {
-			text += b.Text
-		}
 	}
 
 	plan, err := parsePlan(text)
