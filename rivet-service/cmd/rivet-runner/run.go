@@ -25,6 +25,7 @@ func run(args []string) error {
 		"команда агента; путь к промпту приходит в $RIVET_PROMPT_FILE")
 	caps := fs.String("caps", envDef("RIVET_CAPS", "coding"), "capabilities через запятую")
 	fs.StringVar(&cfg.Workdir, "workdir", envDef("RIVET_WORKDIR", os.ExpandEnv("$HOME/.rivet-runner")), "рабочий каталог")
+	fs.StringVar(&cfg.GitBase, "git-base", envDef("RIVET_GIT_BASE", "https://github.com/"), "префикс URL клонирования репозиториев")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

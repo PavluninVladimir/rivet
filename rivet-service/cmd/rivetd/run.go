@@ -44,7 +44,12 @@ func run(ctx context.Context, cfg config.Config) error {
 
 	reg := stream.NewRegistry()
 	hub := stream.NewHub()
-	engine := orchestrator.New(st, scm.NewGitHub(cfg.GitHubToken), bl, reg, cfg.RunnerHeartbeatTimeout)
+	var adapter scm.Adapter = scm.NewGitHub(cfg.GitHubToken)
+	if cfg.SCM == "fake" {
+		slog.Warn("SCM-провайдер fake: PR и merge фиктивные (режим e2e-стенда)")
+		adapter = scm.NewFake()
+	}
+	engine := orchestrator.New(st, adapter, bl, reg, cfg.RunnerHeartbeatTimeout)
 
 	grpcSrv := grpc.NewServer()
 	pb.RegisterRunnerServiceServer(grpcSrv, &stream.Server{

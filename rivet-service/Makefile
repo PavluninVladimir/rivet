@@ -1,4 +1,4 @@
-.PHONY: build test lint up down migrate proto ui
+.PHONY: build test lint up down migrate proto ui e2e-stand
 
 build:
 	go build ./...
@@ -26,3 +26,6 @@ proto:
 ui:
 	cd ../rivet-web && npm run build
 	rm -rf internal/webui/dist && cp -r ../rivet-web/dist internal/webui/dist
+
+e2e-stand:
+	sh scripts/e2e-stand.sh

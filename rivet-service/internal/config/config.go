@@ -24,6 +24,8 @@ type Config struct {
 
 	// GitHubToken — токен бот-идентичности для SCM-адаптера.
 	GitHubToken string
+	// SCM — провайдер хостинга: github (по умолчанию) или fake (e2e-стенды).
+	SCM string
 	// AnthropicAPIKey — ключ модели для декомпозиции Epic.
 	AnthropicAPIKey string
 
@@ -44,6 +46,7 @@ func FromEnv() (Config, error) {
 		S3Bucket:               getenv("RIVET_S3_BUCKET", "rivet"),
 		S3UseSSL:               os.Getenv("RIVET_S3_SSL") == "true",
 		GitHubToken:            os.Getenv("RIVET_GITHUB_TOKEN"),
+		SCM:                    getenv("RIVET_SCM", "github"),
 		AnthropicAPIKey:        os.Getenv("ANTHROPIC_API_KEY"),
 		RunnerHeartbeatTimeout: 90 * time.Second,
 		DefaultAttemptLimit:    3,

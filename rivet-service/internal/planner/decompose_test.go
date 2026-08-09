@@ -19,9 +19,9 @@ func TestValidatePlan(t *testing.T) {
 			{Title: "A", Criteria: []string{"c"}, Deps: []int{1}},
 			{Title: "B", Criteria: []string{"c"}, Deps: []int{0}},
 		},
-		"битая ссылка":     {{Title: "A", Criteria: []string{"c"}, Deps: []int{7}}},
-		"сам от себя":      {{Title: "A", Criteria: []string{"c"}, Deps: []int{0}}},
-		"пустое название":  {{Title: "  ", Criteria: []string{"c"}}},
+		"битая ссылка":    {{Title: "A", Criteria: []string{"c"}, Deps: []int{7}}},
+		"сам от себя":     {{Title: "A", Criteria: []string{"c"}, Deps: []int{0}}},
+		"пустое название": {{Title: "  ", Criteria: []string{"c"}}},
 	}
 	for name, plan := range cases {
 		if err := Validate(plan); err == nil {

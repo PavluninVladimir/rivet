@@ -108,8 +108,12 @@ func (a *agent) workspace(ctx context.Context, as *pb.Assignment, step func(stri
 	dir := a.cfg.Workdir + "/repos/" + strings.ReplaceAll(as.Repo, "/", "__")
 	if _, err := os.Stat(dir + "/.git"); err != nil {
 		step("клонирование " + as.Repo)
+		base := a.cfg.GitBase
+		if base == "" {
+			base = "https://github.com/"
+		}
 		if out, err := runShell(ctx, a.cfg.Workdir,
-			fmt.Sprintf("git clone https://github.com/%s.git %q", as.Repo, dir), nil); err != nil {
+			fmt.Sprintf("git clone %s%s.git %q", base, as.Repo, dir), nil); err != nil {
 			return "", fmt.Errorf("clone: %v: %s", err, out)
 		}
 	}

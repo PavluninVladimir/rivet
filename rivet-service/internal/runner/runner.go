@@ -27,6 +27,8 @@ type Config struct {
 	AgentCmd     string
 	Capabilities []string
 	Workdir      string
+	// GitBase — префикс URL клонирования; file://-префикс используют e2e-стенды.
+	GitBase string
 }
 
 func Run(ctx context.Context, cfg Config) error {
