@@ -23,10 +23,10 @@
 |---|---|
 | `queued` | → `ready` (все зависимости done) · → `blocked` (зависимость failed/cancelled) · → `cancelled` |
 | `ready` | → `running` (назначен runner) · → `queued` (правка плана добавила зависимость) · → `cancelled` |
-| `running` | → `testing` (реализация завершена) · → `blocked` (вопрос человеку) · → `failed` (невосстановимая ошибка) · → `cancelled` |
-| `testing` | → `review` (проверки прошли, PR создан) · → `fixing` (проверки упали) · → `failed` (исчерпан лимит) |
-| `review` | → `done` (одобрено и смержено) · → `fixing` (замечания) · → `failed` (исчерпан лимит) |
-| `fixing` | → `testing` (исправление готово) · → `blocked` (вопрос человеку) · → `failed` (исчерпан лимит) |
+| `running` | → `testing` (реализация завершена) · → `blocked` (вопрос человеку) · → `failed` (невосстановимая ошибка) · → `ready` (runner offline — перезапуск попытки) · → `cancelled` |
+| `testing` | → `review` (проверки прошли, PR создан) · → `fixing` (проверки упали) · → `failed` (исчерпан лимит) · → `ready` (runner offline) |
+| `review` | → `done` (одобрено и смержено) · → `fixing` (замечания) · → `failed` (исчерпан лимит) · → `ready` (runner offline) |
+| `fixing` | → `testing` (исправление готово) · → `blocked` (вопрос человеку) · → `failed` (исчерпан лимит) · → `ready` (runner offline) |
 | `blocked` | → `queued`/`ready` (решение человека, возврат в планирование) · → `cancelled` |
 | `failed` | → `queued`/`ready` (человек разрешил повтор) · → `cancelled` |
 | `done`, `cancelled` | терминальные — переходов нет |
