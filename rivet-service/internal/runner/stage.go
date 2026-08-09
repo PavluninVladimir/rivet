@@ -147,8 +147,9 @@ func (a *agent) runAgent(ctx context.Context, dir, prompt string, transcript fun
 }
 
 func gitCommitPush(ctx context.Context, dir, branch, message string) error {
+	// Identity задаём явно: на CI глобального git config нет.
 	script := fmt.Sprintf(
-		`git add -A && (git diff --cached --quiet || git commit -m %q) && git push -u origin %q`,
+		`git add -A && (git diff --cached --quiet || git -c user.name=rivet-runner -c user.email=runner@rivet.local commit -m %q) && git push -u origin %q`,
 		message, branch)
 	if out, err := runShell(ctx, dir, script, nil); err != nil {
 		return fmt.Errorf("%v: %s", err, out)
