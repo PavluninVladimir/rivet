@@ -279,15 +279,20 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 		return e.St.TransitionWithRunnerRelease(ctx, task.ID, domain.TaskReview, ev)
 
 	case pb.StageResult_REVIEW:
-		if err := e.St.ReleaseReviewer(ctx, task.ID); err != nil {
-			return err
-		}
 		if sr.Ok {
+			// Освобождаем runner-ревьюера, но reviewer_id на задаче сохраняем:
+			// он же признак «review выполнен» — иначе планировщик назначит review заново.
+			if err := e.St.FreeReviewerRunner(ctx, task.ID); err != nil {
+				return err
+			}
 			_, err := e.St.AppendEvent(ctx, store.EventInput{
 				ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "task.review_passed",
 				ProjectID: mustProject(ctx, e, task), EpicID: task.EpicID, TaskID: task.ID,
 				Text: "review пройден — ожидание подтверждения merge",
 			})
+			return err
+		}
+		if err := e.St.ReleaseReviewer(ctx, task.ID); err != nil {
 			return err
 		}
 		e.mu.Lock()

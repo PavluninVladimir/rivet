@@ -102,6 +102,15 @@ func (s *Store) assignStage(ctx context.Context, selectSQL, taskSQL, runnerSQL, 
 	return a, true, nil
 }
 
+// FreeReviewerRunner освобождает runner-ревьюера, сохраняя reviewer_id на
+// задаче как признак пройденного review (защита от повторного назначения).
+func (s *Store) FreeReviewerRunner(ctx context.Context, taskID string) error {
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE runners SET status='idle', task_id=NULL
+		WHERE id = (SELECT reviewer_id FROM tasks WHERE id=$1)`, taskID)
+	return err
+}
+
 // ReleaseReviewer освобождает runner-ревьюера задачи (после вердикта).
 func (s *Store) ReleaseReviewer(ctx context.Context, taskID string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {

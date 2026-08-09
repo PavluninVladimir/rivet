@@ -127,9 +127,19 @@ func (a *agent) workspace(ctx context.Context, as *pb.Assignment, step func(stri
 	return dir, nil
 }
 
-// runAgent запускает CLI-агента в PTY, промпт — на stdin.
+// runAgent запускает CLI-агента в PTY; промпт кладётся во временный файл,
+// путь передаётся команде через RIVET_PROMPT_FILE.
 func (a *agent) runAgent(ctx context.Context, dir, prompt string, transcript func([]byte)) (string, error) {
-	return runPTY(ctx, dir, a.cfg.AgentCmd, prompt, transcript)
+	pf, err := os.CreateTemp(a.cfg.Workdir, "prompt-*.md")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(pf.Name())
+	if _, err := pf.WriteString(prompt); err != nil {
+		return "", err
+	}
+	_ = pf.Close()
+	return runPTY(ctx, dir, a.cfg.AgentCmd, []string{"RIVET_PROMPT_FILE=" + pf.Name()}, transcript)
 }
 
 func gitCommitPush(ctx context.Context, dir, branch, message string) error {
@@ -191,36 +201,38 @@ func reviewPrompt(as *pb.Assignment) string {
 	return b.String()
 }
 
-// parseVerdict извлекает вердикт ревьюера из вывода агента.
-func parseVerdict(out string) (approved bool, detail string) {
-	idx := strings.LastIndex(out, "VERDICT:")
-	if idx < 0 {
-		return false, "ревьюер не вынес вердикт (нет строки VERDICT:) — считаем замечанием"
+// lastSentinelLine ищет последнюю строку вывода, начинающуюся с маркера
+// (строго с начала строки — упоминание маркера в середине текста не считается).
+func lastSentinelLine(out, sentinel string) (rest string, found bool) {
+	lines := strings.Split(out, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(strings.TrimRight(lines[i], "\r"))
+		if strings.HasPrefix(line, sentinel) {
+			return strings.TrimSpace(strings.TrimPrefix(line, sentinel)), true
+		}
 	}
-	line := strings.TrimSpace(out[idx:])
-	if nl := strings.IndexByte(line, '\n'); nl > 0 {
-		line = line[:nl]
-	}
-	if strings.HasPrefix(line, "VERDICT: APPROVED") {
-		return true, "review пройден"
-	}
-	return false, strings.TrimSpace(strings.TrimPrefix(line, "VERDICT: CHANGES:"))
+	return "", false
 }
 
-// parseBlocked ищет сигнал «BLOCKED: <вопрос>» в выводе агента.
+// parseVerdict извлекает вердикт ревьюера из вывода агента.
+func parseVerdict(out string) (approved bool, detail string) {
+	rest, found := lastSentinelLine(out, "VERDICT:")
+	if !found {
+		return false, "ревьюер не вынес вердикт (нет строки VERDICT:) — считаем замечанием"
+	}
+	if strings.HasPrefix(rest, "APPROVED") {
+		return true, "review пройден"
+	}
+	return false, strings.TrimSpace(strings.TrimPrefix(rest, "CHANGES:"))
+}
+
+// parseBlocked ищет строку «BLOCKED: <вопрос>» в выводе агента.
 func parseBlocked(out string) (question string, blocked bool) {
-	idx := strings.LastIndex(out, "BLOCKED:")
-	if idx < 0 {
+	rest, found := lastSentinelLine(out, "BLOCKED:")
+	if !found || rest == "" {
 		return "", false
 	}
-	line := strings.TrimSpace(out[idx+len("BLOCKED:"):])
-	if nl := strings.IndexByte(line, '\n'); nl > 0 {
-		line = line[:nl]
-	}
-	if line == "" {
-		return "", false
-	}
-	return strings.TrimSpace(line), true
+	return rest, true
 }
 
 func tail(s string, n int) string {

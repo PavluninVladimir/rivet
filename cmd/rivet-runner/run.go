@@ -20,8 +20,9 @@ func run(args []string) error {
 	fs.StringVar(&cfg.ID, "id", envDef("RIVET_RUNNER_ID", hostDefault()), "идентификатор runner'а")
 	fs.StringVar(&cfg.Agent, "agent", envDef("RIVET_AGENT", "claude-code"), "название агента")
 	fs.StringVar(&cfg.Model, "model", os.Getenv("RIVET_MODEL"), "модель агента")
-	fs.StringVar(&cfg.AgentCmd, "cmd", envDef("RIVET_AGENT_CMD", "claude -p --dangerously-skip-permissions"),
-		"команда агента; промпт подаётся на stdin")
+	fs.StringVar(&cfg.AgentCmd, "cmd", envDef("RIVET_AGENT_CMD",
+		`claude -p "$(cat "$RIVET_PROMPT_FILE")" --dangerously-skip-permissions`),
+		"команда агента; путь к промпту приходит в $RIVET_PROMPT_FILE")
 	caps := fs.String("caps", envDef("RIVET_CAPS", "coding"), "capabilities через запятую")
 	fs.StringVar(&cfg.Workdir, "workdir", envDef("RIVET_WORKDIR", os.ExpandEnv("$HOME/.rivet-runner")), "рабочий каталог")
 	if err := fs.Parse(args); err != nil {

@@ -164,6 +164,21 @@ func TestPipelineEndToEnd(t *testing.T) {
 	if err := e.OnStageResult(ctx, "reviewer", &pb.StageResult{TaskId: taskA.ID, Stage: pb.StageResult_REVIEW, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
+	// Регрессия: после пройденного review новый Tick не должен назначать review повторно.
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	out.mu.Lock()
+	reviews := 0
+	for _, m := range out.sent {
+		if a := m.GetAssign(); a != nil && a.Stage == pb.StageResult_REVIEW {
+			reviews++
+		}
+	}
+	out.mu.Unlock()
+	if reviews != 1 {
+		t.Fatalf("review назначен %d раз, ожидали 1", reviews)
+	}
 	if err := e.MergeTask(ctx, taskA.ID, "vladimir"); err != nil {
 		t.Fatal(err)
 	}

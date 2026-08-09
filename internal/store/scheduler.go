@@ -365,7 +365,7 @@ func (s *Store) ResolveTask(ctx context.Context, taskID, answer, userID string, 
 			}
 		} else {
 			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET status='queued', attempt_used=0, block_reason=NULL,
+				UPDATE tasks SET status='queued', attempt_used=0, block_reason=NULL, reviewer_id=NULL,
 					description = description || CASE WHEN $2 <> '' THEN E'\n\nУточнение человека: ' || $2 ELSE '' END,
 					updated_at=now()
 				WHERE id=$1`, taskID, answer); err != nil {
@@ -443,7 +443,7 @@ func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int)
 				continue // терминальные, blocked и queued не трогаем
 			}
 			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET status='ready', runner_id=NULL, updated_at=now() WHERE id=$1`,
+				UPDATE tasks SET status='ready', runner_id=NULL, reviewer_id=NULL, updated_at=now() WHERE id=$1`,
 				st.taskID); err != nil {
 				return err
 			}
