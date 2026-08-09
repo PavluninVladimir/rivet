@@ -30,6 +30,6 @@ jobs:
       - run: go test ./...
         env:
           RIVET_DATABASE_URL: postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v8
         with:
           version: latest
