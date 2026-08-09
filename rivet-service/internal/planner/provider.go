@@ -110,7 +110,7 @@ func New(apiKey string) *Planner {
 // NewDeepSeek — planner на DeepSeek API.
 func NewDeepSeek(apiKey, model string) *Planner {
 	if model == "" {
-		model = "deepseek-reasoner"
+		model = "deepseek-v4-flash"
 	}
 	return &Planner{c: deepseekCompleter{apiKey: apiKey, model: model}}
 }

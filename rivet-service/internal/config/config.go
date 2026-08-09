@@ -31,7 +31,7 @@ type Config struct {
 	LLMProvider string
 	// AnthropicAPIKey — ключ модели для декомпозиции Epic.
 	AnthropicAPIKey string
-	// DeepSeekAPIKey и DeepSeekModel — DeepSeek API (по умолчанию deepseek-reasoner).
+	// DeepSeekAPIKey и DeepSeekModel — DeepSeek API (по умолчанию deepseek-v4-flash).
 	DeepSeekAPIKey string
 	DeepSeekModel  string
 
