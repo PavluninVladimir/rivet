@@ -51,6 +51,7 @@ Rivet — не multi-agent framework и не чат с ботами, а control 
 ## Соглашения
 
 - Язык документации и всех артефактов — русский.
+- Ветки по GitHub Flow во всех репозиториях Rivet: изменение идёт в ветке `feature/*` (или `fix/*`) от main, вливается через pull request после зелёного CI. Прямых коммитов в main нет.
 
 ## Language and writing style
 
