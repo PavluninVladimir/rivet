@@ -19,6 +19,7 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	"github.com/PavluninVladimir/rivet/internal/stream"
+	"github.com/PavluninVladimir/rivet/internal/webui"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
@@ -59,9 +60,12 @@ func run(ctx context.Context, cfg config.Config) error {
 	if cfg.AnthropicAPIKey != "" {
 		pl = planner.New(cfg.AnthropicAPIKey)
 	}
+	root := http.NewServeMux()
+	root.Handle("/api/", (&api.Server{St: st, Engine: engine, Hub: hub, Planner: pl}).Handler())
+	root.Handle("/", webui.Handler())
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           (&api.Server{St: st, Engine: engine, Hub: hub, Planner: pl}).Handler(),
+		Handler:           root,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

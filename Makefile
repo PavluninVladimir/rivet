@@ -1,4 +1,4 @@
-.PHONY: build test lint up down migrate proto
+.PHONY: build test lint up down migrate proto ui
 
 build:
 	go build ./...
@@ -22,3 +22,7 @@ proto:
 	protoc --go_out=. --go_opt=module=github.com/PavluninVladimir/rivet \
 		--go-grpc_out=. --go-grpc_opt=module=github.com/PavluninVladimir/rivet \
 		pkg/protocol/rivet.proto
+
+ui:
+	cd rivet-web && npm run build
+	rm -rf internal/webui/dist && cp -r rivet-web/dist internal/webui/dist
