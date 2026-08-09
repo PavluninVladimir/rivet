@@ -24,19 +24,14 @@ Rivet — не multi-agent framework и не чат с ботами, а control 
 
 ## Состояние репозитория
 
-Кода ещё нет — проект на стадии формирования требований. В репозитории:
+Кода ещё нет — требования сформированы и синхронизированы в основные спеки, впереди архитектура и реализация. В репозитории:
 
 - `agent-orchestration-console.html` — эталонный дизайн-прототип консоли (сделан в Open Design). Одностраничный HTML без внешних зависимостей: тёмная тема, цветовые токены в oklch, демо-данные в `<script>` внизу файла. Это источник истины по UX и доменной модели — сверяйся с ним при написании требований и кода. Открывается просто в браузере.
 - `openspec/` — spec-driven процесс OpenSpec (specs, changes, config.yaml с контекстом проекта).
 
-## Доменная модель (зафиксирована в дизайн-прототипе)
+## Требования — источник истины
 
-- **Project → Epic → Task.** У задачи: зависимости (DAG), статусы `queued / ready / running / testing / review / fixing / blocked / failed / done`, лимит попыток (`att: 1/3`), ветка `agent/task-NNN`, PR, acceptance criteria, timeline событий, токены/длительность.
-- **Runner** — исполнитель: агент + модель + хост, статус (`running/testing/review/idle/offline`), capabilities (`coding`, `frontend`, `review`, `cheap`, `local`, `large-context`), заполненность контекста. Задача в `ready` может ждать свободный runner с нужной capability.
-- **Needs attention** — очередь эскалаций человеку: `BLOCKED` (например, неоднозначные acceptance criteria), `REVIEW LIMIT` (исчерпаны попытки review), `TEST FAILED` (например, недоступна среда).
-- **Activity** — event log: `start / test / review / fail / block / pr / merge` с субъектом (runner, scheduler, system).
-- **Usage** — токены и стоимость в разрезе Epic/задач/runner'ов.
-- Отдельный агент-ревьюер проверяет чужой код; критический путь DAG подсвечивается в графе.
+Требования зафиксированы в **`openspec/specs/`** — 14 capabilities (72 требования), разложенных на `backend/` (доменная модель, оркестрация, конвейер задачи, runner'ы, эскалации, наблюдаемость, монетизация, интеграция агентов, командная видимость, SCM, публикация) и `clients/` (web-console, mobile). При работе над любым изменением сверяйся со спеками, а не с прототипом или этим файлом; ключевые архитектурные решения (PostgreSQL как единая система записи, S3/MinIO для транскриптов, pgvector) — в `openspec/changes/define-rivet-architecture/design.md`.
 
 ## Процесс разработки (OpenSpec)
 
