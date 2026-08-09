@@ -24,6 +24,7 @@ type Server struct {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/health", s.health)
 	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
 	mux.HandleFunc("POST /api/v1/projects", s.createProject)
 	mux.HandleFunc("GET /api/v1/projects/{id}/epics", s.listEpics)
@@ -96,6 +97,12 @@ func decode(r *http.Request, v any) error {
 func unprocessable(w http.ResponseWriter, msg string) {
 	writeJSON(w, http.StatusUnprocessableEntity,
 		map[string]apiError{"error": {Code: "invalid", Message: msg}})
+}
+
+// ─── health ──────────────────────────────────────────────────────────────
+
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // ─── projects ────────────────────────────────────────────────────────────
