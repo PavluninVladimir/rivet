@@ -7,12 +7,16 @@ import (
 	"net/http"
 	"os"
 	"text/tabwriter"
+	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 )
 
 // output — куда пишут команды просмотра; тесты подменяют на буфер.
 var output io.Writer = os.Stdout
+
+// httpClient с таймаутом: CLI не должен зависать на подвисшем rivetd.
+var httpClient = &http.Client{Timeout: 30 * time.Second}
 
 // apiURL — базовый адрес rivetd для команд просмотра.
 func apiURL() string {
@@ -24,7 +28,7 @@ func apiURL() string {
 
 // apiGet выполняет GET к rivetd и декодирует JSON-ответ в out.
 func apiGet(path string, out any) error {
-	resp, err := http.Get(apiURL() + path)
+	resp, err := httpClient.Get(apiURL() + path)
 	if err != nil {
 		return err
 	}

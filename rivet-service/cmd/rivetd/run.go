@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -24,6 +25,25 @@ import (
 )
 
 func run(ctx context.Context, cfg config.Config) error {
+	// Конфиг проверяем до миграций и listener'ов, чтобы падать без side effects.
+	var pl *planner.Planner
+	switch cfg.LLMProvider {
+	case "deepseek":
+		if cfg.DeepSeekAPIKey == "" {
+			return fmt.Errorf("RIVET_LLM_PROVIDER=deepseek, но DEEPSEEK_API_KEY не задан")
+		}
+		pl = planner.NewDeepSeek(cfg.DeepSeekAPIKey, cfg.DeepSeekModel)
+	case "anthropic":
+		if cfg.AnthropicAPIKey == "" {
+			return fmt.Errorf("RIVET_LLM_PROVIDER=anthropic, но ANTHROPIC_API_KEY не задан")
+		}
+		pl = planner.New(cfg.AnthropicAPIKey)
+	case "":
+		// Ключей нет: декомпозиция недоступна, API отвечает понятной ошибкой.
+	default:
+		return fmt.Errorf("неизвестный RIVET_LLM_PROVIDER %q (anthropic или deepseek)", cfg.LLMProvider)
+	}
+
 	if err := store.Migrate(ctx, cfg.DatabaseURL); err != nil {
 		return err
 	}
@@ -61,17 +81,6 @@ func run(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 
-	var pl *planner.Planner
-	switch cfg.LLMProvider {
-	case "deepseek":
-		if cfg.DeepSeekAPIKey != "" {
-			pl = planner.NewDeepSeek(cfg.DeepSeekAPIKey, cfg.DeepSeekModel)
-		}
-	case "anthropic":
-		if cfg.AnthropicAPIKey != "" {
-			pl = planner.New(cfg.AnthropicAPIKey)
-		}
-	}
 	root := http.NewServeMux()
 	root.Handle("/api/", (&api.Server{St: st, Engine: engine, Hub: hub, Planner: pl}).Handler())
 	root.Handle("/", webui.Handler())
