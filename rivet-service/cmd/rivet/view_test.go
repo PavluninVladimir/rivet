@@ -15,8 +15,9 @@ func run(t *testing.T, handler http.HandlerFunc, cmd func([]string) error, args 
 	defer srv.Close()
 	t.Setenv("RIVET_API_URL", srv.URL)
 	var buf bytes.Buffer
+	prev := output
 	output = &buf
-	defer func() { output = nil }()
+	defer func() { output = prev }()
 	err := cmd(args)
 	return buf.String(), err
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
@@ -55,6 +56,10 @@ type deepseekCompleter struct {
 	model  string
 }
 
+// deepseekHTTP — клиент с потолком на весь запрос: thinking-модели отвечают
+// минутами, но зависший upstream не должен держать handler бесконечно.
+var deepseekHTTP = &http.Client{Timeout: 10 * time.Minute}
+
 func (d deepseekCompleter) Complete(ctx context.Context, prompt string) (string, error) {
 	body, err := json.Marshal(map[string]any{
 		"model": d.model,
@@ -74,7 +79,7 @@ func (d deepseekCompleter) Complete(ctx context.Context, prompt string) (string,
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+d.apiKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := deepseekHTTP.Do(req)
 	if err != nil {
 		return "", err
 	}
