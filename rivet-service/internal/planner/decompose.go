@@ -100,6 +100,7 @@ func Validate(plan []PlannedTask) error {
 			return fmt.Errorf("задача %q без acceptance criteria", t.Title)
 		}
 		key := fmt.Sprint(i)
+		seenDep := map[int]bool{}
 		for _, d := range t.Deps {
 			if d < 0 || d >= len(plan) {
 				return fmt.Errorf("задача %q ссылается на несуществующую зависимость %d", t.Title, d)
@@ -107,6 +108,11 @@ func Validate(plan []PlannedTask) error {
 			if d == i {
 				return fmt.Errorf("задача %q зависит от себя", t.Title)
 			}
+			// Дубль зависимости упал бы на первичном ключе task_deps при материализации.
+			if seenDep[d] {
+				return fmt.Errorf("задача %q дублирует зависимость %d", t.Title, d)
+			}
+			seenDep[d] = true
 			deps[key] = append(deps[key], fmt.Sprint(d))
 		}
 		if _, ok := deps[key]; !ok {

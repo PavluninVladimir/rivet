@@ -398,6 +398,10 @@ func TestValidateDAG(t *testing.T) {
 	if err := ValidateDAG(unknown); err == nil {
 		t.Fatal("зависимость вне плана не обнаружена")
 	}
+	dup := map[string][]string{"a": {}, "b": {"a", "a"}}
+	if err := ValidateDAG(dup); err == nil {
+		t.Fatal("дубль зависимости не обнаружен (упал бы на PK task_deps)")
+	}
 }
 
 // Потеря runner'а расходует попытку; исчерпание лимита — failed + RUNNER_LOST

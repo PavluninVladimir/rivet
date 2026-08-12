@@ -1,10 +1,29 @@
-.PHONY: build test lint up down migrate proto ui e2e-stand
+.PHONY: build test lint fuzz up down migrate proto ui e2e-stand
 
 build:
 	go build ./...
 
 test:
 	go test ./...
+
+# Бюджет на один fuzz-таргет; локально можно поднять: make fuzz FUZZ_TIME=10m
+FUZZ_TIME ?= 30s
+FUZZ_TARGETS = \
+	./internal/planner:FuzzParsePlan \
+	./internal/planner:FuzzValidatePlan \
+	./internal/store:FuzzValidateDAG \
+	./internal/orchestrator:FuzzPRNumber \
+	./internal/api:FuzzWebhookSignature \
+	./internal/api:FuzzWebhookPayload \
+	./internal/runner:FuzzTail
+
+# go test -fuzz гоняет один таргет за прогон, поэтому цикл.
+fuzz:
+	@for t in $(FUZZ_TARGETS); do \
+		pkg=$${t%%:*}; name=$${t##*:}; \
+		echo "== fuzz $$pkg $$name ($(FUZZ_TIME))"; \
+		go test $$pkg -run '^$$' -fuzz "^$$name$$" -fuzztime $(FUZZ_TIME) || exit 1; \
+	done
 
 lint:
 	golangci-lint run
