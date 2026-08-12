@@ -29,12 +29,12 @@ Rivet — не multi-agent framework и не чат с ботами, а control 
 
 - `rivet-service/` — Go-бэкенд: `cmd/` (rivetd, rivet-runner, CLI rivet), `internal/` (store, orchestrator, api, runner, scm, planner, webui), `pkg/protocol/` (gRPC), `scripts/` (e2e-стенд, fake-агент), docker-compose с Postgres и MinIO, Makefile с основными целями.
 - `agent-orchestration-console.html` — эталонный дизайн-прототип консоли (сделан в Open Design). Одностраничный HTML без внешних зависимостей: тёмная тема, цветовые токены в oklch, демо-данные в `<script>` внизу файла. Источник истины по UX, консоль в rivet-web сверяется с ним.
-- `openspec/` — spec-driven процесс OpenSpec (specs, changes, config.yaml с контекстом проекта).
+- `openspec/config.yaml` — указатель `store: rivet` на OpenSpec-store. Сами specs и changes живут в Obsidian-vault (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Home/vault/wiki/projects/rivet-openspec`), команды openspec из репозитория работают с ними прозрачно.
 - `.github/workflows/ci.yml` — CI бэкенда: build, тесты, golangci-lint. E2e гоняется в CI репозитория rivet-e2e.
 
 ## Требования — источник истины
 
-Требования зафиксированы в **`openspec/specs/`** — 15 capabilities (80 требований), разложенных на `backend/` (доменная модель, декомпозиция Epic, оркестрация, конвейер задачи, runner'ы, эскалации, наблюдаемость, монетизация, интеграция агентов, командная видимость, SCM, публикация, access-policy) и `clients/` (web-console, mobile). При работе над любым изменением сверяйся со спеками, а не с прототипом или этим файлом. Ключевые архитектурные решения (PostgreSQL как единая система записи, S3/MinIO для транскриптов, pgvector) — в `openspec/changes/archive/2026-08-09-define-rivet-architecture/design.md`.
+Требования зафиксированы в **OpenSpec-store `rivet`** (в Obsidian-vault, см. выше) — 15 capabilities (80 требований), разложенных на `backend/` (доменная модель, декомпозиция Epic, оркестрация, конвейер задачи, runner'ы, эскалации, наблюдаемость, монетизация, интеграция агентов, командная видимость, SCM, публикация, access-policy) и `clients/` (web-console, mobile). При работе над любым изменением сверяйся со спеками, а не с прототипом или этим файлом. Ключевые архитектурные решения (PostgreSQL как единая система записи, S3/MinIO для транскриптов, pgvector) — в store, `changes/archive/2026-08-09-define-rivet-architecture/design.md`.
 
 ## Процесс разработки (OpenSpec)
 
