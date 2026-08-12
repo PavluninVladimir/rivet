@@ -35,6 +35,31 @@ func (s *Store) AssignFixing(ctx context.Context) (Assignment, bool, error) {
 		"назначен исполнитель для исправлений: ")
 }
 
+// AssignTesting назначает исполнителя задаче в testing, оставшейся без
+// runner'а (пауза Epic остановила конвейер на границе coding → testing).
+// Ветка задачи содержит всю работу, поэтому проверки может гнать и другой runner.
+func (s *Store) AssignTesting(ctx context.Context) (Assignment, bool, error) {
+	return s.assignStage(ctx, `
+		SELECT t.id, t.num, t.epic_id, e.project_id, r.id
+		FROM tasks t
+		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+		JOIN LATERAL (
+			SELECT r.id FROM runners r
+			WHERE r.status = 'idle' AND NOT r.draining AND r.capabilities @> t.capabilities
+			-- беречь специалистов: из подходящих берём наименее «богатого» по capabilities
+			ORDER BY cardinality(r.capabilities), r.last_seen DESC
+			FOR UPDATE OF r SKIP LOCKED
+			LIMIT 1
+		) r ON true
+		WHERE t.status = 'testing' AND t.runner_id IS NULL
+		ORDER BY t.num
+		FOR UPDATE OF t SKIP LOCKED
+		LIMIT 1`,
+		`UPDATE tasks SET runner_id=$2, updated_at=now() WHERE id=$1`,
+		`UPDATE runners SET status='testing', task_id=$2 WHERE id=$1`,
+		"назначен исполнитель для проверок: ")
+}
+
 // AssignReview назначает ревьюера (runner с capability review, отличный от
 // исполнителя) задаче в review без ревьюера.
 func (s *Store) AssignReview(ctx context.Context) (Assignment, bool, error) {
@@ -102,6 +127,18 @@ func (s *Store) assignStage(ctx context.Context, selectSQL, taskSQL, runnerSQL, 
 	return a, true, nil
 }
 
+// ReleaseTaskRunner освобождает runner задачи и снимает привязку задачи к нему
+// (пауза Epic на границе стадии; задачу без runner'а подхватят Assign*-циклы).
+func (s *Store) ReleaseTaskRunner(ctx context.Context, taskID string) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := freeRunner(ctx, tx, taskID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE tasks SET runner_id=NULL, updated_at=now() WHERE id=$1`, taskID)
+		return err
+	})
+}
+
 // FreeReviewerRunner освобождает runner-ревьюера, сохраняя reviewer_id на
 // задаче как признак пройденного review (защита от повторного назначения).
 func (s *Store) FreeReviewerRunner(ctx context.Context, taskID string) error {
@@ -109,27 +146,6 @@ func (s *Store) FreeReviewerRunner(ctx context.Context, taskID string) error {
 		UPDATE runners SET status='idle', task_id=NULL
 		WHERE id = (SELECT reviewer_id FROM tasks WHERE id=$1)`, taskID)
 	return err
-}
-
-// ReleaseReviewer освобождает runner-ревьюера задачи (после вердикта).
-func (s *Store) ReleaseReviewer(ctx context.Context, taskID string) error {
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		var reviewer string
-		if err := tx.QueryRow(ctx,
-			`SELECT COALESCE(reviewer_id,'') FROM tasks WHERE id=$1 FOR UPDATE`, taskID).
-			Scan(&reviewer); err != nil {
-			return err
-		}
-		if reviewer == "" {
-			return nil
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE runners SET status='idle', task_id=NULL WHERE id=$1`, reviewer); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, `UPDATE tasks SET reviewer_id=NULL WHERE id=$1`, taskID)
-		return err
-	})
 }
 
 // SetTaskPR фиксирует созданный PR.

@@ -24,6 +24,10 @@ type Config struct {
 
 	// GitHubToken — токен бот-идентичности для SCM-адаптера.
 	GitHubToken string
+	// GitHubWebhookSecret — секрет подписи X-Hub-Signature-256 входящих
+	// webhook'ов (спека scm-integration). Пустой секрет выключает приём
+	// webhook'ов (fail-closed).
+	GitHubWebhookSecret string
 	// SCM — провайдер хостинга: github (по умолчанию) или fake (e2e-стенды).
 	SCM string
 	// LLMProvider — провайдер модели декомпозиции: anthropic или deepseek.
@@ -52,6 +56,7 @@ func FromEnv() (Config, error) {
 		S3Bucket:               getenv("RIVET_S3_BUCKET", "rivet"),
 		S3UseSSL:               os.Getenv("RIVET_S3_SSL") == "true",
 		GitHubToken:            os.Getenv("RIVET_GITHUB_TOKEN"),
+		GitHubWebhookSecret:    os.Getenv("RIVET_GITHUB_WEBHOOK_SECRET"),
 		SCM:                    getenv("RIVET_SCM", "github"),
 		LLMProvider:            os.Getenv("RIVET_LLM_PROVIDER"),
 		AnthropicAPIKey:        os.Getenv("ANTHROPIC_API_KEY"),

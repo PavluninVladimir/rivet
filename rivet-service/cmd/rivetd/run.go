@@ -82,7 +82,10 @@ func run(ctx context.Context, cfg config.Config) error {
 	}
 
 	root := http.NewServeMux()
-	root.Handle("/api/", (&api.Server{St: st, Engine: engine, Hub: hub, Planner: pl}).Handler())
+	root.Handle("/api/", (&api.Server{
+		St: st, Engine: engine, Hub: hub, Planner: pl,
+		WebhookSecret: cfg.GitHubWebhookSecret,
+	}).Handler())
 	root.Handle("/", webui.Handler())
 	httpSrv := &http.Server{
 		Addr:              cfg.HTTPAddr,

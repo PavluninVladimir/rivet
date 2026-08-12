@@ -53,8 +53,11 @@ func ValidateDAG(deps map[string][]string) error {
 }
 
 // RecomputeEpic пересчитывает готовность задач Epic:
-//   - queued → ready, когда все зависимости done;
-//   - queued/ready → blocked каскадом, когда зависимость failed или cancelled;
+//   - blocked каскадом → queued, когда первопричина больше не failed;
+//   - queued → ready, когда все зависимости выполнены (done или cancelled:
+//     отменённая задача исключена из DAG);
+//   - queued/ready → blocked каскадом (транзитивно), когда в предках failed;
+//     эскалации на потомков не создаются — эскалирована первопричина;
 //   - все задачи терминальны → Epic done.
 func (s *Store) RecomputeEpic(ctx context.Context, epicID string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -69,12 +72,85 @@ func (s *Store) RecomputeEpic(ctx context.Context, epicID string) error {
 			return nil // пауза/план: ничего не двигаем (спека: пауза останавливает планирование)
 		}
 
-		// queued → ready: нет незавершённых зависимостей.
+		// Актуальное множество каскада: транзитивные потомки failed-задач.
+		// Отменённые задачи исключены из DAG, поэтому обход через них не идёт.
+		// Первопричина при нескольких — с меньшим номером (детерминированно).
 		rows, err := tx.Query(ctx, `
+			WITH RECURSIVE affected AS (
+				SELECT d.task_id AS id, d.dep_id AS root_id
+				FROM task_deps d
+				JOIN tasks f ON f.id = d.dep_id AND f.epic_id=$1 AND f.status='failed'
+				UNION
+				SELECT d.task_id, a.root_id
+				FROM task_deps d
+				JOIN affected a ON d.dep_id = a.id
+				JOIN tasks mid ON mid.id = a.id AND mid.status <> 'cancelled'
+			), picked AS (
+				SELECT a.id, min(r.num) AS root_num
+				FROM affected a JOIN tasks r ON r.id = a.root_id
+				GROUP BY a.id
+			)
+			SELECT p.id, root.id, root.num
+			FROM picked p JOIN tasks root ON root.num = p.root_num`, epicID)
+		if err != nil {
+			return err
+		}
+		type cascade struct {
+			id, rootID string
+			rootNum    int64
+		}
+		var affected []cascade
+		affectedIDs := []string{}
+		for rows.Next() {
+			var c cascade
+			if err := rows.Scan(&c.id, &c.rootID, &c.rootNum); err != nil {
+				rows.Close()
+				return err
+			}
+			affected = append(affected, c)
+			affectedIDs = append(affectedIDs, c.id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+
+		// каскад снят: задача больше не потомок failed-первопричины
+		// (решение человека по первопричине или отмена промежуточного звена).
+		rows, err = tx.Query(ctx, `
+			SELECT t.id FROM tasks t
+			WHERE t.epic_id=$1 AND t.status='blocked' AND t.blocked_by IS NOT NULL
+			  AND NOT (t.id = ANY($2))
+			FOR UPDATE OF t`, epicID, affectedIDs)
+		if err != nil {
+			return err
+		}
+		unblockedIDs, err := collectIDs(rows)
+		if err != nil {
+			return err
+		}
+		for _, id := range unblockedIDs {
+			if _, err := tx.Exec(ctx, `
+				UPDATE tasks SET status='queued', blocked_by=NULL, block_reason=NULL,
+					updated_at=now() WHERE id=$1`, id); err != nil {
+				return err
+			}
+			if _, err := appendEvent(ctx, tx, EventInput{
+				ActorKind: domain.ActorScheduler, Type: "task.status",
+				ProjectID: projectID, EpicID: epicID, TaskID: id,
+				Text:    "первопричина блокировки решена — задача возвращена в планирование",
+				Payload: map[string]any{"status": "queued"},
+			}); err != nil {
+				return err
+			}
+		}
+
+		// queued → ready: нет незавершённых зависимостей (cancelled исключена из DAG).
+		rows, err = tx.Query(ctx, `
 			SELECT t.id FROM tasks t
 			WHERE t.epic_id=$1 AND t.status='queued'
 			  AND NOT EXISTS (SELECT 1 FROM task_deps d JOIN tasks dt ON dt.id=d.dep_id
-			                  WHERE d.task_id=t.id AND dt.status <> 'done')
+			                  WHERE d.task_id=t.id AND dt.status NOT IN ('done','cancelled'))
 			FOR UPDATE OF t`, epicID)
 		if err != nil {
 			return err
@@ -97,31 +173,26 @@ func (s *Store) RecomputeEpic(ctx context.Context, epicID string) error {
 			}
 		}
 
-		// каскад blocked: зависимость failed/cancelled.
-		rows, err = tx.Query(ctx, `
-			SELECT t.id FROM tasks t
-			WHERE t.epic_id=$1 AND t.status IN ('queued','ready')
-			  AND EXISTS (SELECT 1 FROM task_deps d JOIN tasks dt ON dt.id=d.dep_id
-			              WHERE d.task_id=t.id AND dt.status IN ('failed','cancelled'))
-			FOR UPDATE OF t`, epicID)
-		if err != nil {
-			return err
-		}
-		blockedIDs, err := collectIDs(rows)
-		if err != nil {
-			return err
-		}
-		for _, id := range blockedIDs {
-			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET status='blocked', updated_at=now(),
-					block_reason='зависимость завершилась неуспешно' WHERE id=$1`, id); err != nil {
+		// каскад blocked: ещё не начатые потомки failed-задач; blocked_by
+		// указывает на первопричину. Эскалации не создаются — первопричина
+		// уже эскалирована своим путём.
+		for _, c := range affected {
+			reason := fmt.Sprintf("зависимость task-%d завершилась неуспешно", c.rootNum)
+			tag, err := tx.Exec(ctx, `
+				UPDATE tasks SET status='blocked', blocked_by=$2, block_reason=$3,
+					updated_at=now() WHERE id=$1 AND status IN ('queued','ready')`,
+				c.id, c.rootID, reason)
+			if err != nil {
 				return err
+			}
+			if tag.RowsAffected() == 0 {
+				continue // уже blocked, выполняется или терминальна
 			}
 			if _, err := appendEvent(ctx, tx, EventInput{
 				ActorKind: domain.ActorScheduler, Type: "task.status",
-				ProjectID: projectID, EpicID: epicID, TaskID: id,
-				Text:    "заблокирована: зависимость failed/cancelled",
-				Payload: map[string]any{"status": "blocked"},
+				ProjectID: projectID, EpicID: epicID, TaskID: c.id,
+				Text:    "заблокирована: " + reason,
+				Payload: map[string]any{"status": "blocked", "blocked_by": c.rootID},
 			}); err != nil {
 				return err
 			}
@@ -244,9 +315,24 @@ func freeRunner(ctx context.Context, tx pgx.Tx, taskID string) error {
 	return err
 }
 
-// ConsumeAttempt фиксирует неуспешный цикл review: расходует попытку и
-// либо возвращает задачу в fixing, либо (лимит исчерпан) — failed + эскалация.
-func (s *Store) ConsumeAttempt(ctx context.Context, taskID, verdict string) (failed bool, err error) {
+// ConsumeAttempt фиксирует неуспешный цикл (замечания review или провал
+// автопроверок): расходует попытку и либо возвращает задачу в fixing, либо
+// (лимит исчерпан) — failed + эскалация с причиной reason.
+// keepRunner оставляет задачу за текущим runner'ом (исправление после провала
+// тестов в том же worktree); иначе исполнитель освобождается и задачу в fixing
+// назначит AssignFixing.
+func (s *Store) ConsumeAttempt(ctx context.Context, taskID string,
+	reason domain.AttentionReason, detail string, keepRunner bool) (failed bool, err error) {
+
+	limitMsg, fixMsg := "Цикл исправления неуспешен %d раз — лимит попыток исчерпан.", "исправление (попытка %d/%d)"
+	switch reason {
+	case domain.AttReviewLimit:
+		limitMsg, fixMsg = "Review отклонил результат %d раз — лимит попыток исчерпан.",
+			"review вернул замечания — исправление (попытка %d/%d)"
+	case domain.AttTestFailed:
+		limitMsg, fixMsg = "Автопроверки провалились %d раз — лимит попыток исчерпан.",
+			"проверки упали — исправление (попытка %d/%d)"
+	}
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var used, limit int
 		var from domain.TaskStatus
@@ -257,15 +343,26 @@ func (s *Store) ConsumeAttempt(ctx context.Context, taskID, verdict string) (fai
 			Scan(&used, &limit, &from, &epicID, &projectID); err != nil {
 			return err
 		}
+		// Ревьюер (если был) освобождается здесь же: отдельная транзакция
+		// оставляла окно, в котором Tick назначал review повторно.
+		if _, err := tx.Exec(ctx, `
+			UPDATE runners SET status='idle', task_id=NULL
+			WHERE id = (SELECT reviewer_id FROM tasks WHERE id=$1)`, taskID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET reviewer_id=NULL WHERE id=$1`, taskID); err != nil {
+			return err
+		}
 		used++
 		if used >= limit {
 			if !from.CanTransition(domain.TaskFailed) {
 				return domain.ErrBadTransition{Entity: "task", From: string(from), To: string(domain.TaskFailed)}
 			}
 			failed = true
-			msg := fmt.Sprintf("Review отклонил результат %d раз — лимит попыток исчерпан.", used)
+			msg := fmt.Sprintf(limitMsg, used)
 			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET status='failed', attempt_used=$2, updated_at=now() WHERE id=$1`,
+				UPDATE tasks SET status='failed', attempt_used=$2, runner_id=NULL,
+					updated_at=now() WHERE id=$1`,
 				taskID, used); err != nil {
 				return err
 			}
@@ -274,13 +371,13 @@ func (s *Store) ConsumeAttempt(ctx context.Context, taskID, verdict string) (fai
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO attention (project_id, task_id, reason, message)
-				VALUES ($1,$2,'REVIEW_LIMIT',$3)`, projectID, taskID, msg); err != nil {
+				VALUES ($1,$2,$3,$4)`, projectID, taskID, string(reason), msg); err != nil {
 				return err
 			}
 			_, err := appendEvent(ctx, tx, EventInput{
 				ActorKind: domain.ActorScheduler, Type: "task.status",
 				ProjectID: projectID, EpicID: epicID, TaskID: taskID,
-				Text: msg, Payload: map[string]any{"status": "failed", "attempt": used, "verdict": verdict},
+				Text: msg, Payload: map[string]any{"status": "failed", "attempt": used, "detail": detail},
 			})
 			return err
 		}
@@ -292,11 +389,20 @@ func (s *Store) ConsumeAttempt(ctx context.Context, taskID, verdict string) (fai
 			taskID, used); err != nil {
 			return err
 		}
+		if !keepRunner {
+			if err := freeRunner(ctx, tx, taskID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx,
+				`UPDATE tasks SET runner_id=NULL WHERE id=$1`, taskID); err != nil {
+				return err
+			}
+		}
 		_, err := appendEvent(ctx, tx, EventInput{
 			ActorKind: domain.ActorScheduler, Type: "task.status",
 			ProjectID: projectID, EpicID: epicID, TaskID: taskID,
-			Text:    fmt.Sprintf("review вернул замечания — исправление (попытка %d/%d)", used, limit),
-			Payload: map[string]any{"status": "fixing", "attempt": used, "verdict": verdict},
+			Text:    fmt.Sprintf(fixMsg, used, limit),
+			Payload: map[string]any{"status": "fixing", "attempt": used, "detail": detail},
 		})
 		return err
 	})
@@ -359,13 +465,20 @@ func (s *Store) ResolveTask(ctx context.Context, taskID, answer, userID string, 
 			return domain.ErrBadTransition{Entity: "task", From: string(from), To: string(to)}
 		}
 		if cancel {
+			// Отмена может прилететь и в выполняющуюся задачу: освобождаем
+			// её runner'ов (исполнителя и ревьюера), иначе они зависнут занятыми.
+			if err := freeRunner(ctx, tx, taskID); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET status='cancelled', updated_at=now() WHERE id=$1`, taskID); err != nil {
+				UPDATE tasks SET status='cancelled', runner_id=NULL, reviewer_id=NULL,
+					updated_at=now() WHERE id=$1`, taskID); err != nil {
 				return err
 			}
 		} else {
 			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET status='queued', attempt_used=0, block_reason=NULL, reviewer_id=NULL,
+				UPDATE tasks SET status='queued', attempt_used=0, block_reason=NULL, blocked_by=NULL,
+					runner_id=NULL, reviewer_id=NULL,
 					description = description || CASE WHEN $2 <> '' THEN E'\n\nУточнение человека: ' || $2 ELSE '' END,
 					updated_at=now()
 				WHERE id=$1`, taskID, answer); err != nil {
@@ -398,8 +511,11 @@ func (s *Store) TransitionWithRunnerRelease(ctx context.Context, taskID string,
 	})
 }
 
-// MarkStaleRunnersOffline: тишина дольше таймаута → offline, попытка задачи
-// перезапускается через планирование (частичная работа остаётся в ветке).
+// MarkStaleRunnersOffline: тишина дольше таймаута → offline. Потеря runner'а
+// расходует попытку задачи (спека orchestration: бесконечный перезапуск
+// недопустим): попытки остались → ready, перезапуск через планирование
+// (частичная работа остаётся в ветке); лимит исчерпан → failed + эскалация
+// RUNNER_LOST.
 func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
@@ -433,25 +549,51 @@ func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int)
 			}
 			var from domain.TaskStatus
 			var epicID, projectID string
+			var used, limit int
 			if err := tx.QueryRow(ctx, `
-				SELECT t.status, t.epic_id, e.project_id FROM tasks t
+				SELECT t.status, t.epic_id, e.project_id, t.attempt_used, t.attempt_limit
+				FROM tasks t
 				JOIN epics e ON e.id=t.epic_id WHERE t.id=$1 FOR UPDATE OF t`, st.taskID).
-				Scan(&from, &epicID, &projectID); err != nil {
+				Scan(&from, &epicID, &projectID, &used, &limit); err != nil {
 				return err
 			}
 			if !from.CanTransition(domain.TaskReady) {
 				continue // терминальные, blocked и queued не трогаем
 			}
+			used++
+			if used >= limit {
+				msg := fmt.Sprintf("Runner %s потерян, лимит попыток исчерпан (%d/%d).", st.runnerID, used, limit)
+				if _, err := tx.Exec(ctx, `
+					UPDATE tasks SET status='failed', attempt_used=$2, runner_id=NULL, reviewer_id=NULL,
+						updated_at=now() WHERE id=$1`, st.taskID, used); err != nil {
+					return err
+				}
+				if _, err := tx.Exec(ctx, `
+					INSERT INTO attention (project_id, task_id, reason, message)
+					VALUES ($1,$2,$3,$4)`, projectID, st.taskID, string(domain.AttRunnerLost), msg); err != nil {
+					return err
+				}
+				if _, err := appendEvent(ctx, tx, EventInput{
+					ActorKind: domain.ActorScheduler, Type: "task.status",
+					ProjectID: projectID, EpicID: epicID, TaskID: st.taskID,
+					Text:    msg,
+					Payload: map[string]any{"status": "failed", "attempt": used, "runner_offline": st.runnerID},
+				}); err != nil {
+					return err
+				}
+				continue
+			}
 			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET status='ready', runner_id=NULL, reviewer_id=NULL, updated_at=now() WHERE id=$1`,
-				st.taskID); err != nil {
+				UPDATE tasks SET status='ready', attempt_used=$2, runner_id=NULL, reviewer_id=NULL,
+					updated_at=now() WHERE id=$1`, st.taskID, used); err != nil {
 				return err
 			}
 			if _, err := appendEvent(ctx, tx, EventInput{
 				ActorKind: domain.ActorScheduler, Type: "task.status",
 				ProjectID: projectID, EpicID: epicID, TaskID: st.taskID,
-				Text:    "runner " + st.runnerID + " offline — попытка будет перезапущена",
-				Payload: map[string]any{"status": "ready", "runner_offline": st.runnerID},
+				Text: fmt.Sprintf("runner %s offline — попытка израсходована (%d/%d), задача будет перезапущена",
+					st.runnerID, used, limit),
+				Payload: map[string]any{"status": "ready", "attempt": used, "runner_offline": st.runnerID},
 			}); err != nil {
 				return err
 			}

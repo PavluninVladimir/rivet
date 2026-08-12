@@ -51,4 +51,5 @@ exec env \
   RIVET_GRPC_ADDR=":$GRPC_PORT" \
   RIVET_DATABASE_URL="$DB_URL" \
   RIVET_SCM=fake \
+  RIVET_GITHUB_WEBHOOK_SECRET="${E2E_WEBHOOK_SECRET:-e2e-webhook-secret}" \
   "$STAND_DIR/rivetd"
