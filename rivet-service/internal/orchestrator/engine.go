@@ -104,6 +104,16 @@ func (e *Engine) Tick(ctx context.Context) error {
 		e.dispatch(ctx, a, pb.StageResult_FIXING, e.takeStageContext(a.Task.ID))
 	}
 	for {
+		a, ok, err := e.St.AssignTesting(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			break
+		}
+		e.dispatch(ctx, a, pb.StageResult_TESTING, "")
+	}
+	for {
 		a, ok, err := e.St.AssignReview(ctx)
 		if err != nil {
 			return err
@@ -111,15 +121,18 @@ func (e *Engine) Tick(ctx context.Context) error {
 		if !ok {
 			break
 		}
-		diff := ""
+		// Контекст ревьюера: diff PR + отчёт автопроверок.
+		extra := e.takeStageContext(a.Task.ID)
 		if a.Task.PRURL != "" {
 			if d, err := e.diffForTask(ctx, a.Task); err != nil {
 				slog.Error("diff for review", "task", a.Task.ID, "err", err)
+			} else if extra != "" {
+				extra = d + "\n\n" + extra
 			} else {
-				diff = d
+				extra = d
 			}
 		}
-		e.dispatch(ctx, a, pb.StageResult_REVIEW, diff)
+		e.dispatch(ctx, a, pb.StageResult_REVIEW, extra)
 	}
 	return nil
 }
@@ -240,21 +253,44 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 		if err := e.St.TransitionTask(ctx, task.ID, domain.TaskTesting, ev, nil); err != nil {
 			return err
 		}
+		if e.epicPaused(ctx, task) {
+			// Пауза Epic: безопасная точка — граница стадии. Проверки не
+			// запускаем, runner освобождаем; resume подхватит AssignTesting.
+			return e.St.ReleaseTaskRunner(ctx, task.ID)
+		}
 		a := store.Assignment{Task: task, Runner: domain.Runner{ID: runnerID}}
 		e.dispatch(ctx, a, pb.StageResult_TESTING, "")
 		return nil
 
 	case pb.StageResult_TESTING:
 		if !sr.Ok {
-			// Провал тестов — исправление в рамках той же попытки, тем же runner'ом.
-			ev.Text = "проверки упали — исправление в рамках попытки"
-			ev.Payload = map[string]any{"status": "fixing"}
-			if err := e.St.TransitionTask(ctx, task.ID, domain.TaskFixing, ev, nil); err != nil {
+			// Провал проверок расходует попытку (спека orchestration).
+			// Вне паузы исправление идёт тем же runner'ом в том же worktree;
+			// на паузе runner освобождается, fixing подхватит AssignFixing.
+			// Вывод проверок кладётся до перехода в fixing: сразу после
+			// коммита resume может назначить FIXING, контекст уже должен лежать.
+			e.mu.Lock()
+			e.stageContext[task.ID] = "Вывод проверок:\n" + sr.Detail
+			e.mu.Unlock()
+			paused := e.epicPaused(ctx, task)
+			failed, err := e.St.ConsumeAttempt(ctx, task.ID, domain.AttTestFailed, sr.Detail, !paused)
+			if err != nil || failed {
+				e.takeStageContext(task.ID)
 				return err
 			}
+			if paused {
+				return nil
+			}
 			a := store.Assignment{Task: task, Runner: domain.Runner{ID: runnerID}}
-			e.dispatch(ctx, a, pb.StageResult_FIXING, "Вывод проверок:\n"+sr.Detail)
+			e.dispatch(ctx, a, pb.StageResult_FIXING, e.takeStageContext(task.ID))
 			return nil
+		}
+		// Отчёт автопроверок сохраняется для ревьюера (спека task-pipeline:
+		// ревьюер получает diff, критерии и результаты проверок).
+		if sr.Detail != "" {
+			e.mu.Lock()
+			e.stageContext[task.ID] = "Результаты автопроверок:\n" + sr.Detail
+			e.mu.Unlock()
 		}
 		// Тесты прошли: PR (если ещё нет) → review, исполнитель освобождается.
 		if task.PRURL == "" {
@@ -292,18 +328,28 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 			})
 			return err
 		}
-		if err := e.St.ReleaseReviewer(ctx, task.ID); err != nil {
-			return err
-		}
+		// Ревьюера освобождает ConsumeAttempt в той же транзакции, что и
+		// переход в fixing: без окна, где Tick назначил бы review повторно.
 		e.mu.Lock()
 		e.stageContext[task.ID] = "Замечания review:\n" + sr.Detail
 		e.mu.Unlock()
-		_, err := e.St.ConsumeAttempt(ctx, task.ID, sr.Detail)
+		_, err := e.St.ConsumeAttempt(ctx, task.ID, domain.AttReviewLimit, sr.Detail, false)
 		return err
 
 	default:
 		return fmt.Errorf("неизвестная стадия %v", sr.Stage)
 	}
+}
+
+// epicPaused — Epic задачи не выполняется (пауза и т.п.): конвейер задачи
+// останавливается на границе стадии.
+func (e *Engine) epicPaused(ctx context.Context, task domain.Task) bool {
+	epic, err := e.St.GetEpic(ctx, task.EpicID)
+	if err != nil {
+		slog.Error("epicPaused: epic", "task", task.ID, "err", err)
+		return false
+	}
+	return epic.Status != domain.EpicRunning
 }
 
 func mustProject(ctx context.Context, e *Engine, task domain.Task) string {

@@ -20,6 +20,9 @@ type Server struct {
 	Engine  *orchestrator.Engine
 	Hub     *stream.Hub
 	Planner *planner.Planner
+	// WebhookSecret — секрет HMAC-подписи входящих webhook'ов;
+	// пустой выключает endpoint (fail-closed, спека scm-integration).
+	WebhookSecret string
 }
 
 func (s *Server) Handler() http.Handler {

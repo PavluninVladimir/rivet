@@ -47,6 +47,7 @@ type Task struct {
 	Branch       string
 	PRURL        string
 	BlockReason  string
+	BlockedBy    string // id задачи-первопричины при каскадной блокировке
 	Created      time.Time
 	Updated      time.Time
 }
@@ -129,6 +130,7 @@ const (
 	AttBlocked     AttentionReason = "BLOCKED"
 	AttReviewLimit AttentionReason = "REVIEW_LIMIT"
 	AttTestFailed  AttentionReason = "TEST_FAILED"
+	AttRunnerLost  AttentionReason = "RUNNER_LOST"
 )
 
 type Attention struct {

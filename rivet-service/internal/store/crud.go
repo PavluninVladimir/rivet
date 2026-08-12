@@ -143,14 +143,14 @@ func (s *Store) CreateTask(ctx context.Context, epicID string, in NewTask) (doma
 const taskCols = `t.id, t.epic_id, t.num, t.title, t.description, t.status, t.estimate,
 	t.capabilities, t.criteria, t.attempt_used, t.attempt_limit,
 	COALESCE(t.runner_id,''), COALESCE(t.branch,''), COALESCE(t.pr_url,''), COALESCE(t.block_reason,''),
-	t.created_at, t.updated_at`
+	COALESCE(t.blocked_by::text,''), t.created_at, t.updated_at`
 
 func scanTask(row pgx.Row) (domain.Task, error) {
 	var t domain.Task
 	var crit []byte
 	err := row.Scan(&t.ID, &t.EpicID, &t.Num, &t.Title, &t.Description, &t.Status, &t.Estimate,
 		&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit,
-		&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.Created, &t.Updated)
+		&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy, &t.Created, &t.Updated)
 	if err != nil {
 		return t, err
 	}
