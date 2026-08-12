@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -435,10 +436,13 @@ func (e *Engine) diffForTask(ctx context.Context, task domain.Task) (string, err
 }
 
 // prNumber извлекает номер PR из https://github.com/owner/repo/pull/N.
+// Разбор строгий: хвост после последнего слэша — ровно каноническая запись
+// положительного числа (без ведущих нулей, знака и мусора).
 func prNumber(url string) (int, error) {
-	var n int
-	if _, err := fmt.Sscanf(url[lastSlash(url)+1:], "%d", &n); err != nil {
-		return 0, fmt.Errorf("не разобрать номер PR из %q: %w", url, err)
+	seg := url[lastSlash(url)+1:]
+	n, err := strconv.Atoi(seg)
+	if err != nil || n <= 0 || strconv.Itoa(n) != seg {
+		return 0, fmt.Errorf("не разобрать номер PR из %q", url)
 	}
 	return n, nil
 }

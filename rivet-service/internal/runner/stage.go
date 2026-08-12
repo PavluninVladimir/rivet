@@ -241,6 +241,9 @@ func parseBlocked(out string) (question string, blocked bool) {
 }
 
 func tail(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if len(s) <= n {
 		return s
 	}

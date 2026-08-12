@@ -21,10 +21,16 @@ func ValidateDAG(deps map[string][]string) error {
 		indeg[id] += 0
 	}
 	for id, ds := range deps {
+		seen := map[string]bool{}
 		for _, d := range ds {
 			if _, ok := deps[d]; !ok {
 				return fmt.Errorf("зависимость %s задачи %s вне плана", d, id)
 			}
+			// Дубль ребра упал бы на первичном ключе task_deps при создании задачи.
+			if seen[d] {
+				return fmt.Errorf("дубль зависимости %s у задачи %s", d, id)
+			}
+			seen[d] = true
 			adj[d] = append(adj[d], id)
 			indeg[id]++
 		}

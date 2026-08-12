@@ -37,3 +37,17 @@ jobs:
         with:
           version: latest
           working-directory: rivet-service
+
+  # Короткий фаззинг-smoke: ловит регрессии по корпусу и свежие крэши.
+  # Таргеты — чистые функции, БД не нужна.
+  fuzz:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rivet-service
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: rivet-service/go.mod
+      - run: make fuzz FUZZ_TIME=15s
