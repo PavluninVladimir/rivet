@@ -29,7 +29,7 @@ Rivet — не multi-agent framework и не чат с ботами, а control 
 
 - `rivet-service/` — Go-бэкенд: `cmd/` (rivetd, rivet-runner, CLI rivet), `internal/` (store, orchestrator, api, runner, scm, planner, webui), `pkg/protocol/` (gRPC), `scripts/` (e2e-стенд, fake-агент), docker-compose с Postgres и MinIO, Makefile с основными целями.
 - `agent-orchestration-console.html` — эталонный дизайн-прототип консоли (сделан в Open Design). Одностраничный HTML без внешних зависимостей: тёмная тема, цветовые токены в oklch, демо-данные в `<script>` внизу файла. Источник истины по UX, консоль в rivet-web сверяется с ним.
-- `openspec/config.yaml` — указатель `store: rivet` на OpenSpec-store. Сами specs и changes живут в Obsidian-vault (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Home/vault/wiki/openspec/rivet`), команды openspec из репозитория работают с ними прозрачно.
+- Спеки в репозитории не хранятся. OpenSpec живёт в зарегистрированном store `rivet` в Obsidian-vault (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Home/vault/wiki/openspec/rivet`), команды openspec вызывай с `--store rivet`.
 - `.github/workflows/ci.yml` — CI бэкенда: build, тесты, golangci-lint. E2e гоняется в CI репозитория rivet-e2e.
 
 ## Требования — источник истины
@@ -41,12 +41,12 @@ Rivet — не multi-agent framework и не чат с ботами, а control 
 Любое изменение проходит через OpenSpec (CLI v1.8.0, схема spec-driven):
 
 - `/opsx:explore` — проработать идею/требования до изменения;
-- `/opsx:propose "идея"` — создать change с артефактами (proposal, design, delta-specs, tasks) в `openspec/changes/<id>/`;
+- `/opsx:propose "идея"` — создать change с артефактами (proposal, design, delta-specs, tasks) в `changes/<id>/` store'а;
 - `/opsx:apply` — реализовать задачи change;
-- `/opsx:sync` — перенести delta-specs в основные `openspec/specs/`;
+- `/opsx:sync` — перенести delta-specs в основные `specs/` store'а;
 - `/opsx:archive` — заархивировать завершённый change.
 
-Контекст проекта для артефактов — в `openspec/config.yaml`.
+Контекст проекта для артефактов — в `config.yaml` store'а. Все команды openspec в этом проекте выполняй со `--store rivet`.
 
 ## Соглашения
 
