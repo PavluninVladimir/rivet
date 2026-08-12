@@ -29,7 +29,7 @@ Rivet — не multi-agent framework и не чат с ботами, а control 
 
 - `rivet-service/` — Go-бэкенд: `cmd/` (rivetd, rivet-runner, CLI rivet), `internal/` (store, orchestrator, api, runner, scm, planner, webui), `pkg/protocol/` (gRPC), `scripts/` (e2e-стенд, fake-агент), docker-compose с Postgres и MinIO, Makefile с основными целями.
 - `agent-orchestration-console.html` — эталонный дизайн-прототип консоли (сделан в Open Design). Одностраничный HTML без внешних зависимостей: тёмная тема, цветовые токены в oklch, демо-данные в `<script>` внизу файла. Источник истины по UX, консоль в rivet-web сверяется с ним.
-- `openspec/config.yaml` — указатель `store: rivet` на OpenSpec-store. Сами specs и changes живут в Obsidian-vault (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Home/vault/wiki/projects/rivet-openspec`), команды openspec из репозитория работают с ними прозрачно.
+- `openspec/config.yaml` — указатель `store: rivet` на OpenSpec-store. Сами specs и changes живут в Obsidian-vault (`~/Library/Mobile Documents/iCloud~md~obsidian/Documents/Home/vault/wiki/openspec/rivet`), команды openspec из репозитория работают с ними прозрачно.
 - `.github/workflows/ci.yml` — CI бэкенда: build, тесты, golangci-lint. E2e гоняется в CI репозитория rivet-e2e.
 
 ## Требования — источник истины
