@@ -6,3 +6,11 @@
 /rivet-android/
 /rivet-ios/
 /rivet-e2e/
+.repowise-workspace/
+.repowise-workspace.yaml
+.agents/
+.mcp.json
+.repowise/
+.vscode/
+data/
+skills-lock.json
