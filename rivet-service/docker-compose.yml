@@ -2,15 +2,18 @@ services:
   rivetd:
     build: .
     ports:
-      - "8080:8080"   # REST API + встроенная веб-консоль
-      - "8090:8090"   # gRPC для runner'ов (подключаются с хоста)
+      # Только loopback: API и gRPC без аутентификации, наружу не публикуем.
+      - "127.0.0.1:8080:8080"   # REST API + встроенная веб-консоль
+      - "127.0.0.1:8090:8090"   # gRPC для runner'ов (подключаются с хоста)
     environment:
       RIVET_DATABASE_URL: postgres://rivet:rivet@postgres:5432/rivet?sslmode=disable
       RIVET_S3_ENDPOINT: minio:9000
       # Необязательные секреты пробрасываются из окружения хоста / .env.
       RIVET_GITHUB_TOKEN: ${RIVET_GITHUB_TOKEN:-}
       RIVET_GITHUB_WEBHOOK_SECRET: ${RIVET_GITHUB_WEBHOOK_SECRET:-}
-      RIVET_SCM: ${RIVET_SCM:-github}
+      # По умолчанию fake: с github без RIVET_GITHUB_TOKEN конвейер падает на CreatePR.
+      # Для реальных PR задай RIVET_SCM=github и RIVET_GITHUB_TOKEN в окружении/.env.
+      RIVET_SCM: ${RIVET_SCM:-fake}
       RIVET_LLM_PROVIDER: ${RIVET_LLM_PROVIDER:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
