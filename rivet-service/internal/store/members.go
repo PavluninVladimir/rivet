@@ -22,6 +22,29 @@ func (s *Store) IsMember(ctx context.Context, projectID, userID string) (bool, e
 	return ok, err
 }
 
+// EpicForViewer — epic, только если viewer участник его проекта. Один запрос:
+// «нет объекта» и «объект чужой» неотличимы ни по ответу, ни по таймингу.
+func (s *Store) EpicForViewer(ctx context.Context, epicID, viewerID string) (domain.Epic, error) {
+	var e domain.Epic
+	err := s.Pool.QueryRow(ctx, `
+		SELECT e.id, e.project_id, e.title, e.goal, e.status, e.created_at FROM epics e
+		JOIN project_members m ON m.project_id = e.project_id AND m.user_id = $2
+		WHERE e.id = $1`, epicID, viewerID).
+		Scan(&e.ID, &e.ProjectID, &e.Title, &e.Goal, &e.Status, &e.Created)
+	return e, nf(err)
+}
+
+// TaskProjectForViewer — проект задачи, только если viewer его участник.
+func (s *Store) TaskProjectForViewer(ctx context.Context, taskID, viewerID string) (string, error) {
+	var projectID string
+	err := s.Pool.QueryRow(ctx, `
+		SELECT e.project_id FROM tasks t
+		JOIN epics e ON e.id = t.epic_id
+		JOIN project_members m ON m.project_id = e.project_id AND m.user_id = $2
+		WHERE t.id = $1`, taskID, viewerID).Scan(&projectID)
+	return projectID, nf(err)
+}
+
 func (s *Store) ListMembers(ctx context.Context, projectID string) ([]domain.Member, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT u.login, u.name, m.added_at
@@ -62,30 +85,44 @@ func (s *Store) AddMember(ctx context.Context, projectID, login string) error {
 }
 
 // RemoveMember удаляет участника; последнего — отказ (проект не может
-// остаться без владельца, design решение 6).
+// остаться без владельца, design решение 6). Строки участников блокируются
+// FOR UPDATE: параллельные удаления сериализуются и не могут вдвоём пройти
+// проверку «не последний».
 func (s *Store) RemoveMember(ctx context.Context, projectID, login string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var userID string
 		if err := tx.QueryRow(ctx, `SELECT id FROM users WHERE login=$1`, login).Scan(&userID); err != nil {
 			return nf(err)
 		}
-		var members int
-		if err := tx.QueryRow(ctx,
-			`SELECT COUNT(*) FROM project_members WHERE project_id=$1`, projectID).Scan(&members); err != nil {
-			return err
-		}
-		tag, err := tx.Exec(ctx,
-			`DELETE FROM project_members WHERE project_id=$1 AND user_id=$2`, projectID, userID)
+		rows, err := tx.Query(ctx,
+			`SELECT user_id FROM project_members WHERE project_id=$1 FOR UPDATE`, projectID)
 		if err != nil {
 			return err
 		}
-		if tag.RowsAffected() == 0 {
+		members := 0
+		found := false
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			members++
+			found = found || id == userID
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if !found {
 			return ErrNotFound
 		}
 		if members <= 1 {
-			return ErrLastMember // откатывает транзакцию вместе с DELETE
+			return ErrLastMember
 		}
-		return nil
+		_, err = tx.Exec(ctx,
+			`DELETE FROM project_members WHERE project_id=$1 AND user_id=$2`, projectID, userID)
+		return err
 	})
 }
 

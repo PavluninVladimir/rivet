@@ -13,16 +13,14 @@ import (
 // детерминированный код валидирует, план создаётся в статусе planned
 // и ждёт просмотра и запуска человеком (спека backend/epic-decomposition).
 func (s *Server) decompose(w http.ResponseWriter, r *http.Request) {
-	if s.Planner == nil {
-		writeErr(w, errors.New("декомпозиция недоступна: не задан ключ модели (ANTHROPIC_API_KEY или DEEPSEEK_API_KEY)"))
-		return
-	}
-	epic, err := s.St.GetEpic(r.Context(), r.PathValue("id"))
+	// Слой доступа раньше конфигурации: чужой epic — 404 до любых деталей.
+	epic, err := s.St.EpicForViewer(r.Context(), r.PathValue("id"), currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if !s.requireMember(w, r, epic.ProjectID) {
+	if s.Planner == nil {
+		writeErr(w, errors.New("декомпозиция недоступна: не задан ключ модели (ANTHROPIC_API_KEY или DEEPSEEK_API_KEY)"))
 		return
 	}
 	if epic.Status != domain.EpicPlanned {

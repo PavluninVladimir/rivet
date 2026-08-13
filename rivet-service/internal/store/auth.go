@@ -80,6 +80,14 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// EqualizeAuthCost сжигает стоимость bcrypt-проверки, не проверяя ничего:
+// ветки отказа (неизвестный логин, окно backoff) не отличимы по таймингу
+// от честной проверки пароля.
+func EqualizeAuthCost(password string) {
+	_ = bcrypt.CompareHashAndPassword(
+		[]byte("$2a$10$7EqJtq98hPqEX7fNZaFWoOhi5B0xM1I8PXlOD7rD1JZ8mSyyzXwEq"), []byte(password))
+}
+
 // Authenticate проверяет пару логин/пароль. Неверный логин и неверный пароль
 // неразличимы для вызывающего (единый ErrNotFound); деактивированный
 // пользователь тоже не проходит.
@@ -90,9 +98,7 @@ func (s *Store) Authenticate(ctx context.Context, login, password string) (domai
 		SELECT `+userCols+`, password_hash FROM users WHERE login=$1 AND NOT disabled`, login).
 		Scan(&u.ID, &u.Login, &u.Name, &u.Admin, &u.Disabled, &u.Created, &hash)
 	if err != nil {
-		// Выравниваем стоимость ответа: bcrypt считается и для неизвестного логина.
-		_ = bcrypt.CompareHashAndPassword(
-			[]byte("$2a$10$7EqJtq98hPqEX7fNZaFWoOhi5B0xM1I8PXlOD7rD1JZ8mSyyzXwEq"), []byte(password))
+		EqualizeAuthCost(password)
 		return domain.User{}, ErrNotFound
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
@@ -107,6 +113,30 @@ func (s *Store) Authenticate(ctx context.Context, login, password string) (domai
 func (s *Store) SetUserState(ctx context.Context, id string, name *string, disabled *bool) (domain.User, error) {
 	var u domain.User
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		// Деактивация начинает с блокировки всех активных админов в
+		// детерминированном порядке (ORDER BY id): параллельные деактивации
+		// сериализуются без deadlock'а и не могут вдвоём пройти проверку
+		// «остался другой активный админ».
+		var activeAdmins []string
+		if disabled != nil && *disabled {
+			rows, err := tx.Query(ctx,
+				`SELECT id FROM users WHERE is_admin AND NOT disabled ORDER BY id FOR UPDATE`)
+			if err != nil {
+				return err
+			}
+			for rows.Next() {
+				var a string
+				if err := rows.Scan(&a); err != nil {
+					rows.Close()
+					return err
+				}
+				activeAdmins = append(activeAdmins, a)
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return err
+			}
+		}
 		var err error
 		u, err = scanUser(tx.QueryRow(ctx, `SELECT `+userCols+` FROM users WHERE id=$1 FOR UPDATE`, id))
 		if err != nil {
@@ -117,12 +147,13 @@ func (s *Store) SetUserState(ctx context.Context, id string, name *string, disab
 		}
 		if disabled != nil && *disabled && !u.Disabled {
 			if u.Admin {
-				var admins int
-				if err := tx.QueryRow(ctx,
-					`SELECT COUNT(*) FROM users WHERE is_admin AND NOT disabled AND id <> $1`, id).Scan(&admins); err != nil {
-					return err
+				others := 0
+				for _, a := range activeAdmins {
+					if a != id {
+						others++
+					}
 				}
-				if admins == 0 {
+				if others == 0 {
 					return ErrLastAdmin
 				}
 			}

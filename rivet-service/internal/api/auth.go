@@ -72,12 +72,22 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 			unauthorized(w)
 			return
 		}
-		if viaCookie && !crossSiteSafe(r) {
+		if viaCookie && !s.crossSiteSafe(r) {
 			forbidden(w, "запрос отклонён CSRF-защитой (Origin не совпадает)")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))
 	})
+}
+
+// sseSessionUser — пользователь живой cookie-сессии для SSE (Bearer не
+// принимается: отзыв потока привязан к сессии консоли).
+func (s *Server) sseSessionUser(r *http.Request) (domain.User, error) {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		return domain.User{}, store.ErrNotFound
+	}
+	return s.St.UserBySession(r.Context(), c.Value)
 }
 
 // bearerSecret извлекает секрет из "Authorization: Bearer <секрет>".
@@ -90,23 +100,30 @@ func bearerSecret(header string) string {
 	return strings.TrimSpace(header[len(prefix):])
 }
 
-// crossSiteSafe — валидация происхождения мутаций с cookie-аутентификацией:
-// браузер шлёт Origin на POST; чужой origin отклоняется. Запросы без Origin
-// (curl и пр.) пропускаются — cookie у них не берётся из браузерного контекста.
-func crossSiteSafe(r *http.Request) bool {
+// crossSiteSafe — валидация происхождения мутаций с cookie-аутентификацией
+// (design, решение 12): Sec-Fetch-Site браузера не должен быть cross-site,
+// Origin (браузер шлёт его на POST) обязан совпадать со схемой и хостом
+// запроса. Запросы без обоих заголовков (curl и пр.) пропускаются — cookie
+// у них не берётся из браузерного контекста.
+func (s *Server) crossSiteSafe(r *http.Request) bool {
 	switch r.Method {
 	case http.MethodGet, http.MethodHead, http.MethodOptions:
 		return true
 	}
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+	default:
+		return false
+	}
 	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
+	if origin == "" || origin == "null" {
+		return origin == ""
 	}
-	rest, ok := strings.CutPrefix(origin, "http://")
-	if !ok {
-		rest, ok = strings.CutPrefix(origin, "https://")
+	scheme := "http://"
+	if r.TLS != nil || (s.TrustProxy && r.Header.Get("X-Forwarded-Proto") == "https") {
+		scheme = "https://"
 	}
-	return ok && rest == r.Host
+	return origin == scheme+r.Host
 }
 
 // ─── защита от перебора (design, решение 10) ─────────────────────────────
@@ -140,6 +157,16 @@ func (t *loginThrottle) locked(key string) bool {
 func (t *loginThrottle) fail(key string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	// Кап памяти: поток уникальных ключей не растит карту бесконечно —
+	// при переполнении выбрасываются записи с прошедшим окном.
+	if len(t.fails) >= 10000 {
+		now := time.Now()
+		for k, e := range t.fails {
+			if now.After(e.until) {
+				delete(t.fails, k)
+			}
+		}
+	}
 	e := t.fails[key]
 	if e == nil {
 		e = &throttleEntry{}
@@ -181,7 +208,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	lKey, ipKey := "l:"+in.Login, "ip:"+clientIP(r)
 	if s.throttle.locked(lKey) || s.throttle.locked(ipKey) {
-		// Окно задержки: не тратим bcrypt, ответ неотличим от неверного пароля.
+		// Окно задержки: пароль не проверяется, но стоимость ответа
+		// выравнивается dummy-bcrypt — состояние throttle не читается по таймингу.
+		store.EqualizeAuthCost(in.Password)
 		unauthorized(w)
 		return
 	}
@@ -203,11 +232,15 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
-		if err := s.St.DeleteAuthSession(r.Context(), c.Value); err != nil {
-			writeErr(w, err)
-			return
-		}
+	// Logout — операция над cookie-сессией; Bearer-запросу гасить нечего (401).
+	c, err := r.Cookie(sessionCookie)
+	if err != nil || c.Value == "" {
+		unauthorized(w)
+		return
+	}
+	if err := s.St.DeleteAuthSession(r.Context(), c.Value); err != nil {
+		writeErr(w, err)
+		return
 	}
 	http.SetCookie(w, s.sessionCookie(r, "", -1))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
@@ -259,8 +292,12 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Admin    bool   `json:"admin"`
 	}
-	if err := decode(r, &in); err != nil || in.Login == "" || in.Password == "" {
+	if err := decode(r, &in); err != nil || in.Password == "" {
 		unprocessable(w, "нужны login и password")
+		return
+	}
+	if !domain.ValidLogin(in.Login) {
+		unprocessable(w, "login: латиница, цифры, «._-», длина 1–64")
 		return
 	}
 	u, err := s.St.CreateUser(r.Context(), in.Login, in.Name, in.Password, in.Admin)
@@ -315,24 +352,23 @@ func (s *Server) requireMember(w http.ResponseWriter, r *http.Request, projectID
 	return true
 }
 
-// requireEpicMember — членство через проект Epic'а.
+// requireEpicMember — членство через проект Epic'а (один scoped-запрос:
+// чужой и несуществующий epic неотличимы, в том числе по таймингу).
 func (s *Server) requireEpicMember(w http.ResponseWriter, r *http.Request, epicID string) bool {
-	e, err := s.St.GetEpic(r.Context(), epicID)
-	if err != nil {
+	if _, err := s.St.EpicForViewer(r.Context(), epicID, currentUser(r).ID); err != nil {
 		writeErr(w, err)
 		return false
 	}
-	return s.requireMember(w, r, e.ProjectID)
+	return true
 }
 
 // requireTaskMember — членство через проект задачи.
 func (s *Server) requireTaskMember(w http.ResponseWriter, r *http.Request, taskID string) bool {
-	projectID, _, err := s.St.TaskRefs(r.Context(), taskID)
-	if err != nil {
+	if _, err := s.St.TaskProjectForViewer(r.Context(), taskID, currentUser(r).ID); err != nil {
 		writeErr(w, err)
 		return false
 	}
-	return s.requireMember(w, r, projectID)
+	return true
 }
 
 func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {

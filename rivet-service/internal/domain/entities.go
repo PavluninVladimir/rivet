@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"regexp"
+	"time"
+)
 
 type Project struct {
 	ID      string
@@ -102,6 +105,12 @@ type Session struct {
 	Started       time.Time
 	Ended         *time.Time
 }
+
+// loginRe — формат login: URL-safe (login живёт в путях API и event log).
+var loginRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
+
+// ValidLogin — допустим ли login: латиница/цифры/._-, до 64 символов.
+func ValidLogin(login string) bool { return loginRe.MatchString(login) }
 
 // User — учётная запись человека (спека domain-model «Пользователи и членство
 // в проекте»). Login неизменяем: по нему атрибутируются события.

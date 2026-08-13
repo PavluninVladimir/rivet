@@ -264,8 +264,14 @@ func (s *Store) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 }
 
 func (s *Store) SetRunnerDraining(ctx context.Context, id string, draining bool) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE runners SET draining=$2 WHERE id=$1`, id, draining)
-	return err
+	tag, err := s.Pool.Exec(ctx, `UPDATE runners SET draining=$2 WHERE id=$1`, id, draining)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ─── attention ───────────────────────────────────────────────────────────

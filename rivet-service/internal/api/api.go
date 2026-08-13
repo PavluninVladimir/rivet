@@ -194,12 +194,9 @@ type epicView struct {
 }
 
 func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
-	e, err := s.St.GetEpic(r.Context(), r.PathValue("id"))
+	e, err := s.St.EpicForViewer(r.Context(), r.PathValue("id"), currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
-		return
-	}
-	if !s.requireMember(w, r, e.ProjectID) {
 		return
 	}
 	tasks, err := s.St.ListEpicTasks(r.Context(), e.ID)
@@ -472,7 +469,17 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 		unprocessable(w, "нужен параметр project")
 		return
 	}
-	if !s.requireMember(w, r, projectID) {
+	// SSE аутентифицируется только cookie (api-contract): поток долгоживущий,
+	// его отзыв привязан к сессии консоли. Bearer сюда не годится, поэтому
+	// cookie проверяется по-настоящему, а не полагаемся на middleware
+	// (иначе битая cookie + валидный PAT дали бы поток мимо сессии).
+	sessionUser, err := s.sseSessionUser(r)
+	if err != nil {
+		unauthorized(w)
+		return
+	}
+	if ok, err := s.St.IsMember(r.Context(), projectID, sessionUser.ID); err != nil || !ok {
+		writeErr(w, store.ErrNotFound)
 		return
 	}
 	fl, ok := w.(http.Flusher)
@@ -491,6 +498,20 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 
 	poll := time.NewTicker(time.Second)
 	defer poll.Stop()
+
+	// Отзыв доступа закрывает открытый поток: сессия и членство
+	// перепроверяются раз в recheckEvery тиков (деактивация, logout,
+	// удаление из проекта — данные перестают течь, api-contract «SSE»).
+	const recheckEvery = 10
+	ticks := 0
+	accessAlive := func() bool {
+		u, err := s.sseSessionUser(r)
+		if err != nil {
+			return false
+		}
+		ok, err := s.St.IsMember(r.Context(), projectID, u.ID)
+		return err == nil && ok
+	}
 
 	flushEvents := func() bool {
 		evs, err := s.St.Events(r.Context(), store.EventFilter{ProjectID: projectID, AfterID: after, Limit: 200})
@@ -521,6 +542,9 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "event: session.log\ndata: %s\n\n", payload)
 			fl.Flush()
 		case <-poll.C:
+			if ticks++; ticks%recheckEvery == 0 && !accessAlive() {
+				return
+			}
 			if !flushEvents() {
 				return
 			}

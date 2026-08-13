@@ -325,6 +325,97 @@ func TestAdminAndDeactivation(t *testing.T) {
 	mustStatus(t, resp, http.StatusConflict, "деактивация последнего админа")
 }
 
+// CSRF: мутация с cookie и чужим Origin/Sec-Fetch-Site отклоняется,
+// родной Origin и запросы без браузерных заголовков проходят.
+func TestCSRFOriginCheck(t *testing.T) {
+	st, srv := testServer(t)
+	if err := st.Bootstrap(context.Background(), "root", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	session := loginSession(t, srv, "root", "secret")
+
+	mutate := func(hdr map[string]string) int {
+		t.Helper()
+		req, err := http.NewRequest("POST", srv.URL+"/api/v1/projects", strings.NewReader(`{"name":"p","repo":"o/r"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if got := mutate(map[string]string{"Origin": "http://evil.example"}); got != http.StatusForbidden {
+		t.Fatalf("чужой Origin: HTTP %d, ожидался 403", got)
+	}
+	if got := mutate(map[string]string{"Sec-Fetch-Site": "cross-site"}); got != http.StatusForbidden {
+		t.Fatalf("cross-site: HTTP %d, ожидался 403", got)
+	}
+	if got := mutate(map[string]string{"Origin": srv.URL}); got != http.StatusCreated {
+		t.Fatalf("родной Origin: HTTP %d, ожидался 201", got)
+	}
+	if got := mutate(nil); got != http.StatusCreated {
+		t.Fatalf("без Origin (curl): HTTP %d, ожидался 201", got)
+	}
+}
+
+// Формат login: URL-safe, иначе 422.
+func TestCreateUserLoginValidation(t *testing.T) {
+	st, srv := testServer(t)
+	if err := st.Bootstrap(context.Background(), "root", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	root := loginSession(t, srv, "root", "secret")
+	for _, bad := range []string{"", "с пробелом", "a/b", strings.Repeat("x", 65)} {
+		resp, _ := call(t, "POST", srv.URL+"/api/v1/users", root, "", map[string]string{"login": bad, "password": "pw"})
+		mustStatus(t, resp, http.StatusUnprocessableEntity, "login "+bad)
+	}
+}
+
+// Logout — операция cookie-сессии: Bearer-запросу гасить нечего.
+func TestLogoutRequiresCookie(t *testing.T) {
+	st, srv := testServer(t)
+	if err := st.Bootstrap(context.Background(), "root", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	session := loginSession(t, srv, "root", "secret")
+	_, body := call(t, "POST", srv.URL+"/api/v1/tokens", session, "", map[string]string{"name": "cli"})
+	var created struct{ Secret string }
+	_ = json.Unmarshal(body, &created)
+	resp, _ := call(t, "POST", srv.URL+"/api/v1/auth/logout", "", created.Secret, nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "logout по Bearer")
+}
+
+// SSE — только живая cookie-сессия: битая cookie с валидным PAT не открывает
+// поток мимо сессии.
+func TestSSECookieOnly(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if err := st.Bootstrap(ctx, "root", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	session := loginSession(t, srv, "root", "secret")
+	resp, body := call(t, "POST", srv.URL+"/api/v1/projects", session, "", map[string]string{"name": "p", "repo": "o/r"})
+	mustStatus(t, resp, http.StatusCreated, "проект")
+	var project domain.Project
+	_ = json.Unmarshal(body, &project)
+	_, bodyTok := call(t, "POST", srv.URL+"/api/v1/tokens", session, "", map[string]string{"name": "cli"})
+	var created struct{ Secret string }
+	_ = json.Unmarshal(bodyTok, &created)
+
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/stream?project="+project.ID, "bogus", created.Secret, nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "SSE с битой cookie и валидным PAT")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/stream?project="+project.ID, "", created.Secret, nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "SSE только по Bearer")
+}
+
 // Redaction: TaskID runner'а виден только участнику проекта задачи.
 func TestRunnerTaskRedaction(t *testing.T) {
 	st, srv := testServer(t)

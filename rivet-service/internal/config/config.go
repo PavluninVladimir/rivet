@@ -12,7 +12,11 @@ type Config struct {
 	DatabaseURL string
 	// HTTPAddr — адрес клиентского API (REST + SSE).
 	HTTPAddr string
-	// GRPCAddr — адрес протокола runner'ов.
+	// GRPCAddr — адрес протокола runner'ов. Граница угроз (design
+	// add-users-and-access, решение 13): протокол пока не аутентифицируется,
+	// порт обязан быть закрыт сетевым периметром (loopback или приватная
+	// сеть, как в docker-compose). Наружу не публиковать; mTLS/секрет
+	// runner'а — отдельный change.
 	GRPCAddr string
 
 	// S3 — объектное хранилище транскриптов (MinIO в dev).

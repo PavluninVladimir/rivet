@@ -21,6 +21,9 @@ func (s *Store) Bootstrap(ctx context.Context, adminLogin, adminPassword string)
 		if adminLogin == "" || adminPassword == "" {
 			return errors.New("нет ни одного пользователя: задайте RIVET_ADMIN_LOGIN и RIVET_ADMIN_PASSWORD для bootstrap первого администратора")
 		}
+		if !domain.ValidLogin(adminLogin) {
+			return errors.New("RIVET_ADMIN_LOGIN: латиница, цифры, «._-», длина 1–64")
+		}
 		u, err := s.CreateUser(ctx, adminLogin, adminLogin, adminPassword, true)
 		if err != nil {
 			return err
