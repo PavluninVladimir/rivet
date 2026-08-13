@@ -23,10 +23,28 @@ type Server struct {
 	// WebhookSecret — секрет HMAC-подписи входящих webhook'ов;
 	// пустой выключает endpoint (fail-closed, спека scm-integration).
 	WebhookSecret string
+	// TrustProxy — доверять X-Forwarded-Proto при выставлении Secure-cookie
+	// (rivetd за TLS-терминирующим прокси; design, решение 12).
+	TrustProxy bool
+
+	throttle *loginThrottle
 }
 
 func (s *Server) Handler() http.Handler {
+	s.throttle = newLoginThrottle()
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/login", s.login)
+	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
+	mux.HandleFunc("GET /api/v1/auth/me", s.me)
+	mux.HandleFunc("GET /api/v1/users", s.listUsers)
+	mux.HandleFunc("POST /api/v1/users", s.createUser)
+	mux.HandleFunc("PATCH /api/v1/users/{id}", s.patchUser)
+	mux.HandleFunc("GET /api/v1/projects/{id}/members", s.listMembers)
+	mux.HandleFunc("POST /api/v1/projects/{id}/members", s.addMember)
+	mux.HandleFunc("DELETE /api/v1/projects/{id}/members/{login}", s.removeMember)
+	mux.HandleFunc("GET /api/v1/tokens", s.listTokens)
+	mux.HandleFunc("POST /api/v1/tokens", s.createToken)
+	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.deleteToken)
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
 	mux.HandleFunc("POST /api/v1/projects", s.createProject)
@@ -53,15 +71,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/usage", s.usage)
 	mux.HandleFunc("GET /api/v1/stream", s.sse)
 	mux.HandleFunc("POST /api/v1/webhooks/github", s.githubWebhook)
-	return mux
-}
-
-// user — идентичность пользователя; до появления аутентификации — dev-заголовок.
-func user(r *http.Request) string {
-	if u := r.Header.Get("X-Rivet-User"); u != "" {
-		return u
-	}
-	return "dev"
+	return s.withAuth(mux)
 }
 
 // ─── формат ошибок и ответов ─────────────────────────────────────────────
@@ -81,6 +91,10 @@ func writeErr(w http.ResponseWriter, err error) {
 		status, code = http.StatusNotFound, "not_found"
 	case errors.As(err, &bad):
 		status, code = http.StatusConflict, "bad_transition"
+	case errors.Is(err, store.ErrConflict),
+		errors.Is(err, store.ErrLastAdmin),
+		errors.Is(err, store.ErrLastMember):
+		status, code = http.StatusConflict, "conflict"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -111,7 +125,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 // ─── projects ────────────────────────────────────────────────────────────
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
-	out, err := s.St.ListProjects(r.Context())
+	out, err := s.St.ListProjects(r.Context(), currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -129,7 +143,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		unprocessable(w, "нужны name и repo (owner/name)")
 		return
 	}
-	p, err := s.St.CreateProject(r.Context(), in.Name, in.Repo, in.Checks)
+	p, err := s.St.CreateProject(r.Context(), in.Name, in.Repo, in.Checks, currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -140,6 +154,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 // ─── epics ───────────────────────────────────────────────────────────────
 
 func (s *Server) listEpics(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMember(w, r, r.PathValue("id")) {
+		return
+	}
 	out, err := s.St.ListEpics(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
@@ -155,6 +172,9 @@ func (s *Server) createEpic(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decode(r, &in); err != nil || in.Title == "" {
 		unprocessable(w, "нужен title")
+		return
+	}
+	if !s.requireMember(w, r, r.PathValue("id")) {
 		return
 	}
 	e, err := s.St.CreateEpic(r.Context(), r.PathValue("id"), in.Title, in.Goal)
@@ -174,7 +194,7 @@ type epicView struct {
 }
 
 func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
-	e, err := s.St.GetEpic(r.Context(), r.PathValue("id"))
+	e, err := s.St.EpicForViewer(r.Context(), r.PathValue("id"), currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -210,6 +230,9 @@ func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) addTask(w http.ResponseWriter, r *http.Request) {
 	epicID := r.PathValue("id")
+	if !s.requireEpicMember(w, r, epicID) {
+		return
+	}
 	var in struct {
 		Title        string   `json:"title"`
 		Description  string   `json:"description"`
@@ -253,6 +276,9 @@ func (s *Server) addTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) epicAction(to domain.EpicStatus, text string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireEpicMember(w, r, r.PathValue("id")) {
+			return
+		}
 		err := s.St.TransitionEpic(r.Context(), r.PathValue("id"), to, store.EventInput{
 			ActorKind: domain.ActorUser, ActorID: user(r), Type: "epic.status",
 			Text: text, Payload: map[string]any{"status": string(to)},
@@ -268,6 +294,9 @@ func (s *Server) epicAction(to domain.EpicStatus, text string) http.HandlerFunc 
 // ─── tasks ───────────────────────────────────────────────────────────────
 
 func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTaskMember(w, r, r.PathValue("id")) {
+		return
+	}
 	t, err := s.St.GetTask(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
@@ -282,6 +311,9 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) taskAnswer(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTaskMember(w, r, r.PathValue("id")) {
+		return
+	}
 	var in struct {
 		Text string `json:"text"`
 	}
@@ -297,6 +329,9 @@ func (s *Server) taskAnswer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) taskRetry(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTaskMember(w, r, r.PathValue("id")) {
+		return
+	}
 	if err := s.St.ResolveTask(r.Context(), r.PathValue("id"), "", user(r), false); err != nil {
 		writeErr(w, err)
 		return
@@ -305,6 +340,9 @@ func (s *Server) taskRetry(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) taskCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTaskMember(w, r, r.PathValue("id")) {
+		return
+	}
 	if err := s.St.ResolveTask(r.Context(), r.PathValue("id"), "", user(r), true); err != nil {
 		writeErr(w, err)
 		return
@@ -313,6 +351,9 @@ func (s *Server) taskCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) taskMerge(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTaskMember(w, r, r.PathValue("id")) {
+		return
+	}
 	if err := s.Engine.MergeTask(r.Context(), r.PathValue("id"), user(r)); err != nil {
 		writeErr(w, err)
 		return
@@ -323,7 +364,7 @@ func (s *Server) taskMerge(w http.ResponseWriter, r *http.Request) {
 // ─── attention / runners / events / usage ────────────────────────────────
 
 func (s *Server) listAttention(w http.ResponseWriter, r *http.Request) {
-	out, err := s.St.ListAttention(r.Context())
+	out, err := s.St.ListAttention(r.Context(), currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -332,7 +373,7 @@ func (s *Server) listAttention(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) claimAttention(w http.ResponseWriter, r *http.Request) {
-	if err := s.St.ClaimAttention(r.Context(), r.PathValue("id"), user(r)); err != nil {
+	if err := s.St.ClaimAttention(r.Context(), r.PathValue("id"), user(r), currentUser(r).ID); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -345,11 +386,34 @@ func (s *Server) listRunners(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Метаданные чужой работы не раскрываются: TaskID виден только участникам
+	// проекта задачи (api-contract, design решение 5).
+	for i, rn := range out {
+		if rn.TaskID == "" {
+			continue
+		}
+		projectID, _, err := s.St.TaskRefs(r.Context(), rn.TaskID)
+		if err != nil {
+			out[i].TaskID = ""
+			continue
+		}
+		member, err := s.St.IsMember(r.Context(), projectID, currentUser(r).ID)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		if !member {
+			out[i].TaskID = ""
+		}
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) runnerDrain(drain bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireAdmin(w, r) {
+			return
+		}
 		if err := s.St.SetRunnerDraining(r.Context(), r.PathValue("id"), drain); err != nil {
 			writeErr(w, err)
 			return
@@ -365,6 +429,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	out, err := s.St.Events(r.Context(), store.EventFilter{
 		ProjectID: q.Get("project"), EpicID: q.Get("epic"),
 		TaskID: q.Get("task"), Type: q.Get("type"), AfterID: after,
+		ViewerID: currentUser(r).ID,
 	})
 	if err != nil {
 		writeErr(w, err)
@@ -386,7 +451,7 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 			*dst = t
 		}
 	}
-	out, err := s.St.UsageSummary(r.Context(), q.Get("group_by"), from, to)
+	out, err := s.St.UsageSummary(r.Context(), currentUser(r).ID, q.Get("group_by"), from, to)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -402,6 +467,19 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
 	if projectID == "" {
 		unprocessable(w, "нужен параметр project")
+		return
+	}
+	// SSE аутентифицируется только cookie (api-contract): поток долгоживущий,
+	// его отзыв привязан к сессии консоли. Bearer сюда не годится, поэтому
+	// cookie проверяется по-настоящему, а не полагаемся на middleware
+	// (иначе битая cookie + валидный PAT дали бы поток мимо сессии).
+	sessionUser, err := s.sseSessionUser(r)
+	if err != nil {
+		unauthorized(w)
+		return
+	}
+	if ok, err := s.St.IsMember(r.Context(), projectID, sessionUser.ID); err != nil || !ok {
+		writeErr(w, store.ErrNotFound)
 		return
 	}
 	fl, ok := w.(http.Flusher)
@@ -420,6 +498,20 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 
 	poll := time.NewTicker(time.Second)
 	defer poll.Stop()
+
+	// Отзыв доступа закрывает открытый поток: сессия и членство
+	// перепроверяются раз в recheckEvery тиков (деактивация, logout,
+	// удаление из проекта — данные перестают течь, api-contract «SSE»).
+	const recheckEvery = 10
+	ticks := 0
+	accessAlive := func() bool {
+		u, err := s.sseSessionUser(r)
+		if err != nil {
+			return false
+		}
+		ok, err := s.St.IsMember(r.Context(), projectID, u.ID)
+		return err == nil && ok
+	}
 
 	flushEvents := func() bool {
 		evs, err := s.St.Events(r.Context(), store.EventFilter{ProjectID: projectID, AfterID: after, Limit: 200})
@@ -450,6 +542,9 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "event: session.log\ndata: %s\n\n", payload)
 			fl.Flush()
 		case <-poll.C:
+			if ticks++; ticks%recheckEvery == 0 && !accessAlive() {
+				return
+			}
 			if !flushEvents() {
 				return
 			}

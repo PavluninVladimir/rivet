@@ -26,9 +26,18 @@ func apiURL() string {
 	return "http://localhost:8080"
 }
 
-// apiGet выполняет GET к rivetd и декодирует JSON-ответ в out.
+// apiGet выполняет GET к rivetd (PAT из RIVET_TOKEN) и декодирует JSON в out.
 func apiGet(path string, out any) error {
-	resp, err := httpClient.Get(apiURL() + path)
+	token := os.Getenv("RIVET_TOKEN")
+	if token == "" {
+		return fmt.Errorf("не задан RIVET_TOKEN: выпусти personal access token (POST /api/v1/tokens) и экспортируй его")
+	}
+	req, err := http.NewRequest(http.MethodGet, apiURL()+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -36,6 +45,9 @@ func apiGet(path string, out any) error {
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	if err != nil {
 		return err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("rivetd отклонил RIVET_TOKEN (HTTP 401): токен отозван, истёк или неверен")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, body)

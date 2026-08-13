@@ -12,7 +12,11 @@ type Config struct {
 	DatabaseURL string
 	// HTTPAddr — адрес клиентского API (REST + SSE).
 	HTTPAddr string
-	// GRPCAddr — адрес протокола runner'ов.
+	// GRPCAddr — адрес протокола runner'ов. Граница угроз (design
+	// add-users-and-access, решение 13): протокол пока не аутентифицируется,
+	// порт обязан быть закрыт сетевым периметром (loopback или приватная
+	// сеть, как в docker-compose). Наружу не публиковать; mTLS/секрет
+	// runner'а — отдельный change.
 	GRPCAddr string
 
 	// S3 — объектное хранилище транскриптов (MinIO в dev).
@@ -39,6 +43,14 @@ type Config struct {
 	DeepSeekAPIKey string
 	DeepSeekModel  string
 
+	// AdminLogin/AdminPassword — bootstrap первого администратора при пустой
+	// таблице пользователей (спека access-policy «Аутентификация пользователей»).
+	AdminLogin    string
+	AdminPassword string
+	// TrustProxy — доверять X-Forwarded-Proto от прокси при выставлении
+	// Secure-cookie (rivetd за TLS-терминирующим reverse proxy).
+	TrustProxy bool
+
 	// RunnerHeartbeatTimeout — тишина от runner'а, после которой он offline.
 	RunnerHeartbeatTimeout time.Duration
 	// DefaultAttemptLimit — лимит попыток задачи по умолчанию (спека orchestration).
@@ -62,6 +74,9 @@ func FromEnv() (Config, error) {
 		AnthropicAPIKey:        os.Getenv("ANTHROPIC_API_KEY"),
 		DeepSeekAPIKey:         os.Getenv("DEEPSEEK_API_KEY"),
 		DeepSeekModel:          os.Getenv("RIVET_DEEPSEEK_MODEL"),
+		AdminLogin:             os.Getenv("RIVET_ADMIN_LOGIN"),
+		AdminPassword:          os.Getenv("RIVET_ADMIN_PASSWORD"),
+		TrustProxy:             os.Getenv("RIVET_TRUST_PROXY") == "1",
 		RunnerHeartbeatTimeout: 90 * time.Second,
 		DefaultAttemptLimit:    3,
 	}

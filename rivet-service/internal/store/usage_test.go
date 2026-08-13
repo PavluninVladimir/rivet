@@ -10,11 +10,12 @@ import (
 
 func ptr[T any](v T) *T { return &v }
 
-// seedUsage — проект/epic/две задачи для usage-тестов.
-func seedUsage(t *testing.T, s *Store) (projectID, epicID string, taskA, taskB domain.Task) {
+// seedUsage — владелец/проект/epic/две задачи для usage-тестов.
+func seedUsage(t *testing.T, s *Store) (owner domain.User, projectID, epicID string, taskA, taskB domain.Task) {
 	t.Helper()
 	ctx := context.Background()
-	p, err := s.CreateProject(ctx, "demo", "owner/repo", nil)
+	owner = mustOwner(t, s)
+	p, err := s.CreateProject(ctx, "demo", "owner/repo", nil, owner.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +23,7 @@ func seedUsage(t *testing.T, s *Store) (projectID, epicID string, taskA, taskB d
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p.ID, e.ID, mustTask(t, s, e.ID, NewTask{Title: "A"}), mustTask(t, s, e.ID, NewTask{Title: "B"})
+	return owner, p.ID, e.ID, mustTask(t, s, e.ID, NewTask{Title: "A"}), mustTask(t, s, e.ID, NewTask{Title: "B"})
 }
 
 // Идемпотентность billing-grade: повтор source_msg_id не удваивает счёт,
@@ -30,7 +31,7 @@ func seedUsage(t *testing.T, s *Store) (projectID, epicID string, taskA, taskB d
 func TestRecordUsageIdempotentNullable(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	projectID, epicID, task, _ := seedUsage(t, s)
+	_, projectID, epicID, task, _ := seedUsage(t, s)
 
 	in := UsageInput{
 		SourceMsgID: "msg-1", ProjectID: projectID, EpicID: epicID, TaskID: task.ID,
@@ -62,7 +63,7 @@ func TestRecordUsageIdempotentNullable(t *testing.T) {
 func TestUsageSummaryNullAggregation(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	projectID, epicID, taskA, taskB := seedUsage(t, s)
+	owner, projectID, epicID, taskA, taskB := seedUsage(t, s)
 
 	rec := func(msgID, taskID string, in *int64, cost *float64) {
 		t.Helper()
@@ -77,7 +78,7 @@ func TestUsageSummaryNullAggregation(t *testing.T) {
 	rec("m2", taskA.ID, nil, nil) // агент не отчитался
 	rec("m3", taskB.ID, nil, nil) // по задаче B данных нет вовсе
 
-	rows, err := s.UsageSummary(ctx, "task", time.Time{}, time.Time{})
+	rows, err := s.UsageSummary(ctx, owner.ID, "task", time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +98,7 @@ func TestUsageSummaryNullAggregation(t *testing.T) {
 	}
 
 	// Период: будущий from отсекает всё.
-	rows, err = s.UsageSummary(ctx, "task", time.Now().Add(time.Hour), time.Time{})
+	rows, err = s.UsageSummary(ctx, owner.ID, "task", time.Now().Add(time.Hour), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +106,7 @@ func TestUsageSummaryNullAggregation(t *testing.T) {
 		t.Fatalf("будущий from: ожидалось 0 групп, получено %d", len(rows))
 	}
 	// Прошедший to отсекает всё.
-	rows, err = s.UsageSummary(ctx, "task", time.Time{}, time.Now().Add(-time.Hour))
+	rows, err = s.UsageSummary(ctx, owner.ID, "task", time.Time{}, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +119,7 @@ func TestUsageSummaryNullAggregation(t *testing.T) {
 func TestEpicUsageTotals(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	projectID, epicID, taskA, taskB := seedUsage(t, s)
+	_, projectID, epicID, taskA, taskB := seedUsage(t, s)
 
 	if err := s.RecordUsage(ctx, UsageInput{
 		SourceMsgID: "m1", ProjectID: projectID, EpicID: epicID, TaskID: taskA.ID,
@@ -159,7 +160,7 @@ func TestEpicUsageTotals(t *testing.T) {
 func TestEndSessionTokens(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	projectID, epicID, task, _ := seedUsage(t, s)
+	_, projectID, epicID, task, _ := seedUsage(t, s)
 
 	sessionID, err := s.CreateSession(ctx, domain.Session{
 		TaskID: task.ID, Attempt: 1, DriverKind: "scheduler", DriverID: "sched",

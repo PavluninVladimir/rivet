@@ -53,6 +53,11 @@ func run(ctx context.Context, cfg config.Config) error {
 	}
 	defer st.Close()
 
+	// Fail-fast до listener'ов: без владельца установка не поднимается.
+	if err := st.Bootstrap(ctx, cfg.AdminLogin, cfg.AdminPassword); err != nil {
+		return err
+	}
+
 	bl, err := blob.New(cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
 	if err != nil {
 		return err
@@ -85,6 +90,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	root.Handle("/api/", (&api.Server{
 		St: st, Engine: engine, Hub: hub, Planner: pl,
 		WebhookSecret: cfg.GitHubWebhookSecret,
+		TrustProxy:    cfg.TrustProxy,
 	}).Handler())
 	root.Handle("/", webui.Handler())
 	httpSrv := &http.Server{

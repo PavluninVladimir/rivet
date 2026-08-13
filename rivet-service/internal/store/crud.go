@@ -12,12 +12,21 @@ import (
 
 // ─── projects ────────────────────────────────────────────────────────────
 
-func (s *Store) CreateProject(ctx context.Context, name, repo string, checks []domain.Check) (domain.Project, error) {
+// CreateProject создаёт проект; создатель становится его участником в той же
+// транзакции (design add-users-and-access, решение 6).
+func (s *Store) CreateProject(ctx context.Context, name, repo string, checks []domain.Check, creatorID string) (domain.Project, error) {
 	raw, _ := json.Marshal(checks)
 	p := domain.Project{Name: name, Repo: repo, Checks: checks}
-	err := s.Pool.QueryRow(ctx,
-		`INSERT INTO projects (name, repo, checks) VALUES ($1,$2,$3) RETURNING id, created_at`,
-		name, repo, raw).Scan(&p.ID, &p.Created)
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx,
+			`INSERT INTO projects (name, repo, checks) VALUES ($1,$2,$3) RETURNING id, created_at`,
+			name, repo, raw).Scan(&p.ID, &p.Created); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO project_members (project_id, user_id) VALUES ($1,$2)`, p.ID, creatorID)
+		return err
+	})
 	return p, err
 }
 
@@ -34,8 +43,13 @@ func (s *Store) GetProject(ctx context.Context, id string) (domain.Project, erro
 	return p, err
 }
 
-func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT id, name, repo, checks, created_at FROM projects ORDER BY created_at`)
+// ListProjects — только проекты пользователя (слой 1 access-policy;
+// исключения для админа нет, спека domain-model).
+func (s *Store) ListProjects(ctx context.Context, userID string) ([]domain.Project, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT p.id, p.name, p.repo, p.checks, p.created_at FROM projects p
+		JOIN project_members m ON m.project_id = p.id AND m.user_id = $1
+		ORDER BY p.created_at`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -250,16 +264,25 @@ func (s *Store) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 }
 
 func (s *Store) SetRunnerDraining(ctx context.Context, id string, draining bool) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE runners SET draining=$2 WHERE id=$1`, id, draining)
-	return err
+	tag, err := s.Pool.Exec(ctx, `UPDATE runners SET draining=$2 WHERE id=$1`, id, draining)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ─── attention ───────────────────────────────────────────────────────────
 
-func (s *Store) ListAttention(ctx context.Context) ([]domain.Attention, error) {
+// ListAttention — эскалации проектов пользователя (слой 1 access-policy).
+func (s *Store) ListAttention(ctx context.Context, userID string) ([]domain.Attention, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, project_id, task_id, reason, message, status, COALESCE(claimed_by,''), created_at
-		FROM attention WHERE status <> 'resolved' ORDER BY created_at`)
+		SELECT a.id, a.project_id, a.task_id, a.reason, a.message, a.status, COALESCE(a.claimed_by,''), a.created_at
+		FROM attention a
+		JOIN project_members m ON m.project_id = a.project_id AND m.user_id = $1
+		WHERE a.status <> 'resolved' ORDER BY a.created_at`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -276,9 +299,12 @@ func (s *Store) ListAttention(ctx context.Context) ([]domain.Attention, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) ClaimAttention(ctx context.Context, id, user string) error {
-	tag, err := s.Pool.Exec(ctx,
-		`UPDATE attention SET status='claimed', claimed_by=$2 WHERE id=$1 AND status='open'`, id, user)
+// ClaimAttention берёт эскалацию в работу; эскалации чужих проектов
+// неотличимы от несуществующих (404-семантика).
+func (s *Store) ClaimAttention(ctx context.Context, id, login, userID string) error {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE attention SET status='claimed', claimed_by=$2 WHERE id=$1 AND status='open'
+		AND project_id IN (SELECT project_id FROM project_members WHERE user_id=$3)`, id, login, userID)
 	if err != nil {
 		return err
 	}
@@ -353,9 +379,10 @@ type UsageRow struct {
 	Duration  int64    `json:"duration_s"`
 }
 
-// UsageSummary агрегирует usage за полуинтервал [from, to); нулевое время —
-// граница не задана.
-func (s *Store) UsageSummary(ctx context.Context, groupBy string, from, to time.Time) ([]UsageRow, error) {
+// UsageSummary агрегирует usage за полуинтервал [from, to) по проектам
+// пользователя viewerID (слой 1 access-policy); нулевое время — граница
+// не задана.
+func (s *Store) UsageSummary(ctx context.Context, viewerID, groupBy string, from, to time.Time) ([]UsageRow, error) {
 	col := map[string]string{
 		"epic":   "COALESCE(epic_id::text,'—')",
 		"task":   "COALESCE(task_id::text,'—')",
@@ -369,7 +396,8 @@ func (s *Store) UsageSummary(ctx context.Context, groupBy string, from, to time.
 		SELECT `+col+` AS k, SUM(tokens_in), SUM(tokens_out), SUM(cost_usd)::float8, SUM(duration_s)
 		FROM usage_records
 		WHERE ($1::timestamptz IS NULL OR ts >= $1) AND ($2::timestamptz IS NULL OR ts < $2)
-		GROUP BY k ORDER BY k`, nullableTime(from), nullableTime(to))
+		  AND project_id IN (SELECT project_id FROM project_members WHERE user_id = $3)
+		GROUP BY k ORDER BY k`, nullableTime(from), nullableTime(to), viewerID)
 	if err != nil {
 		return nil, err
 	}

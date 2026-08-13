@@ -36,6 +36,24 @@ cp -r "$SERVICE_DIR/../rivet-web/dist" "$SERVICE_DIR/internal/webui/dist"
 cleanup() { kill 0 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
+# Идентичность стенда: bootstrap-админ (см. ниже env rivetd) и PAT для
+# CLI/скриптов — выпускается фоном после старта rivetd в $STAND_DIR/token.
+ADMIN_LOGIN="${E2E_ADMIN_LOGIN:-e2e-admin}"
+ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-e2e-password}"
+(
+  for _ in $(seq 1 120); do
+    curl -sf "http://localhost:$HTTP_PORT/api/v1/health" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  curl -sf -c "$STAND_DIR/cookies" -H 'Content-Type: application/json' \
+    -d "{\"login\":\"$ADMIN_LOGIN\",\"password\":\"$ADMIN_PASSWORD\"}" \
+    "http://localhost:$HTTP_PORT/api/v1/auth/login" >/dev/null \
+  && curl -sf -b "$STAND_DIR/cookies" -H 'Content-Type: application/json' \
+    -d '{"name":"e2e-stand"}' "http://localhost:$HTTP_PORT/api/v1/tokens" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])' > "$STAND_DIR/token" \
+  || echo "e2e-stand: не удалось выпустить PAT" >&2
+) &
+
 # Runner'ы: fake-агент, клонирование из локального bare.
 AGENT_CMD="sh $SERVICE_DIR/scripts/fake-agent.sh"
 RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
@@ -52,4 +70,6 @@ exec env \
   RIVET_DATABASE_URL="$DB_URL" \
   RIVET_SCM=fake \
   RIVET_GITHUB_WEBHOOK_SECRET="${E2E_WEBHOOK_SECRET:-e2e-webhook-secret}" \
+  RIVET_ADMIN_LOGIN="$ADMIN_LOGIN" \
+  RIVET_ADMIN_PASSWORD="$ADMIN_PASSWORD" \
   "$STAND_DIR/rivetd"
