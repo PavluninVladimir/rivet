@@ -60,7 +60,7 @@ type Runner struct {
 	Capabilities []string
 	Status       RunnerStatus
 	TaskID       string
-	CtxPct       int
+	CtxPct       *int // nil — заполненность контекста неизвестна
 	Draining     bool
 	LastSeen     time.Time
 }

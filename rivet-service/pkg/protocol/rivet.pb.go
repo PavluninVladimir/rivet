@@ -441,8 +441,9 @@ func (x *Hello) GetRunnerId() string {
 }
 
 type Heartbeat struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	CtxPct        int32                  `protobuf:"varint,1,opt,name=ctx_pct,json=ctxPct,proto3" json:"ctx_pct,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Отсутствие поля = заполненность контекста неизвестна (агент не отчитался).
+	CtxPct        *int32 `protobuf:"varint,1,opt,name=ctx_pct,json=ctxPct,proto3,oneof" json:"ctx_pct,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -478,8 +479,8 @@ func (*Heartbeat) Descriptor() ([]byte, []int) {
 }
 
 func (x *Heartbeat) GetCtxPct() int32 {
-	if x != nil {
-		return x.CtxPct
+	if x != nil && x.CtxPct != nil {
+		return *x.CtxPct
 	}
 	return 0
 }
@@ -597,14 +598,17 @@ func (x *TranscriptChunk) GetData() []byte {
 	return nil
 }
 
+// Usage — отчёт о расходе за стадию. Отсутствие optional-поля означает
+// «данных нет» (агент не отчитался маркером USAGE:), а не ноль.
 type Usage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Model         string                 `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
-	TokensIn      int64                  `protobuf:"varint,3,opt,name=tokens_in,json=tokensIn,proto3" json:"tokens_in,omitempty"`
-	TokensOut     int64                  `protobuf:"varint,4,opt,name=tokens_out,json=tokensOut,proto3" json:"tokens_out,omitempty"`
-	CostUsd       float64                `protobuf:"fixed64,5,opt,name=cost_usd,json=costUsd,proto3" json:"cost_usd,omitempty"`
+	TokensIn      *int64                 `protobuf:"varint,3,opt,name=tokens_in,json=tokensIn,proto3,oneof" json:"tokens_in,omitempty"`
+	TokensOut     *int64                 `protobuf:"varint,4,opt,name=tokens_out,json=tokensOut,proto3,oneof" json:"tokens_out,omitempty"`
+	CostUsd       *float64               `protobuf:"fixed64,5,opt,name=cost_usd,json=costUsd,proto3,oneof" json:"cost_usd,omitempty"`
 	DurationS     int32                  `protobuf:"varint,6,opt,name=duration_s,json=durationS,proto3" json:"duration_s,omitempty"`
+	CtxPct        *int32                 `protobuf:"varint,7,opt,name=ctx_pct,json=ctxPct,proto3,oneof" json:"ctx_pct,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -654,22 +658,22 @@ func (x *Usage) GetModel() string {
 }
 
 func (x *Usage) GetTokensIn() int64 {
-	if x != nil {
-		return x.TokensIn
+	if x != nil && x.TokensIn != nil {
+		return *x.TokensIn
 	}
 	return 0
 }
 
 func (x *Usage) GetTokensOut() int64 {
-	if x != nil {
-		return x.TokensOut
+	if x != nil && x.TokensOut != nil {
+		return *x.TokensOut
 	}
 	return 0
 }
 
 func (x *Usage) GetCostUsd() float64 {
-	if x != nil {
-		return x.CostUsd
+	if x != nil && x.CostUsd != nil {
+		return *x.CostUsd
 	}
 	return 0
 }
@@ -677,6 +681,13 @@ func (x *Usage) GetCostUsd() float64 {
 func (x *Usage) GetDurationS() int32 {
 	if x != nil {
 		return x.DurationS
+	}
+	return 0
+}
+
+func (x *Usage) GetCtxPct() int32 {
+	if x != nil && x.CtxPct != nil {
+		return *x.CtxPct
 	}
 	return 0
 }
@@ -1331,9 +1342,11 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\ablocked\x18\b \x01(\v2\x19.rivet.v1.BlockedQuestionH\x00R\ablockedB\x06\n" +
 	"\x04kind\"$\n" +
 	"\x05Hello\x12\x1b\n" +
-	"\trunner_id\x18\x01 \x01(\tR\brunnerId\"$\n" +
-	"\tHeartbeat\x12\x17\n" +
-	"\actx_pct\x18\x01 \x01(\x05R\x06ctxPct\"9\n" +
+	"\trunner_id\x18\x01 \x01(\tR\brunnerId\"5\n" +
+	"\tHeartbeat\x12\x1c\n" +
+	"\actx_pct\x18\x01 \x01(\x05H\x00R\x06ctxPct\x88\x01\x01B\n" +
+	"\n" +
+	"\b_ctx_pct\"9\n" +
 	"\n" +
 	"AgentEvent\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x12\n" +
@@ -1341,16 +1354,23 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x0fTranscriptChunk\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x03R\x03seq\x12\x12\n" +
-	"\x04data\x18\x03 \x01(\fR\x04data\"\xac\x01\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\"\x8f\x02\n" +
 	"\x05Usage\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x14\n" +
-	"\x05model\x18\x02 \x01(\tR\x05model\x12\x1b\n" +
-	"\ttokens_in\x18\x03 \x01(\x03R\btokensIn\x12\x1d\n" +
+	"\x05model\x18\x02 \x01(\tR\x05model\x12 \n" +
+	"\ttokens_in\x18\x03 \x01(\x03H\x00R\btokensIn\x88\x01\x01\x12\"\n" +
 	"\n" +
-	"tokens_out\x18\x04 \x01(\x03R\ttokensOut\x12\x19\n" +
-	"\bcost_usd\x18\x05 \x01(\x01R\acostUsd\x12\x1d\n" +
+	"tokens_out\x18\x04 \x01(\x03H\x01R\ttokensOut\x88\x01\x01\x12\x1e\n" +
+	"\bcost_usd\x18\x05 \x01(\x01H\x02R\acostUsd\x88\x01\x01\x12\x1d\n" +
 	"\n" +
-	"duration_s\x18\x06 \x01(\x05R\tdurationS\"\xe9\x01\n" +
+	"duration_s\x18\x06 \x01(\x05R\tdurationS\x12\x1c\n" +
+	"\actx_pct\x18\a \x01(\x05H\x03R\x06ctxPct\x88\x01\x01B\f\n" +
+	"\n" +
+	"_tokens_inB\r\n" +
+	"\v_tokens_outB\v\n" +
+	"\t_cost_usdB\n" +
+	"\n" +
+	"\b_ctx_pct\"\xe9\x01\n" +
 	"\vStageResult\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x121\n" +
 	"\x05stage\x18\x02 \x01(\x0e2\x1b.rivet.v1.StageResult.StageR\x05stage\x12\x0e\n" +
@@ -1483,6 +1503,8 @@ func file_pkg_protocol_rivet_proto_init() {
 		(*RunnerMsg_StageResult)(nil),
 		(*RunnerMsg_Blocked)(nil),
 	}
+	file_pkg_protocol_rivet_proto_msgTypes[4].OneofWrappers = []any{}
+	file_pkg_protocol_rivet_proto_msgTypes[7].OneofWrappers = []any{}
 	file_pkg_protocol_rivet_proto_msgTypes[10].OneofWrappers = []any{
 		(*PlaneMsg_Ack)(nil),
 		(*PlaneMsg_Assign)(nil),

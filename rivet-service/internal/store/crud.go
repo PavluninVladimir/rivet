@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -216,12 +217,13 @@ func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
 		INSERT INTO runners (id, agent, model, host, capabilities, status, last_seen)
 		VALUES ($1,$2,$3,$4,$5,'idle',now())
 		ON CONFLICT (id) DO UPDATE SET agent=$2, model=$3, host=$4, capabilities=$5,
-			status='idle', task_id=NULL, last_seen=now()`,
+			status='idle', task_id=NULL, ctx_pct=NULL, last_seen=now()`,
 		r.ID, r.Agent, r.Model, r.Host, r.Capabilities)
 	return err
 }
 
-func (s *Store) TouchRunner(ctx context.Context, id string, ctxPct int) error {
+// TouchRunner обновляет heartbeat; ctxPct == nil — заполненность неизвестна.
+func (s *Store) TouchRunner(ctx context.Context, id string, ctxPct *int) error {
 	_, err := s.Pool.Exec(ctx,
 		`UPDATE runners SET last_seen=now(), ctx_pct=$2 WHERE id=$1`, id, ctxPct)
 	return err
@@ -298,15 +300,25 @@ func (s *Store) CreateSession(ctx context.Context, in domain.Session) (string, e
 	return id, err
 }
 
-func (s *Store) EndSession(ctx context.Context, id, transcriptRef string, tokens int64) error {
+// EndSession закрывает сессию и подводит итог токенов по usage-записям её
+// задачи с момента started_at (design add-usage-metering, решение 6).
+// NULL — ни одна запись не содержала токенов.
+func (s *Store) EndSession(ctx context.Context, id, transcriptRef string) error {
 	_, err := s.Pool.Exec(ctx, `
-		UPDATE sessions SET ended_at=now(), transcript_ref=NULLIF($2,''), tokens=$3 WHERE id=$1`,
-		id, transcriptRef, tokens)
+		UPDATE sessions s SET ended_at=now(), transcript_ref=NULLIF($2,''),
+			tokens=(SELECT SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0))
+			        FROM usage_records u
+			        WHERE u.task_id = s.task_id AND u.ts >= s.started_at
+			          AND (u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL))
+		WHERE s.id=$1`,
+		id, transcriptRef)
 	return err
 }
 
 // ─── usage ───────────────────────────────────────────────────────────────
 
+// UsageInput — запись метеринга. nil в Tokens*/CostUSD означает «источник не
+// сообщил значение» (спека observability «Учёт usage»), не ноль.
 type UsageInput struct {
 	SourceMsgID string // идемпотентность billing-grade
 	ProjectID   string
@@ -314,9 +326,9 @@ type UsageInput struct {
 	TaskID      string
 	RunnerID    string
 	Model       string
-	TokensIn    int64
-	TokensOut   int64
-	CostUSD     float64
+	TokensIn    *int64
+	TokensOut   *int64
+	CostUSD     *float64
 	DurationS   int
 }
 
@@ -331,15 +343,19 @@ func (s *Store) RecordUsage(ctx context.Context, u UsageInput) error {
 	return err
 }
 
+// UsageRow — агрегат группы; null в токенах/стоимости = данных не было
+// ни в одной записи группы (SUM по NULL), клиент показывает «—».
 type UsageRow struct {
-	Key       string  `json:"key"`
-	TokensIn  int64   `json:"tokens_in"`
-	TokensOut int64   `json:"tokens_out"`
-	CostUSD   float64 `json:"cost_usd"`
-	Duration  int64   `json:"duration_s"`
+	Key       string   `json:"key"`
+	TokensIn  *int64   `json:"tokens_in"`
+	TokensOut *int64   `json:"tokens_out"`
+	CostUSD   *float64 `json:"cost_usd"`
+	Duration  int64    `json:"duration_s"`
 }
 
-func (s *Store) UsageSummary(ctx context.Context, groupBy string) ([]UsageRow, error) {
+// UsageSummary агрегирует usage за полуинтервал [from, to); нулевое время —
+// граница не задана.
+func (s *Store) UsageSummary(ctx context.Context, groupBy string, from, to time.Time) ([]UsageRow, error) {
 	col := map[string]string{
 		"epic":   "COALESCE(epic_id::text,'—')",
 		"task":   "COALESCE(task_id::text,'—')",
@@ -351,7 +367,9 @@ func (s *Store) UsageSummary(ctx context.Context, groupBy string) ([]UsageRow, e
 	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT `+col+` AS k, SUM(tokens_in), SUM(tokens_out), SUM(cost_usd)::float8, SUM(duration_s)
-		FROM usage_records GROUP BY k ORDER BY k`)
+		FROM usage_records
+		WHERE ($1::timestamptz IS NULL OR ts >= $1) AND ($2::timestamptz IS NULL OR ts < $2)
+		GROUP BY k ORDER BY k`, nullableTime(from), nullableTime(to))
 	if err != nil {
 		return nil, err
 	}
@@ -365,4 +383,58 @@ func (s *Store) UsageSummary(ctx context.Context, groupBy string) ([]UsageRow, e
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func nullableTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
+}
+
+// EpicUsage — вклад задач Epic и итог по нему (api-contract add-usage-metering).
+// total.Key = id Epic; nil-указатели пробрасывают семантику «данных нет».
+func (s *Store) EpicUsage(ctx context.Context, epicID string) (rows []UsageRow, total *UsageRow, err error) {
+	res, err := s.Pool.Query(ctx, `
+		SELECT COALESCE(task_id::text,'—') AS k,
+			SUM(tokens_in), SUM(tokens_out), SUM(cost_usd)::float8, SUM(duration_s)
+		FROM usage_records WHERE epic_id=$1 GROUP BY k ORDER BY k`, epicID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer res.Close()
+	for res.Next() {
+		var r UsageRow
+		if err := res.Scan(&r.Key, &r.TokensIn, &r.TokensOut, &r.CostUSD, &r.Duration); err != nil {
+			return nil, nil, err
+		}
+		rows = append(rows, r)
+	}
+	if err := res.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil, nil
+	}
+	total = &UsageRow{Key: epicID}
+	for _, r := range rows {
+		total.Duration += r.Duration
+		total.TokensIn = addNullable(total.TokensIn, r.TokensIn)
+		total.TokensOut = addNullable(total.TokensOut, r.TokensOut)
+		total.CostUSD = addNullable(total.CostUSD, r.CostUSD)
+	}
+	return rows, total, nil
+}
+
+// addNullable складывает «возможно отсутствующие» значения: nil + nil = nil.
+func addNullable[T int64 | float64](a, b *T) *T {
+	if b == nil {
+		return a
+	}
+	if a == nil {
+		v := *b
+		return &v
+	}
+	v := *a + *b
+	return &v
 }

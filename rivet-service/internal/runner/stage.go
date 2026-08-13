@@ -2,7 +2,9 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"os"
 	"os/exec"
@@ -25,6 +27,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		a.mu.Unlock()
 	}()
 
+	// Новая стадия — заполненность контекста прежнего запуска неактуальна.
+	a.ctxPct.Store(ctxUnknown)
+
 	started := time.Now()
 	step := func(text string) {
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Event{
@@ -34,10 +39,24 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Transcript{
 			Transcript: &pb.TranscriptChunk{TaskId: as.TaskId, Data: data}}})
 	}
-	result := func(ok bool, detail string) {
+	// report — USAGE:-отчёт запуска агента этой стадии; нулевые указатели =
+	// данных нет (спека agent-integration «Отчёт usage через универсальную обёртку»).
+	var report usageReport
+	noteUsage := func(out string) {
+		report = parseUsage(out)
+		if report.CtxPct != nil {
+			a.ctxPct.Store(*report.CtxPct)
+		}
+	}
+	emitUsage := func() {
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Usage{
 			Usage: &pb.Usage{TaskId: as.TaskId, Model: a.cfg.Model,
-				DurationS: int32(time.Since(started).Seconds())}}})
+				DurationS: int32(time.Since(started).Seconds()),
+				TokensIn:  report.TokensIn, TokensOut: report.TokensOut,
+				CostUsd: report.CostUSD, CtxPct: report.CtxPct}}})
+	}
+	result := func(ok bool, detail string) {
+		emitUsage()
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_StageResult{
 			StageResult: &pb.StageResult{TaskId: as.TaskId, Stage: as.Stage, Ok: ok, Detail: tail(detail, 8000)}}})
 	}
@@ -52,7 +71,11 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	case pb.StageResult_CODING, pb.StageResult_FIXING:
 		step("агент приступил к реализации")
 		out, err := a.runAgent(sctx, ws, codingPrompt(as), transcript)
+		noteUsage(out)
 		if q, blocked := parseBlocked(out); blocked {
+			// Расход заблокировавшегося запуска тоже учитывается: стадия
+			// завершится позже, а токены уже потрачены.
+			emitUsage()
 			emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Blocked{
 				Blocked: &pb.BlockedQuestion{TaskId: as.TaskId, Question: q}}})
 			return
@@ -91,6 +114,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	case pb.StageResult_REVIEW:
 		step("независимое review изменений")
 		out, err := a.runAgent(sctx, ws, reviewPrompt(as), transcript)
+		noteUsage(out)
 		if err != nil {
 			result(false, fmt.Sprintf("ревьюер завершился с ошибкой: %v", err))
 			return
@@ -229,6 +253,34 @@ func parseVerdict(out string) (approved bool, detail string) {
 		return true, "review пройден"
 	}
 	return false, strings.TrimSpace(strings.TrimPrefix(rest, "CHANGES:"))
+}
+
+// usageReport — машиночитаемый отчёт агента о расходе (маркер USAGE:).
+// Все поля опциональны: nil = агент не сообщил значение, не ноль.
+type usageReport struct {
+	TokensIn  *int64   `json:"tokens_in"`
+	TokensOut *int64   `json:"tokens_out"`
+	CostUSD   *float64 `json:"cost_usd"`
+	CtxPct    *int32   `json:"ctx_pct"`
+}
+
+// parseUsage разбирает последнюю строку «USAGE: {json}» вывода агента.
+// Нет маркера или битый JSON — пустой отчёт (запись уйдёт без токенов).
+func parseUsage(out string) usageReport {
+	rest, found := lastSentinelLine(out, "USAGE:")
+	if !found {
+		return usageReport{}
+	}
+	var r usageReport
+	if err := json.Unmarshal([]byte(rest), &r); err != nil {
+		slog.Warn("битый USAGE:-отчёт агента — игнорируется", "err", err)
+		return usageReport{}
+	}
+	if r.CtxPct != nil && (*r.CtxPct < 0 || *r.CtxPct > 100) {
+		slog.Warn("ctx_pct вне диапазона 0–100 — игнорируется", "ctx_pct", *r.CtxPct)
+		r.CtxPct = nil
+	}
+	return r
 }
 
 // parseBlocked ищет строку «BLOCKED: <вопрос>» в выводе агента.

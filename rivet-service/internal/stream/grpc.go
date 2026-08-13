@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
@@ -97,6 +98,26 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 	}
 }
 
+// ctxPct переводит optional-поле протокола в *int store'а (nil = неизвестно).
+// Значение вне 0–100 не доверяем: runner свой ввод уже фильтрует, но gRPC
+// открыт любому клиенту.
+func ctxPct(v *int32) *int {
+	if v == nil || *v < 0 || *v > 100 {
+		return nil
+	}
+	p := int(*v)
+	return &p
+}
+
+// nonNegative отбрасывает отрицательные и не-конечные (NaN, ±Inf) значения
+// отчёта: они испортили бы агрегаты метеринга (nil = данных нет).
+func nonNegative[T int64 | float64](v *T) *T {
+	if v == nil || *v < 0 || math.IsNaN(float64(*v)) || math.IsInf(float64(*v), 0) {
+		return nil
+	}
+	return v
+}
+
 func (s *Server) ack(sendCh chan *pb.PlaneMsg, msgID string) {
 	select {
 	case sendCh <- &pb.PlaneMsg{Kind: &pb.PlaneMsg_Ack{Ack: &pb.Ack{AckedMsgId: msgID}}}:
@@ -107,7 +128,7 @@ func (s *Server) ack(sendCh chan *pb.PlaneMsg, msgID string) {
 func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg) error {
 	switch k := msg.Kind.(type) {
 	case *pb.RunnerMsg_Heartbeat:
-		return s.St.TouchRunner(ctx, runnerID, int(k.Heartbeat.CtxPct))
+		return s.St.TouchRunner(ctx, runnerID, ctxPct(k.Heartbeat.CtxPct))
 
 	case *pb.RunnerMsg_Event:
 		projectID, epicID, err := s.St.TaskRefs(ctx, k.Event.TaskId)
@@ -133,11 +154,17 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		if err != nil {
 			return err
 		}
+		// Свежий ctx_pct из отчёта агента не ждёт следующего heartbeat.
+		if k.Usage.CtxPct != nil {
+			if err := s.St.TouchRunner(ctx, runnerID, ctxPct(k.Usage.CtxPct)); err != nil {
+				return err
+			}
+		}
 		return s.St.RecordUsage(ctx, store.UsageInput{
 			SourceMsgID: msg.MsgId, ProjectID: projectID, EpicID: epicID,
 			TaskID: k.Usage.TaskId, RunnerID: runnerID, Model: k.Usage.Model,
-			TokensIn: k.Usage.TokensIn, TokensOut: k.Usage.TokensOut,
-			CostUSD: k.Usage.CostUsd, DurationS: int(k.Usage.DurationS),
+			TokensIn: nonNegative(k.Usage.TokensIn), TokensOut: nonNegative(k.Usage.TokensOut),
+			CostUSD: nonNegative(k.Usage.CostUsd), DurationS: max(int(k.Usage.DurationS), 0),
 		})
 
 	case *pb.RunnerMsg_StageResult:
