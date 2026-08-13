@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
@@ -108,10 +109,10 @@ func ctxPct(v *int32) *int {
 	return &p
 }
 
-// nonNegative отбрасывает отрицательные значения отчёта: они испортили бы
-// агрегаты метеринга (nil = данных нет).
+// nonNegative отбрасывает отрицательные и не-конечные (NaN, ±Inf) значения
+// отчёта: они испортили бы агрегаты метеринга (nil = данных нет).
 func nonNegative[T int64 | float64](v *T) *T {
-	if v == nil || *v < 0 {
+	if v == nil || *v < 0 || math.IsNaN(float64(*v)) || math.IsInf(float64(*v), 0) {
 		return nil
 	}
 	return v
