@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -48,6 +49,7 @@ func Run(ctx context.Context, cfg Config) error {
 	client := pb.NewRunnerServiceClient(conn)
 
 	r := &agent{cfg: cfg, client: client, outbox: outbox}
+	r.ctxPct.Store(ctxUnknown)
 	// Переподключение с бэкоффом: соединение всегда исходящее от runner'а.
 	for {
 		if err := r.session(ctx); err != nil {
@@ -64,10 +66,17 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 }
 
+// ctxUnknown — заполненность контекста неизвестна (агент не отчитался).
+const ctxUnknown = -1
+
 type agent struct {
 	cfg    Config
 	client pb.RunnerServiceClient
 	outbox *outbox
+
+	// Последний ctx_pct из USAGE:-отчёта агента; ctxUnknown до первого отчёта
+	// и после нового Assignment (design add-usage-metering, решение 5).
+	ctxPct atomic.Int32
 
 	mu     sync.Mutex
 	cancel map[string]context.CancelFunc // отмена стадий по task_id
@@ -133,8 +142,12 @@ func (a *agent) session(ctx context.Context) error {
 			case <-sctx.Done():
 				return
 			case <-t.C:
+				hb := &pb.Heartbeat{}
+				if v := a.ctxPct.Load(); v != ctxUnknown {
+					hb.CtxPct = &v
+				}
 				sendCh <- &pb.RunnerMsg{MsgId: newMsgID(),
-					Kind: &pb.RunnerMsg_Heartbeat{Heartbeat: &pb.Heartbeat{}}}
+					Kind: &pb.RunnerMsg_Heartbeat{Heartbeat: hb}}
 			}
 		}
 	}()

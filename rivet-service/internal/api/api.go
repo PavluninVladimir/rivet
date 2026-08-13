@@ -167,9 +167,10 @@ func (s *Server) createEpic(w http.ResponseWriter, r *http.Request) {
 
 type epicView struct {
 	domain.Epic
-	Tasks    []domain.Task    `json:"tasks"`
-	Progress map[string]any   `json:"progress"`
-	Usage    []store.UsageRow `json:"usage,omitempty"`
+	Tasks      []domain.Task    `json:"tasks"`
+	Progress   map[string]any   `json:"progress"`
+	Usage      []store.UsageRow `json:"usage,omitempty"`
+	UsageTotal *store.UsageRow  `json:"usage_total,omitempty"`
 }
 
 func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
@@ -194,9 +195,16 @@ func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
 	if total > 0 {
 		pct = done * 100 / total
 	}
+	usage, usageTotal, err := s.St.EpicUsage(r.Context(), e.ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, epicView{
 		Epic: e, Tasks: tasks,
-		Progress: map[string]any{"pct": pct, "weighted": true},
+		Progress:   map[string]any{"pct": pct, "weighted": true},
+		Usage:      usage,
+		UsageTotal: usageTotal,
 	})
 }
 
@@ -366,7 +374,19 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
-	out, err := s.St.UsageSummary(r.Context(), r.URL.Query().Get("group_by"))
+	q := r.URL.Query()
+	var from, to time.Time
+	for name, dst := range map[string]*time.Time{"from": &from, "to": &to} {
+		if v := q.Get(name); v != "" {
+			t, err := time.Parse(time.RFC3339, v)
+			if err != nil {
+				unprocessable(w, name+": ожидается время в RFC3339")
+				return
+			}
+			*dst = t
+		}
+	}
+	out, err := s.St.UsageSummary(r.Context(), q.Get("group_by"), from, to)
 	if err != nil {
 		writeErr(w, err)
 		return

@@ -97,6 +97,15 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 	}
 }
 
+// ctxPct переводит optional-поле протокола в *int store'а (nil = неизвестно).
+func ctxPct(v *int32) *int {
+	if v == nil {
+		return nil
+	}
+	p := int(*v)
+	return &p
+}
+
 func (s *Server) ack(sendCh chan *pb.PlaneMsg, msgID string) {
 	select {
 	case sendCh <- &pb.PlaneMsg{Kind: &pb.PlaneMsg_Ack{Ack: &pb.Ack{AckedMsgId: msgID}}}:
@@ -107,7 +116,7 @@ func (s *Server) ack(sendCh chan *pb.PlaneMsg, msgID string) {
 func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg) error {
 	switch k := msg.Kind.(type) {
 	case *pb.RunnerMsg_Heartbeat:
-		return s.St.TouchRunner(ctx, runnerID, int(k.Heartbeat.CtxPct))
+		return s.St.TouchRunner(ctx, runnerID, ctxPct(k.Heartbeat.CtxPct))
 
 	case *pb.RunnerMsg_Event:
 		projectID, epicID, err := s.St.TaskRefs(ctx, k.Event.TaskId)
@@ -132,6 +141,12 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		projectID, epicID, err := s.St.TaskRefs(ctx, k.Usage.TaskId)
 		if err != nil {
 			return err
+		}
+		// Свежий ctx_pct из отчёта агента не ждёт следующего heartbeat.
+		if k.Usage.CtxPct != nil {
+			if err := s.St.TouchRunner(ctx, runnerID, ctxPct(k.Usage.CtxPct)); err != nil {
+				return err
+			}
 		}
 		return s.St.RecordUsage(ctx, store.UsageInput{
 			SourceMsgID: msg.MsgId, ProjectID: projectID, EpicID: epicID,

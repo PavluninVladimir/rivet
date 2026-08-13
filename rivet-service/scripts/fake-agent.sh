@@ -7,9 +7,16 @@
 set -eu
 PROMPT=$(cat "$RIVET_PROMPT_FILE")
 
+# Отчёт о расходе (спека agent-integration «Отчёт usage через универсальную
+# обёртку»): даёт консоли ненулевые usage-цифры в e2e.
+usage() {
+  echo 'USAGE: {"tokens_in": 1200, "tokens_out": 340, "cost_usd": 0.042, "ctx_pct": 37}'
+}
+
 case "$PROMPT" in
 *"независимый ревьюер"*|*"VERDICT"*)
   echo "Просмотрел изменения, замечаний нет."
+  usage
   echo "VERDICT: APPROVED"
   exit 0
   ;;
@@ -30,4 +37,5 @@ esac
 
 echo "Реализую задачу..."
 printf 'work %s\n' "$(date +%s)" >> e2e-result.txt
+usage
 echo "Готово."

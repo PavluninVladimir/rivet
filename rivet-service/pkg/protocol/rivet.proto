@@ -50,7 +50,8 @@ message Hello {
 }
 
 message Heartbeat {
-  int32 ctx_pct = 1;
+  // Отсутствие поля = заполненность контекста неизвестна (агент не отчитался).
+  optional int32 ctx_pct = 1;
 }
 
 // AgentEvent — шаг агента для live-наблюдения (session.step).
@@ -65,13 +66,16 @@ message TranscriptChunk {
   bytes data = 3;
 }
 
+// Usage — отчёт о расходе за стадию. Отсутствие optional-поля означает
+// «данных нет» (агент не отчитался маркером USAGE:), а не ноль.
 message Usage {
   string task_id = 1;
   string model = 2;
-  int64 tokens_in = 3;
-  int64 tokens_out = 4;
-  double cost_usd = 5;
+  optional int64 tokens_in = 3;
+  optional int64 tokens_out = 4;
+  optional double cost_usd = 5;
   int32 duration_s = 6;
+  optional int32 ctx_pct = 7;
 }
 
 // StageResult — детерминированный итог этапа конвейера.

@@ -230,7 +230,7 @@ func (e *Engine) flushTranscript(ctx context.Context, task domain.Task, stage st
 			ref = ""
 		}
 	}
-	if err := e.St.EndSession(ctx, sessionID, ref, 0); err != nil {
+	if err := e.St.EndSession(ctx, sessionID, ref); err != nil {
 		slog.Error("end session", "session", sessionID, "err", err)
 	}
 }
