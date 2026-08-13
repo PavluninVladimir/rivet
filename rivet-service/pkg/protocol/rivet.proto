@@ -58,18 +58,21 @@ message Heartbeat {
 message AgentEvent {
   string task_id = 1;
   string text = 2;
+  string session_id = 3; // сессия стадии из Assignment
 }
 
 message TranscriptChunk {
   string task_id = 1;
   int64 seq = 2;
   bytes data = 3;
+  string session_id = 4; // сессия стадии из Assignment; несовпадение — сообщение отбрасывается
 }
 
 // Usage — отчёт о расходе за стадию. Отсутствие optional-поля означает
 // «данных нет» (агент не отчитался маркером USAGE:), а не ноль.
 message Usage {
   string task_id = 1;
+  string session_id = 8; // сессия стадии из Assignment
   string model = 2;
   optional int64 tokens_in = 3;
   optional int64 tokens_out = 4;
@@ -85,6 +88,7 @@ message StageResult {
   bool ok = 3;
   string detail = 4;   // вывод тестов, вердикт review, url PR
   string pr_url = 5;   // для stage=CODING при создании PR
+  string session_id = 6; // сессия стадии из Assignment
 
   enum Stage {
     STAGE_UNSPECIFIED = 0;
@@ -99,6 +103,7 @@ message StageResult {
 message BlockedQuestion {
   string task_id = 1;
   string question = 2;
+  string session_id = 3; // сессия стадии из Assignment
 }
 
 message PlaneMsg {
@@ -128,6 +133,9 @@ message Assignment {
   string branch = 8; // agent/task-<num>
   repeated Check checks = 9;
   string extra_context = 10; // замечания review при FIXING, diff при REVIEW и т.п.
+  // Сессия стадии: runner повторяет session_id во всех сообщениях стадии
+  // (Transcript, Usage, StageResult, Blocked); replay с чужим id отбрасывается.
+  string session_id = 11;
 }
 
 message Check {

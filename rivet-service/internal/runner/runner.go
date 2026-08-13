@@ -18,7 +18,9 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-const protocolVersion = "1"
+// Версия 2: session_id обязателен во всех сообщениях стадии
+// (add-session-visibility); runner'ы версии 1 отклоняются при Register.
+const protocolVersion = "2"
 
 type Config struct {
 	PlaneAddr    string

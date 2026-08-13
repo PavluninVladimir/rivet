@@ -175,7 +175,7 @@ func TestEndSessionTokens(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EndSession(ctx, sessionID, "ref"); err != nil {
+	if _, err := s.EndSession(ctx, sessionID, "ref"); err != nil {
 		t.Fatal(err)
 	}
 	var tokens *int64
@@ -194,7 +194,7 @@ func TestEndSessionTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EndSession(ctx, empty, ""); err != nil {
+	if _, err := s.EndSession(ctx, empty, ""); err != nil {
 		t.Fatal(err)
 	}
 	// Записи задачи были до старта этой сессии... они попали бы в интервал
@@ -234,5 +234,127 @@ func TestTouchRunnerNullableCtx(t *testing.T) {
 	}
 	if runners[0].CtxPct != nil {
 		t.Fatalf("ожидался неизвестный ctx_pct (nil), получено %d", *runners[0].CtxPct)
+	}
+}
+
+// История сессий задачи: порядок по started_at, стадия в Scope, nullable
+// tokens (дельта observability «Просмотр сохранённых транскриптов»).
+func TestListTaskSessions(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	_, projectID, epicID, task, other := seedUsage(t, s)
+
+	first, err := s.CreateSession(ctx, domain.Session{
+		TaskID: task.ID, Attempt: 1, DriverKind: "scheduler",
+		Agent: "fake", Model: "m", Depth: domain.DepthMinimal, Scope: "CODING",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RecordUsage(ctx, UsageInput{
+		SourceMsgID: "ls1", ProjectID: projectID, EpicID: epicID, TaskID: task.ID,
+		Model: "m", TokensIn: ptr(int64(10)), TokensOut: ptr(int64(5)), DurationS: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EndSession(ctx, first, "s3://rivet/tasks/1/attempt-1-CODING.log"); err != nil {
+		t.Fatal(err)
+	}
+	// Вторая сессия: без usage и без транскрипта, ещё открыта.
+	second, err := s.CreateSession(ctx, domain.Session{
+		TaskID: task.ID, Attempt: 1, DriverKind: "scheduler",
+		Agent: "fake", Model: "m", Depth: domain.DepthMinimal, Scope: "TESTING",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Сессия чужой задачи в выборку не попадает.
+	if _, err := s.CreateSession(ctx, domain.Session{
+		TaskID: other.ID, Attempt: 1, DriverKind: "scheduler",
+		Agent: "fake", Depth: domain.DepthMinimal, Scope: "CODING",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.ListTaskSessions(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != first || got[1].ID != second {
+		t.Fatalf("ожидались 2 сессии задачи по порядку, получено %+v", got)
+	}
+	if got[0].Scope != "CODING" || got[0].TranscriptRef == "" || got[0].Ended == nil {
+		t.Fatalf("первая сессия: %+v", got[0])
+	}
+	if got[0].Tokens == nil || *got[0].Tokens != 15 {
+		t.Fatalf("токены первой сессии: %v", got[0].Tokens)
+	}
+	if got[1].Tokens != nil {
+		t.Fatalf("открытая сессия без usage: tokens должны быть nil, получено %d", *got[1].Tokens)
+	}
+	if got[1].TranscriptRef != "" || got[1].Ended != nil {
+		t.Fatalf("вторая сессия должна быть открытой без транскрипта: %+v", got[1])
+	}
+
+	// OpenSession видит только открытую сессию задачи.
+	open, err := s.OpenSession(ctx, task.ID)
+	if err != nil || open != second {
+		t.Fatalf("OpenSession: %q, %v (ожидалась %q)", open, err, second)
+	}
+	if _, err := s.EndSession(ctx, second, ""); err != nil {
+		t.Fatal(err)
+	}
+	if open, err := s.OpenSession(ctx, task.ID); err != nil || open != "" {
+		t.Fatalf("после закрытия открытых сессий нет: %q, %v", open, err)
+	}
+}
+
+// Обрыв стадии вне StageResult/Blocked закрывает открытые сессии задачи:
+// отмена (ResolveTask cancel) и потеря runner'а (MarkStaleRunnersOffline).
+func TestOpenSessionsClosedOnCancelAndRunnerLost(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	_, _, _, task, other := seedUsage(t, s)
+
+	// Отмена выполняющейся задачи.
+	if _, err := s.Pool.Exec(ctx, `UPDATE tasks SET status='running' WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateSession(ctx, domain.Session{
+		TaskID: task.ID, Attempt: 1, DriverKind: "scheduler",
+		Agent: "fake", Depth: domain.DepthMinimal, Scope: "CODING",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResolveTask(ctx, task.ID, "", "human", true); err != nil {
+		t.Fatal(err)
+	}
+	if open, err := s.OpenSession(ctx, task.ID); err != nil || open != "" {
+		t.Fatalf("после отмены сессия осталась открытой: %q, %v", open, err)
+	}
+
+	// Потеря runner'а: молчащий runner с задачей.
+	if _, err := s.Pool.Exec(ctx, `UPDATE tasks SET status='running' WHERE id=$1`, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "lost", Agent: "fake", Capabilities: []string{"coding"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx,
+		`UPDATE runners SET status='running', task_id=$2, last_seen=now()-interval '10 minutes' WHERE id=$1`,
+		"lost", other.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateSession(ctx, domain.Session{
+		TaskID: other.ID, Attempt: 1, DriverKind: "scheduler",
+		Agent: "fake", Depth: domain.DepthMinimal, Scope: "CODING",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MarkStaleRunnersOffline(ctx, 60); err != nil {
+		t.Fatal(err)
+	}
+	if open, err := s.OpenSession(ctx, other.ID); err != nil || open != "" {
+		t.Fatalf("после потери runner'а сессия осталась открытой: %q, %v", open, err)
 	}
 }

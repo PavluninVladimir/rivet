@@ -445,7 +445,7 @@ func TestStaleRunnerConsumesAttempt(t *testing.T) {
 	if _, err := s.Pool.Exec(ctx, `UPDATE runners SET last_seen = now() - interval '10 minutes'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkStaleRunnersOffline(ctx, 90); err != nil {
+	if _, err := s.MarkStaleRunnersOffline(ctx, 90); err != nil {
 		t.Fatal(err)
 	}
 	task, _ := s.GetTask(ctx, a.ID)
@@ -470,7 +470,7 @@ func TestStaleRunnerConsumesAttempt(t *testing.T) {
 	if _, err := s.Pool.Exec(ctx, `UPDATE runners SET last_seen = now() - interval '10 minutes'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.MarkStaleRunnersOffline(ctx, 90); err != nil {
+	if _, err := s.MarkStaleRunnersOffline(ctx, 90); err != nil {
 		t.Fatal(err)
 	}
 	if got := status(t, s, a.ID); got != domain.TaskFailed {

@@ -4,15 +4,19 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
+	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-const protocolVersion = "1"
+// Версия 2: session_id обязателен во всех сообщениях стадии
+// (add-session-visibility); runner'ы версии 1 отклоняются при Register.
+const protocolVersion = "2"
 
 // Server — реализация RunnerService: приём соединений runner'ов.
 type Server struct {
@@ -23,6 +27,68 @@ type Server struct {
 	Hub    *Hub
 
 	HeartbeatInterval time.Duration
+
+	// Построчные редакторы секретов по задачам: наружу (Hub, Engine) уходит
+	// только замаскированный текст (спека team-visibility, design решение 3).
+	redMu sync.Mutex
+	reds  map[string]*taskRedactor
+}
+
+// taskRedactor — состояние редактора текущей сессии задачи; смена сессии
+// сбрасывает недосброшенный хвост прошлой стадии. Собственный mu: replay
+// после reconnect даёт два Channel-goroutine с одним session_id, а
+// redact.Stream не потокобезопасен.
+type taskRedactor struct {
+	mu      sync.Mutex
+	session string
+	stream  redact.Stream
+}
+
+// redactor возвращает редактор сессии задачи, создавая или сбрасывая его
+// при смене сессии.
+func (s *Server) redactor(taskID, sessionID string) *taskRedactor {
+	s.redMu.Lock()
+	defer s.redMu.Unlock()
+	if s.reds == nil {
+		s.reds = map[string]*taskRedactor{}
+	}
+	r := s.reds[taskID]
+	if r == nil || r.session != sessionID {
+		r = &taskRedactor{session: sessionID}
+		s.reds[taskID] = r
+	}
+	return r
+}
+
+// emitTranscript доводит замаскированный кусок до буфера транскрипта и
+// live-подписчиков.
+func (s *Server) emitTranscript(ctx context.Context, taskID, sessionID string, data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	s.Engine.OnTranscript(taskID, sessionID, data)
+	if projectID, _, err := s.St.TaskRefs(ctx, taskID); err == nil {
+		s.Hub.Publish(LogChunk{ProjectID: projectID, TaskID: taskID, Data: data})
+	}
+}
+
+// flushRedactor сбрасывает хвост неполной строки перед обработкой конца
+// стадии: OnStageResult/OnBlocked закрывают сессию и уводят буфер в blob,
+// хвост должен успеть в него попасть (design, решение 3).
+func (s *Server) flushRedactor(ctx context.Context, taskID, sessionID string) {
+	s.redMu.Lock()
+	r := s.reds[taskID]
+	if r == nil || r.session != sessionID {
+		// Чужая сессия (stale-сообщение) не трогает редактор текущей.
+		s.redMu.Unlock()
+		return
+	}
+	delete(s.reds, taskID)
+	s.redMu.Unlock()
+	r.mu.Lock()
+	rest := r.stream.Flush()
+	r.mu.Unlock()
+	s.emitTranscript(ctx, taskID, sessionID, rest)
 }
 
 func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
@@ -131,25 +197,37 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		return s.St.TouchRunner(ctx, runnerID, ctxPct(k.Heartbeat.CtxPct))
 
 	case *pb.RunnerMsg_Event:
+		if !s.Engine.SessionMatches(ctx, k.Event.TaskId, k.Event.SessionId) {
+			return nil // stale-шаг не загрязняет timeline текущей сессии
+		}
 		projectID, epicID, err := s.St.TaskRefs(ctx, k.Event.TaskId)
 		if err != nil {
 			return err
 		}
+		// Текст шага — runner-controlled, виден участникам в event log.
 		_, err = s.St.AppendEvent(ctx, store.EventInput{
 			ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "session.step",
 			ProjectID: projectID, EpicID: epicID, TaskID: k.Event.TaskId,
-			Text: k.Event.Text,
+			Text: redact.String(k.Event.Text),
 		})
 		return err
 
 	case *pb.RunnerMsg_Transcript:
-		s.Engine.OnTranscript(k.Transcript.TaskId, k.Transcript.Data)
-		if projectID, _, err := s.St.TaskRefs(ctx, k.Transcript.TaskId); err == nil {
-			s.Hub.Publish(LogChunk{ProjectID: projectID, TaskID: k.Transcript.TaskId, Data: k.Transcript.Data})
+		t := k.Transcript
+		if !s.Engine.SessionMatches(ctx, t.TaskId, t.SessionId) {
+			return nil // чужая сессия (replay) — отбрасываем, но ack'аем
 		}
+		r := s.redactor(t.TaskId, t.SessionId)
+		r.mu.Lock()
+		masked := r.stream.Feed(t.Data)
+		r.mu.Unlock()
+		s.emitTranscript(ctx, t.TaskId, t.SessionId, masked)
 		return nil
 
 	case *pb.RunnerMsg_Usage:
+		if !s.Engine.SessionMatches(ctx, k.Usage.TaskId, k.Usage.SessionId) {
+			return nil // usage чужой сессии исказил бы итог текущей (EndSession)
+		}
 		projectID, epicID, err := s.St.TaskRefs(ctx, k.Usage.TaskId)
 		if err != nil {
 			return err
@@ -168,9 +246,13 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		})
 
 	case *pb.RunnerMsg_StageResult:
+		// Хвост неполной строки — до OnStageResult: тот закрывает сессию
+		// и уводит буфер транскрипта в blob.
+		s.flushRedactor(ctx, k.StageResult.TaskId, k.StageResult.SessionId)
 		return s.Engine.OnStageResult(ctx, runnerID, k.StageResult)
 
 	case *pb.RunnerMsg_Blocked:
+		s.flushRedactor(ctx, k.Blocked.TaskId, k.Blocked.SessionId)
 		return s.Engine.OnBlocked(ctx, runnerID, k.Blocked)
 	}
 	return nil

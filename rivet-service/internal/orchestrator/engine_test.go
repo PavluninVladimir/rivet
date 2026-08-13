@@ -142,7 +142,7 @@ func TestPipelineEndToEnd(t *testing.T) {
 	workerID := mustTaskRunner(t, st, taskA.ID)
 
 	// CODING ok → testing + Assignment TESTING тому же runner'у.
-	if err := e.OnStageResult(ctx, workerID, &pb.StageResult{TaskId: taskA.ID, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
+	if err := e.OnStageResult(ctx, workerID, &pb.StageResult{TaskId: taskA.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := taskStatus(t, st, taskA.ID); got != domain.TaskTesting {
@@ -153,7 +153,7 @@ func TestPipelineEndToEnd(t *testing.T) {
 	}
 
 	// TESTING ok → PR создан → review, исполнитель освобождён.
-	if err := e.OnStageResult(ctx, workerID, &pb.StageResult{TaskId: taskA.ID, Stage: pb.StageResult_TESTING, Ok: true}); err != nil {
+	if err := e.OnStageResult(ctx, workerID, &pb.StageResult{TaskId: taskA.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_TESTING, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
 	task, _ := st.GetTask(ctx, taskA.ID)
@@ -172,7 +172,7 @@ func TestPipelineEndToEnd(t *testing.T) {
 	task, _ = st.GetTask(ctx, taskA.ID)
 
 	// REVIEW ok → review_passed; merge кнопкой → done.
-	if err := e.OnStageResult(ctx, "reviewer", &pb.StageResult{TaskId: taskA.ID, Stage: pb.StageResult_REVIEW, Ok: true}); err != nil {
+	if err := e.OnStageResult(ctx, "reviewer", &pb.StageResult{TaskId: taskA.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_REVIEW, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
 	// Регрессия: после пройденного review новый Tick не должен назначать review повторно.
@@ -209,7 +209,8 @@ func TestPipelineEndToEnd(t *testing.T) {
 func TestBlockedEscalation(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
-	e := New(st, &fakeSCM{}, nil, &capture{}, 90*time.Second)
+	out := &capture{}
+	e := New(st, &fakeSCM{}, nil, out, 90*time.Second)
 
 	owner := mustOwner(t, st)
 	p, _ := st.CreateProject(ctx, "demo", "o/r", nil, owner.ID)
@@ -221,7 +222,7 @@ func TestBlockedEscalation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := e.OnBlocked(ctx, "worker", &pb.BlockedQuestion{TaskId: task.ID, Question: "fail-closed или кэш?"}); err != nil {
+	if err := e.OnBlocked(ctx, "worker", &pb.BlockedQuestion{TaskId: task.ID, SessionId: out.lastAssign(t).SessionId, Question: "fail-closed или кэш?"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := taskStatus(t, st, task.ID); got != domain.TaskBlocked {
@@ -267,12 +268,12 @@ func TestTestFailureConsumesAttempt(t *testing.T) {
 	if err := e.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Провал #1: попытка израсходована, исправление тем же runner'ом.
-	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, Stage: pb.StageResult_TESTING, Ok: false, Detail: "2 failed"}); err != nil {
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_TESTING, Ok: false, Detail: "2 failed"}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.GetTask(ctx, task.ID)
@@ -284,10 +285,10 @@ func TestTestFailureConsumesAttempt(t *testing.T) {
 	}
 
 	// Исправление готово → проверки снова; провал #2 исчерпывает лимит.
-	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, Stage: pb.StageResult_FIXING, Ok: true}); err != nil {
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_FIXING, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, Stage: pb.StageResult_TESTING, Ok: false, Detail: "still failing"}); err != nil {
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_TESTING, Ok: false, Detail: "still failing"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := taskStatus(t, st, task.ID); got != domain.TaskFailed {
@@ -325,7 +326,7 @@ func TestPauseParksAtStageBoundary(t *testing.T) {
 	if err := st.TransitionEpic(ctx, epic.ID, domain.EpicPaused, pauseEv); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.GetTask(ctx, task.ID)
@@ -361,7 +362,7 @@ func TestPauseParksAtStageBoundary(t *testing.T) {
 	if err := st.TransitionEpic(ctx, epic.ID, domain.EpicPaused, pauseEv); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, Stage: pb.StageResult_TESTING, Ok: false, Detail: "1 failed"}); err != nil {
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_TESTING, Ok: false, Detail: "1 failed"}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.GetTask(ctx, task.ID)
@@ -406,10 +407,10 @@ func TestReviewRejectionReassignsFixing(t *testing.T) {
 		t.Fatal(err)
 	}
 	workerID := mustTaskRunner(t, st, task.ID)
-	if err := e.OnStageResult(ctx, workerID, &pb.StageResult{TaskId: task.ID, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
+	if err := e.OnStageResult(ctx, workerID, &pb.StageResult{TaskId: task.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.OnStageResult(ctx, workerID, &pb.StageResult{TaskId: task.ID, Stage: pb.StageResult_TESTING, Ok: true, Detail: "все проверки прошли"}); err != nil {
+	if err := e.OnStageResult(ctx, workerID, &pb.StageResult{TaskId: task.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_TESTING, Ok: true, Detail: "все проверки прошли"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -426,7 +427,7 @@ func TestReviewRejectionReassignsFixing(t *testing.T) {
 	}
 
 	// Review отклонён → fixing, планировщик назначает исправление с замечаниями.
-	if err := e.OnStageResult(ctx, "reviewer", &pb.StageResult{TaskId: task.ID, Stage: pb.StageResult_REVIEW, Ok: false, Detail: "нет тестов"}); err != nil {
+	if err := e.OnStageResult(ctx, "reviewer", &pb.StageResult{TaskId: task.ID, SessionId: out.lastAssign(t).SessionId, Stage: pb.StageResult_REVIEW, Ok: false, Detail: "нет тестов"}); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.GetTask(ctx, task.ID)
@@ -461,4 +462,166 @@ func mustTaskRunner(t *testing.T, st *store.Store, id string) string {
 		t.Fatal("задача без runner'а")
 	}
 	return task.RunnerID
+}
+
+// Replay после reconnect: StageResult прошлой сессии не закрывает текущую
+// и не расходует попытку (design add-session-visibility, решение 4).
+func TestStaleSessionResultDropped(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	out := &capture{}
+	e := New(st, &fakeSCM{}, nil, out, 90*time.Second)
+
+	p, _ := st.CreateProject(ctx, "demo", "o/r", []domain.Check{{Name: "tests", Cmd: "true"}}, mustOwner(t, st).ID)
+	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
+	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s1 := out.lastAssign(t).SessionId
+	if s1 == "" {
+		t.Fatal("Assignment без session_id")
+	}
+
+	// CODING ok закрывает сессию s1 и открывает s2 (TESTING).
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: s1, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
+		t.Fatal(err)
+	}
+	s2 := out.lastAssign(t).SessionId
+	if s2 == s1 {
+		t.Fatal("новая стадия должна открыть новую сессию")
+	}
+
+	// Replay провала со старой сессией s1: отброшен без изменений задачи.
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: s1, Stage: pb.StageResult_TESTING, Ok: false, Detail: "stale"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.GetTask(ctx, task.ID)
+	if got.Status != domain.TaskTesting || got.AttemptUsed != 0 {
+		t.Fatalf("stale-результат изменил задачу: %s/%d", got.Status, got.AttemptUsed)
+	}
+	// Пустой session_id тоже не принимается.
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, Stage: pb.StageResult_TESTING, Ok: false}); err != nil {
+		t.Fatal(err)
+	}
+	if got := taskStatus(t, st, task.ID); got != domain.TaskTesting {
+		t.Fatalf("результат без session_id изменил задачу: %s", got)
+	}
+
+	// Актуальная сессия обрабатывается как обычно.
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: s2, Stage: pb.StageResult_TESTING, Ok: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := taskStatus(t, st, task.ID); got != domain.TaskReview {
+		t.Fatalf("want review, got %s", got)
+	}
+}
+
+// После рестарта rivetd (карта сессий пуста) результат открытой в БД сессии
+// принимается: SessionMatches поднимает её через store.OpenSession.
+func TestSessionRecoveredAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	out := &capture{}
+	e := New(st, &fakeSCM{}, nil, out, 90*time.Second)
+
+	p, _ := st.CreateProject(ctx, "demo", "o/r", nil, mustOwner(t, st).ID)
+	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
+	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s1 := out.lastAssign(t).SessionId
+
+	// «Рестарт»: новый Engine с тем же store, память пуста.
+	e2 := New(st, &fakeSCM{}, nil, out, 90*time.Second)
+	if err := e2.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: s1, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := taskStatus(t, st, task.ID); got != domain.TaskTesting {
+		t.Fatalf("результат после рестарта потерян: %s", got)
+	}
+}
+
+// Секрет в результате стадии маскируется до записи в event log и эскалацию
+// (сценарий team-visibility «Секрет в результате стадии»).
+func TestStageResultDetailMasked(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	out := &capture{}
+	e := New(st, &fakeSCM{}, nil, out, 90*time.Second)
+
+	owner := mustOwner(t, st)
+	p, _ := st.CreateProject(ctx, "demo", "o/r", nil, owner.ID)
+	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
+	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Невосстановимая ошибка с секретом в detail → событие и эскалация с маской.
+	secret := "ghp_leakedFromAgent0123456789"
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{
+		TaskId: task.ID, SessionId: out.lastAssign(t).SessionId,
+		Stage: pb.StageResult_CODING, Ok: false, Detail: "push failed: token " + secret,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	evs, err := st.Events(ctx, store.EventFilter{TaskID: task.ID, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range evs {
+		if strings.Contains(ev.Text, secret) {
+			t.Fatalf("секрет утёк в event log: %q", ev.Text)
+		}
+	}
+	atts, _ := st.ListAttention(ctx, owner.ID)
+	if len(atts) != 1 || strings.Contains(atts[0].Message, secret) {
+		t.Fatalf("секрет утёк в эскалацию: %+v", atts)
+	}
+	if !strings.Contains(atts[0].Message, "***") {
+		t.Fatalf("в эскалации нет маски: %q", atts[0].Message)
+	}
+}
+
+// После отмены задачи (сессии закрыты в БД, кеш Engine ещё не чищен)
+// поздний StageResult отменённой стадии игнорируется: без CreatePR и переходов.
+func TestCancelledTaskStaleResultIgnored(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	out := &capture{}
+	e := New(st, &fakeSCM{}, nil, out, 90*time.Second)
+
+	p, _ := st.CreateProject(ctx, "demo", "o/r", nil, mustOwner(t, st).ID)
+	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
+	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
+	if err := e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	s1 := out.lastAssign(t).SessionId
+
+	// Отмена: сессии закрыты в БД (ResolveTask). Кеш Engine намеренно НЕ
+	// инвалидирован — атомарный захват в EndSession обязан отбросить
+	// результат даже в окне до DropSession.
+	if err := st.ResolveTask(ctx, task.ID, "", "human", true); err != nil {
+		t.Fatal(err)
+	}
+
+	// Поздний «tests ok» отменённой сессии не создаёт PR и не двигает задачу.
+	if err := e.OnStageResult(ctx, "worker", &pb.StageResult{TaskId: task.ID, SessionId: s1, Stage: pb.StageResult_TESTING, Ok: true}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.GetTask(ctx, task.ID)
+	if got.Status != domain.TaskCancelled || got.PRURL != "" {
+		t.Fatalf("stale-результат после отмены изменил задачу: %s PR=%q", got.Status, got.PRURL)
+	}
 }

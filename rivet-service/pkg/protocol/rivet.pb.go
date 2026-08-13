@@ -490,6 +490,7 @@ type AgentEvent struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Text          string                 `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
+	SessionId     string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // сессия стадии из Assignment
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -538,11 +539,19 @@ func (x *AgentEvent) GetText() string {
 	return ""
 }
 
+func (x *AgentEvent) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
 type TranscriptChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Seq           int64                  `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
 	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
+	SessionId     string                 `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // сессия стадии из Assignment; несовпадение — сообщение отбрасывается
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -598,11 +607,19 @@ func (x *TranscriptChunk) GetData() []byte {
 	return nil
 }
 
+func (x *TranscriptChunk) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
 // Usage — отчёт о расходе за стадию. Отсутствие optional-поля означает
 // «данных нет» (агент не отчитался маркером USAGE:), а не ноль.
 type Usage struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	SessionId     string                 `protobuf:"bytes,8,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // сессия стадии из Assignment
 	Model         string                 `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
 	TokensIn      *int64                 `protobuf:"varint,3,opt,name=tokens_in,json=tokensIn,proto3,oneof" json:"tokens_in,omitempty"`
 	TokensOut     *int64                 `protobuf:"varint,4,opt,name=tokens_out,json=tokensOut,proto3,oneof" json:"tokens_out,omitempty"`
@@ -646,6 +663,13 @@ func (*Usage) Descriptor() ([]byte, []int) {
 func (x *Usage) GetTaskId() string {
 	if x != nil {
 		return x.TaskId
+	}
+	return ""
+}
+
+func (x *Usage) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
 	}
 	return ""
 }
@@ -698,8 +722,9 @@ type StageResult struct {
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Stage         StageResult_Stage      `protobuf:"varint,2,opt,name=stage,proto3,enum=rivet.v1.StageResult_Stage" json:"stage,omitempty"`
 	Ok            bool                   `protobuf:"varint,3,opt,name=ok,proto3" json:"ok,omitempty"`
-	Detail        string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`            // вывод тестов, вердикт review, url PR
-	PrUrl         string                 `protobuf:"bytes,5,opt,name=pr_url,json=prUrl,proto3" json:"pr_url,omitempty"` // для stage=CODING при создании PR
+	Detail        string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`                        // вывод тестов, вердикт review, url PR
+	PrUrl         string                 `protobuf:"bytes,5,opt,name=pr_url,json=prUrl,proto3" json:"pr_url,omitempty"`             // для stage=CODING при создании PR
+	SessionId     string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // сессия стадии из Assignment
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -769,11 +794,19 @@ func (x *StageResult) GetPrUrl() string {
 	return ""
 }
 
+func (x *StageResult) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
+	}
+	return ""
+}
+
 // BlockedQuestion — агент не может продолжить без человека.
 type BlockedQuestion struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Question      string                 `protobuf:"bytes,2,opt,name=question,proto3" json:"question,omitempty"`
+	SessionId     string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // сессия стадии из Assignment
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -818,6 +851,13 @@ func (x *BlockedQuestion) GetTaskId() string {
 func (x *BlockedQuestion) GetQuestion() string {
 	if x != nil {
 		return x.Question
+	}
+	return ""
+}
+
+func (x *BlockedQuestion) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
 	}
 	return ""
 }
@@ -1006,17 +1046,20 @@ func (x *Ack) GetAckedMsgId() string {
 
 // Assignment — задача этапу runner'а: кодирование, тесты, review или фикс.
 type Assignment struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	TaskNum       int64                  `protobuf:"varint,2,opt,name=task_num,json=taskNum,proto3" json:"task_num,omitempty"`
-	Stage         StageResult_Stage      `protobuf:"varint,3,opt,name=stage,proto3,enum=rivet.v1.StageResult_Stage" json:"stage,omitempty"`
-	Title         string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
-	Description   string                 `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
-	Criteria      []string               `protobuf:"bytes,6,rep,name=criteria,proto3" json:"criteria,omitempty"`
-	Repo          string                 `protobuf:"bytes,7,opt,name=repo,proto3" json:"repo,omitempty"`     // owner/name
-	Branch        string                 `protobuf:"bytes,8,opt,name=branch,proto3" json:"branch,omitempty"` // agent/task-<num>
-	Checks        []*Check               `protobuf:"bytes,9,rep,name=checks,proto3" json:"checks,omitempty"`
-	ExtraContext  string                 `protobuf:"bytes,10,opt,name=extra_context,json=extraContext,proto3" json:"extra_context,omitempty"` // замечания review при FIXING, diff при REVIEW и т.п.
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	TaskId       string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	TaskNum      int64                  `protobuf:"varint,2,opt,name=task_num,json=taskNum,proto3" json:"task_num,omitempty"`
+	Stage        StageResult_Stage      `protobuf:"varint,3,opt,name=stage,proto3,enum=rivet.v1.StageResult_Stage" json:"stage,omitempty"`
+	Title        string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
+	Description  string                 `protobuf:"bytes,5,opt,name=description,proto3" json:"description,omitempty"`
+	Criteria     []string               `protobuf:"bytes,6,rep,name=criteria,proto3" json:"criteria,omitempty"`
+	Repo         string                 `protobuf:"bytes,7,opt,name=repo,proto3" json:"repo,omitempty"`     // owner/name
+	Branch       string                 `protobuf:"bytes,8,opt,name=branch,proto3" json:"branch,omitempty"` // agent/task-<num>
+	Checks       []*Check               `protobuf:"bytes,9,rep,name=checks,proto3" json:"checks,omitempty"`
+	ExtraContext string                 `protobuf:"bytes,10,opt,name=extra_context,json=extraContext,proto3" json:"extra_context,omitempty"` // замечания review при FIXING, diff при REVIEW и т.п.
+	// Сессия стадии: runner повторяет session_id во всех сообщениях стадии
+	// (Transcript, Usage, StageResult, Blocked); replay с чужим id отбрасывается.
+	SessionId     string `protobuf:"bytes,11,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1117,6 +1160,13 @@ func (x *Assignment) GetChecks() []*Check {
 func (x *Assignment) GetExtraContext() string {
 	if x != nil {
 		return x.ExtraContext
+	}
+	return ""
+}
+
+func (x *Assignment) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
 	}
 	return ""
 }
@@ -1346,17 +1396,23 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\tHeartbeat\x12\x1c\n" +
 	"\actx_pct\x18\x01 \x01(\x05H\x00R\x06ctxPct\x88\x01\x01B\n" +
 	"\n" +
-	"\b_ctx_pct\"9\n" +
+	"\b_ctx_pct\"X\n" +
 	"\n" +
 	"AgentEvent\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x12\n" +
-	"\x04text\x18\x02 \x01(\tR\x04text\"P\n" +
+	"\x04text\x18\x02 \x01(\tR\x04text\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"o\n" +
 	"\x0fTranscriptChunk\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x03R\x03seq\x12\x12\n" +
-	"\x04data\x18\x03 \x01(\fR\x04data\"\x8f\x02\n" +
+	"\x04data\x18\x03 \x01(\fR\x04data\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x04 \x01(\tR\tsessionId\"\xae\x02\n" +
 	"\x05Usage\x12\x17\n" +
-	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x14\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\b \x01(\tR\tsessionId\x12\x14\n" +
 	"\x05model\x18\x02 \x01(\tR\x05model\x12 \n" +
 	"\ttokens_in\x18\x03 \x01(\x03H\x00R\btokensIn\x88\x01\x01\x12\"\n" +
 	"\n" +
@@ -1370,13 +1426,15 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\v_tokens_outB\v\n" +
 	"\t_cost_usdB\n" +
 	"\n" +
-	"\b_ctx_pct\"\xe9\x01\n" +
+	"\b_ctx_pct\"\x88\x02\n" +
 	"\vStageResult\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x121\n" +
 	"\x05stage\x18\x02 \x01(\x0e2\x1b.rivet.v1.StageResult.StageR\x05stage\x12\x0e\n" +
 	"\x02ok\x18\x03 \x01(\bR\x02ok\x12\x16\n" +
 	"\x06detail\x18\x04 \x01(\tR\x06detail\x12\x15\n" +
-	"\x06pr_url\x18\x05 \x01(\tR\x05prUrl\"O\n" +
+	"\x06pr_url\x18\x05 \x01(\tR\x05prUrl\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x06 \x01(\tR\tsessionId\"O\n" +
 	"\x05Stage\x12\x15\n" +
 	"\x11STAGE_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -1385,10 +1443,12 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\n" +
 	"\x06REVIEW\x10\x03\x12\n" +
 	"\n" +
-	"\x06FIXING\x10\x04\"F\n" +
+	"\x06FIXING\x10\x04\"e\n" +
 	"\x0fBlockedQuestion\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1a\n" +
-	"\bquestion\x18\x02 \x01(\tR\bquestion\"\x87\x02\n" +
+	"\bquestion\x18\x02 \x01(\tR\bquestion\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"\x87\x02\n" +
 	"\bPlaneMsg\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12!\n" +
 	"\x03ack\x18\x02 \x01(\v2\r.rivet.v1.AckH\x00R\x03ack\x12.\n" +
@@ -1399,7 +1459,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x04kind\"'\n" +
 	"\x03Ack\x12 \n" +
 	"\facked_msg_id\x18\x01 \x01(\tR\n" +
-	"ackedMsgId\"\xc1\x02\n" +
+	"ackedMsgId\"\xe0\x02\n" +
 	"\n" +
 	"Assignment\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
@@ -1412,7 +1472,9 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x06branch\x18\b \x01(\tR\x06branch\x12'\n" +
 	"\x06checks\x18\t \x03(\v2\x0f.rivet.v1.CheckR\x06checks\x12#\n" +
 	"\rextra_context\x18\n" +
-	" \x01(\tR\fextraContext\"-\n" +
+	" \x01(\tR\fextraContext\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\v \x01(\tR\tsessionId\"-\n" +
 	"\x05Check\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03cmd\x18\x02 \x01(\tR\x03cmd\"5\n" +

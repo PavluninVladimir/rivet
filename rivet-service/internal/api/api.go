@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/PavluninVladimir/rivet/internal/blob"
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/planner"
@@ -20,6 +21,9 @@ type Server struct {
 	Engine  *orchestrator.Engine
 	Hub     *stream.Hub
 	Planner *planner.Planner
+	// Blob — хранилище транскриптов; nil (MinIO отключён) — транскрипты
+	// отвечают 404, остальной API работает.
+	Blob *blob.Store
 	// WebhookSecret — секрет HMAC-подписи входящих webhook'ов;
 	// пустой выключает endpoint (fail-closed, спека scm-integration).
 	WebhookSecret string
@@ -58,6 +62,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/epics/{id}/resume", s.epicAction(domain.EpicRunning, "Epic возобновлён"))
 	mux.HandleFunc("POST /api/v1/epics/{id}/archive", s.epicAction(domain.EpicArchived, "Epic архивирован"))
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
+	mux.HandleFunc("GET /api/v1/tasks/{id}/sessions", s.listTaskSessions)
+	mux.HandleFunc("GET /api/v1/sessions/{id}/transcript", s.sessionTranscript)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/answer", s.taskAnswer)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/retry", s.taskRetry)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/cancel", s.taskCancel)
@@ -325,6 +331,7 @@ func (s *Server) taskAnswer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	s.dropSession(r.PathValue("id"))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
 
@@ -336,6 +343,7 @@ func (s *Server) taskRetry(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	s.dropSession(r.PathValue("id"))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
 
@@ -347,7 +355,16 @@ func (s *Server) taskCancel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	s.dropSession(r.PathValue("id"))
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+// dropSession — ResolveTask закрыл сессии задачи в БД, кеш Engine обязан
+// их забыть (Engine nil в части тестов).
+func (s *Server) dropSession(taskID string) {
+	if s.Engine != nil {
+		s.Engine.DropSession(taskID)
+	}
 }
 
 func (s *Server) taskMerge(w http.ResponseWriter, r *http.Request) {
