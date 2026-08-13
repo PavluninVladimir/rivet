@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -326,19 +327,81 @@ func (s *Store) CreateSession(ctx context.Context, in domain.Session) (string, e
 	return id, err
 }
 
+// ListTaskSessions — история сессий задачи по возрастанию started_at
+// (дельта observability «Просмотр сохранённых транскриптов»). Стадия
+// лежит в Scope, tokens nullable: nil = источник не сообщил.
+func (s *Store) ListTaskSessions(ctx context.Context, taskID string) ([]domain.Session, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT id::text, COALESCE(task_id::text,''), attempt, driver_kind, driver_id,
+		       agent, model, depth, COALESCE(scope,''), COALESCE(transcript_ref,''),
+		       tokens, started_at, ended_at
+		FROM sessions WHERE task_id=$1 ORDER BY started_at`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Session
+	for rows.Next() {
+		var v domain.Session
+		if err := rows.Scan(&v.ID, &v.TaskID, &v.Attempt, &v.DriverKind, &v.DriverID,
+			&v.Agent, &v.Model, &v.Depth, &v.Scope, &v.TranscriptRef,
+			&v.Tokens, &v.Started, &v.Ended); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// SessionTranscriptForViewer — transcript_ref сессии, только если viewer
+// участник проекта её задачи. Один scoped-запрос: чужая и несуществующая
+// сессия неотличимы (паттерн TaskProjectForViewer).
+func (s *Store) SessionTranscriptForViewer(ctx context.Context, sessionID, viewerID string) (string, error) {
+	var ref string
+	err := s.Pool.QueryRow(ctx, `
+		SELECT COALESCE(ss.transcript_ref,'') FROM sessions ss
+		JOIN tasks t ON t.id = ss.task_id
+		JOIN epics e ON e.id = t.epic_id
+		JOIN project_members m ON m.project_id = e.project_id AND m.user_id = $2
+		WHERE ss.id = $1`, sessionID, viewerID).Scan(&ref)
+	return ref, nf(err)
+}
+
+// OpenSession — id открытой сессии задачи (пустая строка, если её нет).
+// Нужна Engine'у после рестарта rivetd: карта сессий в памяти пуста, а
+// runner доносит результаты стадий, назначенных до рестарта.
+func (s *Store) OpenSession(ctx context.Context, taskID string) (string, error) {
+	var id string
+	err := s.Pool.QueryRow(ctx, `
+		SELECT id::text FROM sessions
+		WHERE task_id=$1 AND ended_at IS NULL
+		ORDER BY started_at DESC LIMIT 1`, taskID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}
+
 // EndSession закрывает сессию и подводит итог токенов по usage-записям её
 // задачи с момента started_at (design add-usage-metering, решение 6).
-// NULL — ни одна запись не содержала токенов.
-func (s *Store) EndSession(ctx context.Context, id, transcriptRef string) error {
-	_, err := s.Pool.Exec(ctx, `
+// NULL — ни одна запись не содержала токенов. Закрытие атомарно захватывает
+// ещё открытую сессию (`ended_at IS NULL`): false — её уже закрыл другой
+// путь (отмена, потеря runner'а), и вызывающий обязан отбросить сообщение
+// стадии, а не продолжать реакции конвейера (design add-session-visibility,
+// решение 4).
+func (s *Store) EndSession(ctx context.Context, id, transcriptRef string) (bool, error) {
+	tag, err := s.Pool.Exec(ctx, `
 		UPDATE sessions s SET ended_at=now(), transcript_ref=NULLIF($2,''),
 			tokens=(SELECT SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0))
 			        FROM usage_records u
 			        WHERE u.task_id = s.task_id AND u.ts >= s.started_at
 			          AND (u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL))
-		WHERE s.id=$1`,
+		WHERE s.id=$1 AND s.ended_at IS NULL`,
 		id, transcriptRef)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // ─── usage ───────────────────────────────────────────────────────────────

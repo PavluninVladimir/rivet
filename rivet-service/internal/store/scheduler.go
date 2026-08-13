@@ -450,6 +450,22 @@ func (s *Store) BlockTask(ctx context.Context, taskID, question string, actor Ev
 	})
 }
 
+// endOpenSessions закрывает открытые сессии задачи, когда стадия обрывается
+// вне обычного пути StageResult/Blocked (отмена, потеря runner'а): итог
+// токенов подводится как в EndSession, транскрипт не сохраняется. Иначе
+// сессия навсегда выглядит «идущей», а SessionMatches после рестарта может
+// поднять её как актуальную.
+func endOpenSessions(ctx context.Context, tx pgx.Tx, taskID string) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE sessions s SET ended_at=now(),
+			tokens=(SELECT SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0))
+			        FROM usage_records u
+			        WHERE u.task_id = s.task_id AND u.ts >= s.started_at
+			          AND (u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL))
+		WHERE s.task_id=$1 AND s.ended_at IS NULL`, taskID)
+	return err
+}
+
 // ResolveTask — решение человека по blocked/failed задаче: ответ дополняет
 // описание, счётчик попыток полностью сбрасывается (спека human-escalation),
 // задача возвращается в планирование, эскалация закрывается.
@@ -469,6 +485,9 @@ func (s *Store) ResolveTask(ctx context.Context, taskID, answer, userID string, 
 		}
 		if !from.CanTransition(to) {
 			return domain.ErrBadTransition{Entity: "task", From: string(from), To: string(to)}
+		}
+		if err := endOpenSessions(ctx, tx, taskID); err != nil {
+			return err
 		}
 		if cancel {
 			// Отмена может прилететь и в выполняющуюся задачу: освобождаем
@@ -521,9 +540,12 @@ func (s *Store) TransitionWithRunnerRelease(ctx context.Context, taskID string,
 // расходует попытку задачи (спека orchestration: бесконечный перезапуск
 // недопустим): попытки остались → ready, перезапуск через планирование
 // (частичная работа остаётся в ветке); лимит исчерпан → failed + эскалация
-// RUNNER_LOST.
-func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int) error {
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+// RUNNER_LOST. Возвращает задачи потерянных runner'ов: их сессии закрыты,
+// вызывающий (Engine) инвалидирует свой кеш сессий.
+func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int) ([]string, error) {
+	var affected []string
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		affected = affected[:0]
 		rows, err := tx.Query(ctx, `
 			SELECT r.id, COALESCE(r.task_id::text,'') FROM runners r
 			WHERE r.status <> 'offline' AND r.last_seen < now() - make_interval(secs => $1)
@@ -553,6 +575,11 @@ func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int)
 			if st.taskID == "" {
 				continue
 			}
+			// Стадия оборвалась вместе с runner'ом — открытые сессии закрываются.
+			if err := endOpenSessions(ctx, tx, st.taskID); err != nil {
+				return err
+			}
+			affected = append(affected, st.taskID)
 			var from domain.TaskStatus
 			var epicID, projectID string
 			var used, limit int
@@ -606,4 +633,5 @@ func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int)
 		}
 		return nil
 	})
+	return affected, err
 }

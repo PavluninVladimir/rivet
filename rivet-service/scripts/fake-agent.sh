@@ -36,6 +36,9 @@ case "$PROMPT" in
 esac
 
 echo "Реализую задачу..."
+# «Секрет» в выводе: e2e проверяет, что в сохранённом транскрипте он
+# замаскирован (спека team-visibility «Секрет в транскрипте»).
+echo "export GH_TOKEN=ghp_e2eFakeSecret0123456789"
 printf 'work %s\n' "$(date +%s)" >> e2e-result.txt
 usage
 echo "Готово."

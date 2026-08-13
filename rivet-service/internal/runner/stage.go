@@ -33,11 +33,11 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	started := time.Now()
 	step := func(text string) {
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Event{
-			Event: &pb.AgentEvent{TaskId: as.TaskId, Text: text}}})
+			Event: &pb.AgentEvent{TaskId: as.TaskId, SessionId: as.SessionId, Text: text}}})
 	}
 	transcript := func(data []byte) {
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Transcript{
-			Transcript: &pb.TranscriptChunk{TaskId: as.TaskId, Data: data}}})
+			Transcript: &pb.TranscriptChunk{TaskId: as.TaskId, SessionId: as.SessionId, Data: data}}})
 	}
 	// report — USAGE:-отчёт запуска агента этой стадии; нулевые указатели =
 	// данных нет (спека agent-integration «Отчёт usage через универсальную обёртку»).
@@ -50,7 +50,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	}
 	emitUsage := func() {
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Usage{
-			Usage: &pb.Usage{TaskId: as.TaskId, Model: a.cfg.Model,
+			Usage: &pb.Usage{TaskId: as.TaskId, SessionId: as.SessionId, Model: a.cfg.Model,
 				DurationS: int32(time.Since(started).Seconds()),
 				TokensIn:  report.TokensIn, TokensOut: report.TokensOut,
 				CostUsd: report.CostUSD, CtxPct: report.CtxPct}}})
@@ -58,7 +58,8 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	result := func(ok bool, detail string) {
 		emitUsage()
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_StageResult{
-			StageResult: &pb.StageResult{TaskId: as.TaskId, Stage: as.Stage, Ok: ok, Detail: tail(detail, 8000)}}})
+			StageResult: &pb.StageResult{TaskId: as.TaskId, SessionId: as.SessionId,
+				Stage: as.Stage, Ok: ok, Detail: tail(detail, 8000)}}})
 	}
 
 	ws, err := a.workspace(sctx, as, step)
@@ -77,7 +78,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			// завершится позже, а токены уже потрачены.
 			emitUsage()
 			emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Blocked{
-				Blocked: &pb.BlockedQuestion{TaskId: as.TaskId, Question: q}}})
+				Blocked: &pb.BlockedQuestion{TaskId: as.TaskId, SessionId: as.SessionId, Question: q}}})
 			return
 		}
 		if err != nil {

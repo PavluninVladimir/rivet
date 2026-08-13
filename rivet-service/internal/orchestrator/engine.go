@@ -15,6 +15,7 @@ import (
 
 	"github.com/PavluninVladimir/rivet/internal/blob"
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
@@ -71,8 +72,14 @@ func (e *Engine) Run(ctx context.Context) {
 
 // Tick — один проход планировщика: протухшие runner'ы, пересчёт DAG, назначения.
 func (e *Engine) Tick(ctx context.Context) error {
-	if err := e.St.MarkStaleRunnersOffline(ctx, int(e.HeartbeatTimeout.Seconds())); err != nil {
+	lost, err := e.St.MarkStaleRunnersOffline(ctx, int(e.HeartbeatTimeout.Seconds()))
+	if err != nil {
 		return fmt.Errorf("stale runners: %w", err)
+	}
+	// Сессии задач потерянных runner'ов закрыты в БД — кеш обязан забыть их,
+	// иначе replay стадии пройдёт SessionMatches по памяти.
+	for _, taskID := range lost {
+		e.DropSession(taskID)
 	}
 	epics, err := e.St.RunningEpics(ctx)
 	if err != nil {
@@ -171,15 +178,10 @@ func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.Stag
 		checks = append(checks, &pb.Check{Name: c.Name, Cmd: c.Cmd})
 	}
 	runnerID := a.Runner.ID
-	msg := &pb.PlaneMsg{
-		MsgId: fmt.Sprintf("assign-%s-%s-%d", a.Task.ID, stage, time.Now().UnixNano()),
-		Kind: &pb.PlaneMsg_Assign{Assign: &pb.Assignment{
-			TaskId: a.Task.ID, TaskNum: a.Task.Num, Stage: stage,
-			Title: a.Task.Title, Description: a.Task.Description,
-			Criteria: criteria, Repo: p.Repo, Branch: a.Task.Branch,
-			Checks: checks, ExtraContext: extra,
-		}},
-	}
+	// Сессия создаётся до отправки Assignment: runner повторяет session_id
+	// во всех сообщениях стадии, сообщения без него отбрасываются (design,
+	// решение 4). Без сессии стадию не запускаем — задачу вернёт
+	// heartbeat-таймаут, как при недоступном runner'е.
 	sessionID, err := e.St.CreateSession(ctx, domain.Session{
 		TaskID: a.Task.ID, Attempt: a.Task.AttemptUsed + 1,
 		DriverKind: "scheduler", Agent: a.Runner.Agent, Model: a.Runner.Model,
@@ -187,11 +189,20 @@ func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.Stag
 	})
 	if err != nil {
 		slog.Error("dispatch: session", "task", a.Task.ID, "err", err)
-	} else {
-		e.mu.Lock()
-		e.sessions[a.Task.ID] = sessionID
-		delete(e.transcripts, a.Task.ID)
-		e.mu.Unlock()
+		return
+	}
+	e.mu.Lock()
+	e.sessions[a.Task.ID] = sessionID
+	delete(e.transcripts, a.Task.ID)
+	e.mu.Unlock()
+	msg := &pb.PlaneMsg{
+		MsgId: fmt.Sprintf("assign-%s-%s-%d", a.Task.ID, stage, time.Now().UnixNano()),
+		Kind: &pb.PlaneMsg_Assign{Assign: &pb.Assignment{
+			TaskId: a.Task.ID, TaskNum: a.Task.Num, Stage: stage,
+			Title: a.Task.Title, Description: a.Task.Description,
+			Criteria: criteria, Repo: p.Repo, Branch: a.Task.Branch,
+			Checks: checks, ExtraContext: extra, SessionId: sessionID,
+		}},
 	}
 	if !e.Out.Send(runnerID, msg) {
 		slog.Warn("dispatch: runner недоступен, задачу вернёт heartbeat-таймаут",
@@ -199,49 +210,136 @@ func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.Stag
 	}
 }
 
-// OnTranscript накапливает чанки транскрипта текущей стадии (кап 4 МБ).
-func (e *Engine) OnTranscript(taskID string, data []byte) {
+// transcriptCap — жёсткий предел буфера транскрипта стадии: после append
+// буфер не превышает кап, лишнее отбрасывается с маркером обрезки
+// (api-contract: транскрипт отдаётся целиком одним ответом).
+const transcriptCap = 4 << 20
+
+var truncMarker = []byte("\n…[транскрипт обрезан: превышен лимит 4 МБ]\n")
+
+// SessionMatches — принадлежит ли сообщение текущей сессии задачи.
+// После рестарта rivetd карта сессий пуста: открытая сессия задачи
+// поднимается из БД, чтобы не терять результаты стадий, назначенных
+// до рестарта (доставка at-least-once переживает рестарт plane).
+func (e *Engine) SessionMatches(ctx context.Context, taskID, sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	e.mu.Lock()
+	cur, known := e.sessions[taskID]
+	e.mu.Unlock()
+	if known {
+		return cur == sessionID
+	}
+	open, err := e.St.OpenSession(ctx, taskID)
+	if err != nil || open == "" || open != sessionID {
+		return false
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if cur, known := e.sessions[taskID]; known {
+		return cur == sessionID
+	}
+	e.sessions[taskID] = sessionID
+	return true
+}
+
+// DropSession инвалидирует память о сессии задачи. Вызывается там, где
+// сессия закрывается в БД мимо StageResult/Blocked (отмена, потеря
+// runner'а): иначе SessionMatches продолжил бы принимать поздние сообщения
+// закрытой сессии из кеша (например, CreatePR после отмены).
+func (e *Engine) DropSession(taskID string) {
+	e.mu.Lock()
+	delete(e.sessions, taskID)
+	delete(e.transcripts, taskID)
+	e.mu.Unlock()
+}
+
+// OnTranscript накапливает чанки транскрипта текущей стадии. Чанки чужой
+// сессии отбрасываются; принадлежность проверяет вызывающий через
+// SessionMatches (он же поднимает сессию из БД после рестарта), здесь —
+// только сверка с картой под общим замком.
+func (e *Engine) OnTranscript(taskID, sessionID string, data []byte) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if sessionID == "" || e.sessions[taskID] != sessionID {
+		return
+	}
 	buf := e.transcripts[taskID]
-	if len(buf) > 4<<20 {
+	if len(buf) >= transcriptCap {
+		return
+	}
+	if len(buf)+len(data) > transcriptCap {
+		// Маркер обрезки входит в кап: итоговый буфер ровно transcriptCap.
+		keep := transcriptCap - len(truncMarker)
+		if len(buf) > keep {
+			buf = buf[:keep]
+		} else {
+			buf = append(buf, data[:keep-len(buf)]...)
+		}
+		e.transcripts[taskID] = append(buf, truncMarker...)
 		return
 	}
 	e.transcripts[taskID] = append(buf, data...)
 }
 
 // flushTranscript закрывает сессию стадии и уводит транскрипт в blob.
-func (e *Engine) flushTranscript(ctx context.Context, task domain.Task, stage string) {
+// Сохраняемый буфер маскируется целиком: страховка от секретов,
+// разрезанных между чанками (спека team-visibility «Секрет в транскрипте»).
+//
+// Возвращает, удалось ли атомарно закрыть сессию: false — её уже закрыл
+// другой путь (отмена, потеря runner'а) в окне до инвалидации кеша, и
+// вызывающий обязан отбросить сообщение стадии без реакций конвейера.
+// Объект, записанный в blob до неудавшегося захвата, остаётся без ссылки —
+// это безвредный мусор.
+func (e *Engine) flushTranscript(ctx context.Context, task domain.Task, stage, sessionID string) bool {
 	e.mu.Lock()
+	if sessionID == "" || e.sessions[task.ID] != sessionID {
+		e.mu.Unlock()
+		return false
+	}
 	buf := e.transcripts[task.ID]
-	sessionID := e.sessions[task.ID]
 	delete(e.transcripts, task.ID)
 	delete(e.sessions, task.ID)
 	e.mu.Unlock()
-	if sessionID == "" {
-		return
-	}
 	ref := ""
 	if len(buf) > 0 && e.Blob != nil {
 		key := fmt.Sprintf("tasks/%d/attempt-%d-%s.log", task.Num, task.AttemptUsed+1, stage)
 		var err error
-		if ref, err = e.Blob.Put(ctx, key, buf); err != nil {
+		if ref, err = e.Blob.Put(ctx, key, redact.Bytes(buf)); err != nil {
 			slog.Error("transcript flush", "task", task.ID, "err", err)
 			ref = ""
 		}
 	}
-	if err := e.St.EndSession(ctx, sessionID, ref); err != nil {
+	claimed, err := e.St.EndSession(ctx, sessionID, ref)
+	if err != nil {
 		slog.Error("end session", "session", sessionID, "err", err)
+		return false
 	}
+	return claimed
 }
 
 // OnStageResult — детерминированные реакции конвейера (спека task-pipeline).
+// Результат чужой сессии (replay после reconnect) отбрасывается; Detail —
+// runner-controlled текст, идущий в event log и контекст следующей стадии,
+// поэтому маскируется на входе.
 func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.StageResult) error {
+	if !e.SessionMatches(ctx, sr.TaskId, sr.SessionId) {
+		slog.Warn("stage result чужой сессии отброшен",
+			"task", sr.TaskId, "session", sr.SessionId, "stage", sr.Stage)
+		return nil
+	}
+	sr.Detail = redact.String(sr.Detail)
 	task, err := e.St.GetTask(ctx, sr.TaskId)
 	if err != nil {
 		return err
 	}
-	e.flushTranscript(ctx, task, sr.Stage.String())
+	if !e.flushTranscript(ctx, task, sr.Stage.String(), sr.SessionId) {
+		// Сессию уже закрыл другой путь (отмена, потеря runner'а):
+		// результат стадии опоздал, реакции конвейера не выполняются.
+		slog.Warn("stage result закрытой сессии отброшен", "task", sr.TaskId, "session", sr.SessionId)
+		return nil
+	}
 	ev := store.EventInput{ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "task.status"}
 
 	switch sr.Stage {
@@ -382,13 +480,22 @@ func (e *Engine) failTask(ctx context.Context, task domain.Task, msg, runnerID s
 		})
 }
 
-// OnBlocked — вопрос агента: blocked + эскалация.
+// OnBlocked — вопрос агента: blocked + эскалация. Вопрос — runner-controlled
+// текст (event log, эскалация), маскируется; чужая сессия отбрасывается.
 func (e *Engine) OnBlocked(ctx context.Context, runnerID string, b *pb.BlockedQuestion) error {
+	if !e.SessionMatches(ctx, b.TaskId, b.SessionId) {
+		slog.Warn("blocked чужой сессии отброшен", "task", b.TaskId, "session", b.SessionId)
+		return nil
+	}
+	b.Question = redact.String(b.Question)
 	task, err := e.St.GetTask(ctx, b.TaskId)
 	if err != nil {
 		return err
 	}
-	e.flushTranscript(ctx, task, "blocked")
+	if !e.flushTranscript(ctx, task, "blocked", b.SessionId) {
+		slog.Warn("blocked закрытой сессии отброшен", "task", b.TaskId, "session", b.SessionId)
+		return nil
+	}
 	return e.St.BlockTask(ctx, b.TaskId, b.Question,
 		store.EventInput{ActorKind: domain.ActorRunner, ActorID: runnerID})
 }

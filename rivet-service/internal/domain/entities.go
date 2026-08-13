@@ -101,9 +101,11 @@ type Session struct {
 	Depth         SessionDepth
 	Scope         string
 	TranscriptRef string
-	Tokens        int64
-	Started       time.Time
-	Ended         *time.Time
+	// Tokens — итог токенов сессии; nil = источник не сообщил (не ноль),
+	// колонка nullable с миграции 0004 (спека observability «Учёт usage»).
+	Tokens  *int64
+	Started time.Time
+	Ended   *time.Time
 }
 
 // loginRe — формат login: URL-safe (login живёт в путях API и event log).

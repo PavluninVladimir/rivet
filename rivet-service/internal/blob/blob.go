@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -47,4 +49,28 @@ func (s *Store) Put(ctx context.Context, key string, data []byte) (string, error
 		return "", err
 	}
 	return fmt.Sprintf("s3://%s/%s", s.bucket, key), nil
+}
+
+// Get читает объект по ссылке вида s3://bucket/key (transcript_ref из БД).
+// Ссылка обязана указывать на bucket этого store.
+func (s *Store) Get(ctx context.Context, ref string) ([]byte, error) {
+	key, err := refKey(ref, s.bucket)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = obj.Close() }()
+	return io.ReadAll(obj)
+}
+
+// refKey извлекает ключ объекта из ссылки s3://bucket/key, проверяя bucket.
+func refKey(ref, bucket string) (string, error) {
+	key, ok := strings.CutPrefix(ref, "s3://"+bucket+"/")
+	if !ok || key == "" {
+		return "", fmt.Errorf("ссылка %q не из bucket %q", ref, bucket)
+	}
+	return key, nil
 }
