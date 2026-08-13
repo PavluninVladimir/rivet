@@ -15,7 +15,8 @@ FUZZ_TARGETS = \
 	./internal/orchestrator:FuzzPRNumber \
 	./internal/api:FuzzWebhookSignature \
 	./internal/api:FuzzWebhookPayload \
-	./internal/runner:FuzzTail
+	./internal/runner:FuzzTail \
+	./internal/runner:FuzzParseUsage
 
 # go test -fuzz гоняет один таргет за прогон, поэтому цикл.
 fuzz:

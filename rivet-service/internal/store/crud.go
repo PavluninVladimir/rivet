@@ -217,7 +217,7 @@ func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
 		INSERT INTO runners (id, agent, model, host, capabilities, status, last_seen)
 		VALUES ($1,$2,$3,$4,$5,'idle',now())
 		ON CONFLICT (id) DO UPDATE SET agent=$2, model=$3, host=$4, capabilities=$5,
-			status='idle', task_id=NULL, last_seen=now()`,
+			status='idle', task_id=NULL, ctx_pct=NULL, last_seen=now()`,
 		r.ID, r.Agent, r.Model, r.Host, r.Capabilities)
 	return err
 }

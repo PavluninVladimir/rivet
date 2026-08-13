@@ -98,12 +98,23 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 }
 
 // ctxPct переводит optional-поле протокола в *int store'а (nil = неизвестно).
+// Значение вне 0–100 не доверяем: runner свой ввод уже фильтрует, но gRPC
+// открыт любому клиенту.
 func ctxPct(v *int32) *int {
-	if v == nil {
+	if v == nil || *v < 0 || *v > 100 {
 		return nil
 	}
 	p := int(*v)
 	return &p
+}
+
+// nonNegative отбрасывает отрицательные значения отчёта: они испортили бы
+// агрегаты метеринга (nil = данных нет).
+func nonNegative[T int64 | float64](v *T) *T {
+	if v == nil || *v < 0 {
+		return nil
+	}
+	return v
 }
 
 func (s *Server) ack(sendCh chan *pb.PlaneMsg, msgID string) {
@@ -151,8 +162,8 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		return s.St.RecordUsage(ctx, store.UsageInput{
 			SourceMsgID: msg.MsgId, ProjectID: projectID, EpicID: epicID,
 			TaskID: k.Usage.TaskId, RunnerID: runnerID, Model: k.Usage.Model,
-			TokensIn: k.Usage.TokensIn, TokensOut: k.Usage.TokensOut,
-			CostUSD: k.Usage.CostUsd, DurationS: int(k.Usage.DurationS),
+			TokensIn: nonNegative(k.Usage.TokensIn), TokensOut: nonNegative(k.Usage.TokensOut),
+			CostUSD: nonNegative(k.Usage.CostUsd), DurationS: max(int(k.Usage.DurationS), 0),
 		})
 
 	case *pb.RunnerMsg_StageResult:

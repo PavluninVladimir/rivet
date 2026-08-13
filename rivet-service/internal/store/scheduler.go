@@ -286,7 +286,7 @@ func (s *Store) AssignNext(ctx context.Context) (Assignment, bool, error) {
 			return err
 		}
 		if _, err := tx.Exec(ctx,
-			`UPDATE runners SET status='running', task_id=$2 WHERE id=$1`, runnerID, taskID); err != nil {
+			`UPDATE runners SET status='running', task_id=$2, ctx_pct=NULL WHERE id=$1`, runnerID, taskID); err != nil {
 			return err
 		}
 		if _, err := appendEvent(ctx, tx, EventInput{

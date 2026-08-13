@@ -31,7 +31,7 @@ func (s *Store) AssignFixing(ctx context.Context) (Assignment, bool, error) {
 		FOR UPDATE OF t SKIP LOCKED
 		LIMIT 1`,
 		`UPDATE tasks SET runner_id=$2, updated_at=now() WHERE id=$1`,
-		`UPDATE runners SET status='running', task_id=$2 WHERE id=$1`,
+		`UPDATE runners SET status='running', task_id=$2, ctx_pct=NULL WHERE id=$1`,
 		"назначен исполнитель для исправлений: ")
 }
 
@@ -56,7 +56,7 @@ func (s *Store) AssignTesting(ctx context.Context) (Assignment, bool, error) {
 		FOR UPDATE OF t SKIP LOCKED
 		LIMIT 1`,
 		`UPDATE tasks SET runner_id=$2, updated_at=now() WHERE id=$1`,
-		`UPDATE runners SET status='testing', task_id=$2 WHERE id=$1`,
+		`UPDATE runners SET status='testing', task_id=$2, ctx_pct=NULL WHERE id=$1`,
 		"назначен исполнитель для проверок: ")
 }
 
@@ -81,7 +81,7 @@ func (s *Store) AssignReview(ctx context.Context) (Assignment, bool, error) {
 		FOR UPDATE OF t SKIP LOCKED
 		LIMIT 1`,
 		`UPDATE tasks SET reviewer_id=$2, updated_at=now() WHERE id=$1`,
-		`UPDATE runners SET status='review', task_id=$2 WHERE id=$1`,
+		`UPDATE runners SET status='review', task_id=$2, ctx_pct=NULL WHERE id=$1`,
 		"назначен ревьюер: ")
 }
 

@@ -48,12 +48,15 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			a.ctxPct.Store(*report.CtxPct)
 		}
 	}
-	result := func(ok bool, detail string) {
+	emitUsage := func() {
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Usage{
 			Usage: &pb.Usage{TaskId: as.TaskId, Model: a.cfg.Model,
 				DurationS: int32(time.Since(started).Seconds()),
 				TokensIn:  report.TokensIn, TokensOut: report.TokensOut,
 				CostUsd: report.CostUSD, CtxPct: report.CtxPct}}})
+	}
+	result := func(ok bool, detail string) {
+		emitUsage()
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_StageResult{
 			StageResult: &pb.StageResult{TaskId: as.TaskId, Stage: as.Stage, Ok: ok, Detail: tail(detail, 8000)}}})
 	}
@@ -70,6 +73,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		out, err := a.runAgent(sctx, ws, codingPrompt(as), transcript)
 		noteUsage(out)
 		if q, blocked := parseBlocked(out); blocked {
+			// Расход заблокировавшегося запуска тоже учитывается: стадия
+			// завершится позже, а токены уже потрачены.
+			emitUsage()
 			emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Blocked{
 				Blocked: &pb.BlockedQuestion{TaskId: as.TaskId, Question: q}}})
 			return
