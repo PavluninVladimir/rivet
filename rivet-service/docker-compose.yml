@@ -14,6 +14,10 @@ services:
       # По умолчанию fake: с github без RIVET_GITHUB_TOKEN конвейер падает на CreatePR.
       # Для реальных PR задай RIVET_SCM=github и RIVET_GITHUB_TOKEN в окружении/.env.
       RIVET_SCM: ${RIVET_SCM:-fake}
+      # Bootstrap первого администратора (rivetd не стартует без владельца).
+      # Дефолт только для локального стенда за loopback: смени при публикации.
+      RIVET_ADMIN_LOGIN: ${RIVET_ADMIN_LOGIN:-admin}
+      RIVET_ADMIN_PASSWORD: ${RIVET_ADMIN_PASSWORD:-admin}
       RIVET_LLM_PROVIDER: ${RIVET_LLM_PROVIDER:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}

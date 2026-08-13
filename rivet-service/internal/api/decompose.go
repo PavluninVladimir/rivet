@@ -22,6 +22,9 @@ func (s *Server) decompose(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if !s.requireMember(w, r, epic.ProjectID) {
+		return
+	}
 	if epic.Status != domain.EpicPlanned {
 		writeErr(w, domain.ErrBadTransition{Entity: "epic", From: string(epic.Status), To: "decompose"})
 		return

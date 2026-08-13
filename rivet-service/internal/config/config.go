@@ -39,6 +39,14 @@ type Config struct {
 	DeepSeekAPIKey string
 	DeepSeekModel  string
 
+	// AdminLogin/AdminPassword — bootstrap первого администратора при пустой
+	// таблице пользователей (спека access-policy «Аутентификация пользователей»).
+	AdminLogin    string
+	AdminPassword string
+	// TrustProxy — доверять X-Forwarded-Proto от прокси при выставлении
+	// Secure-cookie (rivetd за TLS-терминирующим reverse proxy).
+	TrustProxy bool
+
 	// RunnerHeartbeatTimeout — тишина от runner'а, после которой он offline.
 	RunnerHeartbeatTimeout time.Duration
 	// DefaultAttemptLimit — лимит попыток задачи по умолчанию (спека orchestration).
@@ -62,6 +70,9 @@ func FromEnv() (Config, error) {
 		AnthropicAPIKey:        os.Getenv("ANTHROPIC_API_KEY"),
 		DeepSeekAPIKey:         os.Getenv("DEEPSEEK_API_KEY"),
 		DeepSeekModel:          os.Getenv("RIVET_DEEPSEEK_MODEL"),
+		AdminLogin:             os.Getenv("RIVET_ADMIN_LOGIN"),
+		AdminPassword:          os.Getenv("RIVET_ADMIN_PASSWORD"),
+		TrustProxy:             os.Getenv("RIVET_TRUST_PROXY") == "1",
 		RunnerHeartbeatTimeout: 90 * time.Second,
 		DefaultAttemptLimit:    3,
 	}

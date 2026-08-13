@@ -57,6 +57,20 @@ func mustTask(t *testing.T, s *Store, epicID string, in NewTask) domain.Task {
 	return task
 }
 
+// ownerSeq — уникальные логины владельцев в пределах тестовой БД.
+var ownerSeq int
+
+// mustOwner создаёт пользователя-владельца проекта.
+func mustOwner(t *testing.T, s *Store) domain.User {
+	t.Helper()
+	ownerSeq++
+	u, err := s.CreateUser(context.Background(), fmt.Sprintf("owner-%d", ownerSeq), "", "pw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
 func status(t *testing.T, s *Store, taskID string) domain.TaskStatus {
 	t.Helper()
 	task, err := s.GetTask(context.Background(), taskID)
@@ -70,7 +84,8 @@ func TestSchedulerFlow(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
 
-	p, err := s.CreateProject(ctx, "demo", "owner/repo", nil)
+	owner := mustOwner(t, s)
+	p, err := s.CreateProject(ctx, "demo", "owner/repo", nil, owner.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +195,7 @@ func TestSchedulerFlow(t *testing.T) {
 	if got := status(t, s, b.ID); got != domain.TaskFailed {
 		t.Fatalf("B: want failed, got %s", got)
 	}
-	atts, err := s.ListAttention(ctx)
+	atts, err := s.ListAttention(ctx, owner.ID)
 	if err != nil || len(atts) != 1 || atts[0].Reason != domain.AttReviewLimit {
 		t.Fatalf("ожидали одну эскалацию REVIEW_LIMIT: %+v err=%v", atts, err)
 	}
@@ -201,7 +216,7 @@ func TestSchedulerFlow(t *testing.T) {
 	if bTask.Status != domain.TaskQueued || bTask.AttemptUsed != 0 {
 		t.Fatalf("B после ответа: want queued/0, got %s/%d", bTask.Status, bTask.AttemptUsed)
 	}
-	if atts, _ := s.ListAttention(ctx); len(atts) != 0 {
+	if atts, _ := s.ListAttention(ctx, owner.ID); len(atts) != 0 {
 		t.Fatalf("эскалации должны быть закрыты: %+v", atts)
 	}
 }
@@ -212,7 +227,8 @@ func TestSchedulerFlow(t *testing.T) {
 func TestCascadeTransitiveWithAutoUnblock(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	p, _ := s.CreateProject(ctx, "demo", "o/r", nil)
+	owner := mustOwner(t, s)
+	p, _ := s.CreateProject(ctx, "demo", "o/r", nil, owner.ID)
 	e, _ := s.CreateEpic(ctx, p.ID, "E", "")
 	a := mustTask(t, s, e.ID, NewTask{Title: "A"})
 	b := mustTask(t, s, e.ID, NewTask{Title: "B", Deps: []string{a.ID}})
@@ -245,7 +261,7 @@ func TestCascadeTransitiveWithAutoUnblock(t *testing.T) {
 		}
 	}
 	// Эскалаций на потомков нет (первопричина эскалируется своим путём).
-	if atts, _ := s.ListAttention(ctx); len(atts) != 0 {
+	if atts, _ := s.ListAttention(ctx, owner.ID); len(atts) != 0 {
 		t.Fatalf("каскад не должен создавать эскалаций: %+v", atts)
 	}
 
@@ -273,7 +289,7 @@ func TestCascadeTransitiveWithAutoUnblock(t *testing.T) {
 func TestCancelBreaksCascadeChain(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	p, _ := s.CreateProject(ctx, "demo", "o/r", nil)
+	p, _ := s.CreateProject(ctx, "demo", "o/r", nil, mustOwner(t, s).ID)
 	e, _ := s.CreateEpic(ctx, p.ID, "E", "")
 	a := mustTask(t, s, e.ID, NewTask{Title: "A"})
 	b := mustTask(t, s, e.ID, NewTask{Title: "B", Deps: []string{a.ID}})
@@ -315,7 +331,7 @@ func TestCancelBreaksCascadeChain(t *testing.T) {
 func TestCancelRunningTaskFreesRunner(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	p, _ := s.CreateProject(ctx, "demo", "o/r", nil)
+	p, _ := s.CreateProject(ctx, "demo", "o/r", nil, mustOwner(t, s).ID)
 	e, _ := s.CreateEpic(ctx, p.ID, "E", "")
 	a := mustTask(t, s, e.ID, NewTask{Title: "A"})
 	if err := s.TransitionEpic(ctx, e.ID, domain.EpicRunning,
@@ -347,7 +363,7 @@ func TestCancelRunningTaskFreesRunner(t *testing.T) {
 func TestCancelledDepExcludedFromDAG(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	p, _ := s.CreateProject(ctx, "demo", "o/r", nil)
+	p, _ := s.CreateProject(ctx, "demo", "o/r", nil, mustOwner(t, s).ID)
 	e, _ := s.CreateEpic(ctx, p.ID, "E", "")
 	a := mustTask(t, s, e.ID, NewTask{Title: "A"})
 	b := mustTask(t, s, e.ID, NewTask{Title: "B", Deps: []string{a.ID}})
@@ -409,7 +425,8 @@ func TestValidateDAG(t *testing.T) {
 func TestStaleRunnerConsumesAttempt(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	p, _ := s.CreateProject(ctx, "demo", "o/r", nil)
+	owner := mustOwner(t, s)
+	p, _ := s.CreateProject(ctx, "demo", "o/r", nil, owner.ID)
 	e, _ := s.CreateEpic(ctx, p.ID, "E", "")
 	a := mustTask(t, s, e.ID, NewTask{Title: "A", AttemptLimit: 2})
 	if err := s.TransitionEpic(ctx, e.ID, domain.EpicRunning, EventInput{ActorKind: domain.ActorUser, Type: "epic.status"}); err != nil {
@@ -439,7 +456,7 @@ func TestStaleRunnerConsumesAttempt(t *testing.T) {
 	if len(runners) != 1 || runners[0].Status != domain.RunnerOffline {
 		t.Fatalf("runner должен быть offline: %+v", runners)
 	}
-	if atts, _ := s.ListAttention(ctx); len(atts) != 0 {
+	if atts, _ := s.ListAttention(ctx, owner.ID); len(atts) != 0 {
 		t.Fatalf("попытки остались — эскалации быть не должно: %+v", atts)
 	}
 
@@ -459,7 +476,7 @@ func TestStaleRunnerConsumesAttempt(t *testing.T) {
 	if got := status(t, s, a.ID); got != domain.TaskFailed {
 		t.Fatalf("после исчерпания: want failed, got %s", got)
 	}
-	atts, _ := s.ListAttention(ctx)
+	atts, _ := s.ListAttention(ctx, owner.ID)
 	if len(atts) != 1 || atts[0].Reason != domain.AttRunnerLost {
 		t.Fatalf("ожидали эскалацию RUNNER_LOST: %+v", atts)
 	}

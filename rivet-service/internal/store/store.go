@@ -57,7 +57,7 @@ func appendEvent(ctx context.Context, tx pgx.Tx, e EventInput) (int64, error) {
 	var id int64
 	err = tx.QueryRow(ctx, `
 		INSERT INTO events (actor_kind, actor_id, type, project_id, epic_id, task_id, text, payload)
-		VALUES ($1,$2,$3,$4,NULLIF($5,'')::uuid,NULLIF($6,'')::uuid,$7,$8) RETURNING id`,
+		VALUES ($1,$2,$3,NULLIF($4,'')::uuid,NULLIF($5,'')::uuid,NULLIF($6,'')::uuid,$7,$8) RETURNING id`,
 		e.ActorKind, e.ActorID, e.Type, e.ProjectID, e.EpicID, e.TaskID, e.Text, raw).Scan(&id)
 	return id, err
 }
@@ -80,6 +80,10 @@ type EventFilter struct {
 	Type      string
 	AfterID   int64
 	Limit     int
+	// ViewerID — обязательный для API фильтр слоя видимости: только события
+	// проектов, где пользователь участник. Пустой ViewerID — системный вызов
+	// (SSE-реплей после проверки членства, внутренние потребители).
+	ViewerID string
 }
 
 func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, error) {
@@ -87,7 +91,7 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 		f.Limit = 100
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, ts, actor_kind, actor_id, type, project_id,
+		SELECT id, ts, actor_kind, actor_id, type, COALESCE(project_id::text,''),
 		       COALESCE(epic_id::text,''), COALESCE(task_id::text,''), text
 		FROM events
 		WHERE ($1 = '' OR project_id = $1::uuid)
@@ -95,9 +99,10 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 		  AND ($3 = '' OR task_id = $3::uuid)
 		  AND ($4 = '' OR type = $4)
 		  AND id > $5
+		  AND ($7 = '' OR project_id IN (SELECT project_id FROM project_members WHERE user_id = $7::uuid))
 		ORDER BY id
 		LIMIT $6`,
-		f.ProjectID, f.EpicID, f.TaskID, f.Type, f.AfterID, f.Limit)
+		f.ProjectID, f.EpicID, f.TaskID, f.Type, f.AfterID, f.Limit, f.ViewerID)
 	if err != nil {
 		return nil, err
 	}

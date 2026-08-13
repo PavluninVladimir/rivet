@@ -1,0 +1,370 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/store"
+)
+
+// testServer поднимает API поверх изолированной БД (паттерн store/testStore).
+func testServer(t *testing.T) (*store.Store, *httptest.Server) {
+	t.Helper()
+	base := os.Getenv("RIVET_DATABASE_URL")
+	if base == "" {
+		base = "postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable"
+	}
+	ctx := context.Background()
+	admin, err := pgx.Connect(ctx, base)
+	if err != nil {
+		t.Skipf("postgres недоступен: %v", err)
+	}
+	name := fmt.Sprintf("rivet_api_test_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := pgx.ParseConfig(base)
+	testURL := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		cfg.User, cfg.Password, cfg.Host, cfg.Port, name)
+	t.Cleanup(func() {
+		_, _ = admin.Exec(ctx, "DROP DATABASE "+name+" WITH (FORCE)")
+		_ = admin.Close(ctx)
+	})
+	if err := store.Migrate(ctx, testURL); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.New(ctx, testURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	srv := httptest.NewServer((&Server{St: st}).Handler())
+	t.Cleanup(srv.Close)
+	return st, srv
+}
+
+// call — запрос с опциональными cookie сессии и bearer-токеном.
+func call(t *testing.T, method, url, session, bearer string, body any) (*http.Response, []byte) {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req, err := http.NewRequest(method, url, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if session != "" {
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: session})
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out bytes.Buffer
+	_, _ = out.ReadFrom(resp.Body)
+	return resp, out.Bytes()
+}
+
+func loginSession(t *testing.T, srv *httptest.Server, login, password string) string {
+	t.Helper()
+	resp, body := call(t, "POST", srv.URL+"/api/v1/auth/login", "", "",
+		map[string]string{"login": login, "password": password})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("вход %s: HTTP %d %s", login, resp.StatusCode, body)
+	}
+	for _, c := range resp.Cookies() {
+		if c.Name == sessionCookie {
+			if !c.HttpOnly {
+				t.Fatal("cookie сессии должна быть HttpOnly")
+			}
+			return c.Value
+		}
+	}
+	t.Fatal("нет cookie сессии в ответе login")
+	return ""
+}
+
+func mustStatus(t *testing.T, resp *http.Response, want int, what string) {
+	t.Helper()
+	if resp.StatusCode != want {
+		t.Fatalf("%s: HTTP %d, ожидался %d", what, resp.StatusCode, want)
+	}
+}
+
+// Сценарии спеки «Аутентификация пользователей»: вход/выход, 401 без данных.
+func TestAuthLoginLogout(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if err := st.Bootstrap(ctx, "root", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Без аутентификации — 401 без данных установки.
+	resp, body := call(t, "GET", srv.URL+"/api/v1/projects", "", "", nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "без аутентификации")
+	if strings.Contains(string(body), "demo") {
+		t.Fatalf("401 не должен раскрывать данные: %s", body)
+	}
+
+	// Неверный пароль и неверный логин неразличимы.
+	r1, b1 := call(t, "POST", srv.URL+"/api/v1/auth/login", "", "", map[string]string{"login": "root", "password": "wrong"})
+	r2, b2 := call(t, "POST", srv.URL+"/api/v1/auth/login", "", "", map[string]string{"login": "ghost", "password": "wrong"})
+	if r1.StatusCode != http.StatusUnauthorized || r2.StatusCode != http.StatusUnauthorized || string(b1) != string(b2) {
+		t.Fatalf("ответы должны быть одинаковыми 401: %d %s против %d %s", r1.StatusCode, b1, r2.StatusCode, b2)
+	}
+
+	session := loginSession(t, srv, "root", "secret")
+	resp, body = call(t, "GET", srv.URL+"/api/v1/auth/me", session, "", nil)
+	mustStatus(t, resp, http.StatusOK, "me")
+	if !strings.Contains(string(body), `"Login":"root"`) {
+		t.Fatalf("me должен вернуть пользователя: %s", body)
+	}
+
+	// Выход гасит сессию, повторное использование cookie — 401.
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/auth/logout", session, "", nil)
+	mustStatus(t, resp, http.StatusOK, "logout")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/auth/me", session, "", nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "cookie после logout")
+}
+
+// Сценарий «Перебор пароля замедляется»: после серии ошибок вход блокируется
+// даже с верным паролем, ответ остаётся одинаковым 401.
+func TestLoginBackoff(t *testing.T) {
+	st, srv := testServer(t)
+	if err := st.Bootstrap(context.Background(), "root", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < throttleFreeAttempts+1; i++ {
+		resp, _ := call(t, "POST", srv.URL+"/api/v1/auth/login", "", "", map[string]string{"login": "root", "password": "wrong"})
+		mustStatus(t, resp, http.StatusUnauthorized, "неверный пароль")
+	}
+	resp, _ := call(t, "POST", srv.URL+"/api/v1/auth/login", "", "", map[string]string{"login": "root", "password": "secret"})
+	mustStatus(t, resp, http.StatusUnauthorized, "верный пароль в окне задержки")
+}
+
+// Сценарий «Personal access token»: создание, использование, отзыв, срок.
+func TestAccessTokens(t *testing.T) {
+	st, srv := testServer(t)
+	if err := st.Bootstrap(context.Background(), "root", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	session := loginSession(t, srv, "root", "secret")
+
+	resp, body := call(t, "POST", srv.URL+"/api/v1/tokens", session, "", map[string]string{"name": "cli"})
+	mustStatus(t, resp, http.StatusCreated, "создание PAT")
+	var created struct {
+		Secret string
+		Token  domain.AccessToken
+	}
+	if err := json.Unmarshal(body, &created); err != nil || !strings.HasPrefix(created.Secret, "rvt_") {
+		t.Fatalf("нет секрета rvt_: %s", body)
+	}
+
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/projects", "", created.Secret, nil)
+	mustStatus(t, resp, http.StatusOK, "запрос с PAT")
+
+	// Список не содержит секрета.
+	_, body = call(t, "GET", srv.URL+"/api/v1/tokens", session, "", nil)
+	if strings.Contains(string(body), created.Secret) {
+		t.Fatal("секрет не должен возвращаться в списке")
+	}
+
+	resp, _ = call(t, "DELETE", srv.URL+"/api/v1/tokens/"+created.Token.ID, session, "", nil)
+	mustStatus(t, resp, http.StatusOK, "отзыв PAT")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/projects", "", created.Secret, nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "отозванный PAT")
+
+	// Истёкший токен не аутентифицирует.
+	past := time.Now().Add(-time.Hour)
+	resp, body = call(t, "POST", srv.URL+"/api/v1/tokens", session, "",
+		map[string]any{"name": "old", "expires_at": past.Format(time.RFC3339)})
+	mustStatus(t, resp, http.StatusCreated, "создание истёкшего PAT")
+	_ = json.Unmarshal(body, &created)
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/projects", "", created.Secret, nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "истёкший PAT")
+}
+
+// Слой 1: второй пользователь не видит чужой проект ни в одном списке,
+// точечные ручки отвечают 404, у админа обхода нет.
+func TestProjectVisibility(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if err := st.Bootstrap(ctx, "root", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, "alice", "", "pw-alice", false); err != nil {
+		t.Fatal(err)
+	}
+	alice := loginSession(t, srv, "alice", "pw-alice")
+	root := loginSession(t, srv, "root", "secret")
+
+	// alice создаёт проект и epic.
+	resp, body := call(t, "POST", srv.URL+"/api/v1/projects", alice, "",
+		map[string]string{"name": "secret-project", "repo": "o/r"})
+	mustStatus(t, resp, http.StatusCreated, "создание проекта")
+	var project domain.Project
+	_ = json.Unmarshal(body, &project)
+	resp, body = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/epics", alice, "",
+		map[string]string{"title": "Epic", "goal": "g"})
+	mustStatus(t, resp, http.StatusCreated, "создание epic")
+	var epic domain.Epic
+	_ = json.Unmarshal(body, &epic)
+
+	// Админ root — не участник: списки пусты, точечные ручки 404 (без обхода).
+	_, body = call(t, "GET", srv.URL+"/api/v1/projects", root, "", nil)
+	if strings.Contains(string(body), project.ID) {
+		t.Fatalf("админ не должен видеть чужой проект: %s", body)
+	}
+	for what, url := range map[string]string{
+		"epics проекта": srv.URL + "/api/v1/projects/" + project.ID + "/epics",
+		"карточка epic": srv.URL + "/api/v1/epics/" + epic.ID,
+		"участники":     srv.URL + "/api/v1/projects/" + project.ID + "/members",
+		"SSE":           srv.URL + "/api/v1/stream?project=" + project.ID,
+	} {
+		resp, _ = call(t, "GET", url, root, "", nil)
+		mustStatus(t, resp, http.StatusNotFound, "чужой "+what)
+	}
+	_, body = call(t, "GET", srv.URL+"/api/v1/events", root, "", nil)
+	if strings.Contains(string(body), project.ID) {
+		t.Fatalf("события чужого проекта видны: %s", body)
+	}
+
+	// Участие открывает доступ; удаление последнего участника запрещено.
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/members", alice, "",
+		map[string]string{"login": "root"})
+	mustStatus(t, resp, http.StatusCreated, "добавление участника")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/epics/"+epic.ID, root, "", nil)
+	mustStatus(t, resp, http.StatusOK, "epic после добавления")
+	resp, _ = call(t, "DELETE", srv.URL+"/api/v1/projects/"+project.ID+"/members/root", alice, "", nil)
+	mustStatus(t, resp, http.StatusOK, "удаление участника")
+	resp, _ = call(t, "DELETE", srv.URL+"/api/v1/projects/"+project.ID+"/members/alice", alice, "", nil)
+	mustStatus(t, resp, http.StatusConflict, "удаление последнего участника")
+}
+
+// Слой 2: администрирование — только админ; деактивация гасит сессии,
+// реактивация не воскрешает credentials.
+func TestAdminAndDeactivation(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if err := st.Bootstrap(ctx, "root", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	var bob domain.User
+	var err error
+	if bob, err = st.CreateUser(ctx, "bob", "", "pw-bob", false); err != nil {
+		t.Fatal(err)
+	}
+	root := loginSession(t, srv, "root", "secret")
+	bobSession := loginSession(t, srv, "bob", "pw-bob")
+
+	// Не-админ: 403 на users и drain.
+	resp, _ := call(t, "GET", srv.URL+"/api/v1/users", bobSession, "", nil)
+	mustStatus(t, resp, http.StatusForbidden, "users не-админом")
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/runners/r1/drain", bobSession, "", nil)
+	mustStatus(t, resp, http.StatusForbidden, "drain не-админом")
+
+	// PAT боба переживает до деактивации, но не после.
+	respTok, bodyTok := call(t, "POST", srv.URL+"/api/v1/tokens", bobSession, "", map[string]string{"name": "cli"})
+	mustStatus(t, respTok, http.StatusCreated, "PAT боба")
+	var created struct{ Secret string }
+	_ = json.Unmarshal(bodyTok, &created)
+
+	disabled := true
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/users/"+bob.ID, root, "", map[string]any{"disabled": disabled})
+	mustStatus(t, resp, http.StatusOK, "деактивация")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/auth/me", bobSession, "", nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "сессия деактивированного")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/projects", "", created.Secret, nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "PAT деактивированного")
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/auth/login", "", "", map[string]string{"login": "bob", "password": "pw-bob"})
+	mustStatus(t, resp, http.StatusUnauthorized, "вход деактивированного")
+
+	// Реактивация возвращает вход, но не старые credentials.
+	disabled = false
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/users/"+bob.ID, root, "", map[string]any{"disabled": disabled})
+	mustStatus(t, resp, http.StatusOK, "реактивация")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/auth/me", bobSession, "", nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "старая сессия после реактивации")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/projects", "", created.Secret, nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "старый PAT после реактивации")
+	_ = loginSession(t, srv, "bob", "pw-bob")
+
+	// Последний активный админ не деактивируется.
+	rootID := ""
+	_, body := call(t, "GET", srv.URL+"/api/v1/users", root, "", nil)
+	var users []domain.User
+	_ = json.Unmarshal(body, &users)
+	for _, u := range users {
+		if u.Login == "root" {
+			rootID = u.ID
+		}
+	}
+	disabled = true
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/users/"+rootID, root, "", map[string]any{"disabled": disabled})
+	mustStatus(t, resp, http.StatusConflict, "деактивация последнего админа")
+}
+
+// Redaction: TaskID runner'а виден только участнику проекта задачи.
+func TestRunnerTaskRedaction(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if err := st.Bootstrap(ctx, "root", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, "alice", "", "pw-alice", false); err != nil {
+		t.Fatal(err)
+	}
+	alice := loginSession(t, srv, "alice", "pw-alice")
+	root := loginSession(t, srv, "root", "secret")
+
+	resp, body := call(t, "POST", srv.URL+"/api/v1/projects", alice, "", map[string]string{"name": "p", "repo": "o/r"})
+	mustStatus(t, resp, http.StatusCreated, "проект")
+	var project domain.Project
+	_ = json.Unmarshal(body, &project)
+	resp, body = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/epics", alice, "", map[string]string{"title": "E", "goal": ""})
+	mustStatus(t, resp, http.StatusCreated, "epic")
+	var epic domain.Epic
+	_ = json.Unmarshal(body, &epic)
+	resp, body = call(t, "POST", srv.URL+"/api/v1/epics/"+epic.ID+"/tasks", alice, "",
+		map[string]any{"title": "T", "description": "", "criteria": []string{}, "deps": []string{}})
+	mustStatus(t, resp, http.StatusCreated, "задача")
+	var task domain.Task
+	_ = json.Unmarshal(body, &task)
+
+	if err := st.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "fake", Model: "m", Host: "h", Capabilities: []string{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE runners SET task_id=$1, status='running' WHERE id='r1'`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	_, body = call(t, "GET", srv.URL+"/api/v1/runners", alice, "", nil)
+	if !strings.Contains(string(body), task.ID) {
+		t.Fatalf("участник должен видеть TaskID: %s", body)
+	}
+	_, body = call(t, "GET", srv.URL+"/api/v1/runners", root, "", nil)
+	if strings.Contains(string(body), task.ID) {
+		t.Fatalf("TaskID чужой задачи должен скрываться: %s", body)
+	}
+}

@@ -14,6 +14,7 @@ func run(t *testing.T, handler http.HandlerFunc, cmd func([]string) error, args 
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 	t.Setenv("RIVET_API_URL", srv.URL)
+	t.Setenv("RIVET_TOKEN", "rvt_test")
 	var buf bytes.Buffer
 	prev := output
 	output = &buf

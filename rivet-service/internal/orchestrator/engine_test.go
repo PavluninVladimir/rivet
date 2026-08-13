@@ -91,6 +91,16 @@ func testStore(t *testing.T) *store.Store {
 	return s
 }
 
+// mustOwner — владелец проектов в тестах конвейера (членство обязательно).
+func mustOwner(t *testing.T, st *store.Store) domain.User {
+	t.Helper()
+	u, err := st.CreateUser(context.Background(), fmt.Sprintf("owner-%d", time.Now().UnixNano()), "", "pw", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
 func TestPipelineEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
@@ -98,7 +108,7 @@ func TestPipelineEndToEnd(t *testing.T) {
 	out := &capture{}
 	e := New(st, sc, nil, out, 90*time.Second)
 
-	p, err := st.CreateProject(ctx, "demo", "owner/repo", []domain.Check{{Name: "tests", Cmd: "true"}})
+	p, err := st.CreateProject(ctx, "demo", "owner/repo", []domain.Check{{Name: "tests", Cmd: "true"}}, mustOwner(t, st).ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +211,8 @@ func TestBlockedEscalation(t *testing.T) {
 	st := testStore(t)
 	e := New(st, &fakeSCM{}, nil, &capture{}, 90*time.Second)
 
-	p, _ := st.CreateProject(ctx, "demo", "o/r", nil)
+	owner := mustOwner(t, st)
+	p, _ := st.CreateProject(ctx, "demo", "o/r", nil, owner.ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A", Criteria: []domain.Criterion{{Text: "c"}}})
 	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
@@ -216,7 +227,7 @@ func TestBlockedEscalation(t *testing.T) {
 	if got := taskStatus(t, st, task.ID); got != domain.TaskBlocked {
 		t.Fatalf("want blocked, got %s", got)
 	}
-	atts, _ := st.ListAttention(ctx)
+	atts, _ := st.ListAttention(ctx, owner.ID)
 	if len(atts) != 1 || atts[0].Reason != domain.AttBlocked {
 		t.Fatalf("ожидали эскалацию BLOCKED: %+v", atts)
 	}
@@ -247,7 +258,8 @@ func TestTestFailureConsumesAttempt(t *testing.T) {
 	out := &capture{}
 	e := New(st, &fakeSCM{}, nil, out, 90*time.Second)
 
-	p, _ := st.CreateProject(ctx, "demo", "o/r", []domain.Check{{Name: "tests", Cmd: "true"}})
+	owner := mustOwner(t, st)
+	p, _ := st.CreateProject(ctx, "demo", "o/r", []domain.Check{{Name: "tests", Cmd: "true"}}, owner.ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A", AttemptLimit: 2})
 	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
@@ -281,7 +293,7 @@ func TestTestFailureConsumesAttempt(t *testing.T) {
 	if got := taskStatus(t, st, task.ID); got != domain.TaskFailed {
 		t.Fatalf("want failed, got %s", got)
 	}
-	atts, _ := st.ListAttention(ctx)
+	atts, _ := st.ListAttention(ctx, owner.ID)
 	if len(atts) != 1 || atts[0].Reason != domain.AttTestFailed {
 		t.Fatalf("ожидали эскалацию TEST_FAILED: %+v", atts)
 	}
@@ -299,7 +311,7 @@ func TestPauseParksAtStageBoundary(t *testing.T) {
 	out := &capture{}
 	e := New(st, &fakeSCM{}, nil, out, 90*time.Second)
 
-	p, _ := st.CreateProject(ctx, "demo", "o/r", []domain.Check{{Name: "tests", Cmd: "true"}})
+	p, _ := st.CreateProject(ctx, "demo", "o/r", []domain.Check{{Name: "tests", Cmd: "true"}}, mustOwner(t, st).ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
 	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
@@ -384,7 +396,7 @@ func TestReviewRejectionReassignsFixing(t *testing.T) {
 	out := &capture{}
 	e := New(st, &fakeSCM{}, nil, out, 90*time.Second)
 
-	p, _ := st.CreateProject(ctx, "demo", "owner/repo", []domain.Check{{Name: "tests", Cmd: "true"}})
+	p, _ := st.CreateProject(ctx, "demo", "owner/repo", []domain.Check{{Name: "tests", Cmd: "true"}}, mustOwner(t, st).ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
 	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
