@@ -351,7 +351,7 @@ func TestOpenSessionsClosedOnCancelAndRunnerLost(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.MarkStaleRunnersOffline(ctx, 60); err != nil {
+	if _, _, err := s.MarkStaleRunnersOffline(ctx, 60); err != nil {
 		t.Fatal(err)
 	}
 	if open, err := s.OpenSession(ctx, other.ID); err != nil || open != "" {

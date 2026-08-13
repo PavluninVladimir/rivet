@@ -24,4 +24,13 @@ func (f *Fake) Diff(ctx context.Context, repo string, number int) (string, error
 	return "diff --git a/e2e b/e2e\n+e2e", nil
 }
 
-func (f *Fake) Merge(ctx context.Context, repo string, number int) error { return nil }
+// Merge — no-op; sha синтетический, но стабильный по номеру PR
+// (auto-публикации в e2e получают осмысленную «версию»).
+func (f *Fake) Merge(ctx context.Context, repo string, number int) (string, error) {
+	return fmt.Sprintf("fake-merge-%04d", number), nil
+}
+
+// HeadSHA — синтетический sha «вершины» ветки (растёт с каждым запросом).
+func (f *Fake) HeadSHA(ctx context.Context, repo, branch string) (string, error) {
+	return fmt.Sprintf("fake-head-%04d", f.seq.Add(1)), nil
+}

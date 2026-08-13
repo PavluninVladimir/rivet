@@ -14,9 +14,9 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 2: session_id обязателен во всех сообщениях стадии
-// (add-session-visibility); runner'ы версии 1 отклоняются при Register.
-const protocolVersion = "2"
+// Версия 3: деплой-джобы (implement-deployment); версия 2 добавила
+// обязательный session_id. Runner'ы младших версий отклоняются при Register.
+const protocolVersion = "3"
 
 // Server — реализация RunnerService: приём соединений runner'ов.
 type Server struct {
@@ -72,6 +72,36 @@ func (s *Server) emitTranscript(ctx context.Context, taskID, sessionID string, d
 	}
 }
 
+// emitDeployLog доводит замаскированный кусок лога публикации до буфера
+// Engine и live-подписчиков (SSE deploy.log).
+func (s *Server) emitDeployLog(ctx context.Context, depID string, data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	s.Engine.OnDeployTranscript(depID, data)
+	if projectID, _, _, _, err := s.St.DeploymentRefs(ctx, depID); err == nil {
+		s.Hub.Publish(LogChunk{ProjectID: projectID, DeployID: depID, Data: data})
+	}
+}
+
+// flushDeployRedactor сбрасывает хвост лога публикации перед реакцией на
+// DeployResult (финал уводит буфер в blob). Промежуточный результат
+// (deploy ok перед verify) хвост не теряет: сбрасывать безопасно, чанки
+// следующего этапа продолжат тем же редактором.
+func (s *Server) flushDeployRedactor(ctx context.Context, depID string) {
+	s.redMu.Lock()
+	r := s.reds["deploy:"+depID]
+	delete(s.reds, "deploy:"+depID)
+	s.redMu.Unlock()
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	rest := r.stream.Flush()
+	r.mu.Unlock()
+	s.emitDeployLog(ctx, depID, rest)
+}
+
 // flushRedactor сбрасывает хвост неполной строки перед обработкой конца
 // стадии: OnStageResult/OnBlocked закрывают сессию и уводят буфер в blob,
 // хвост должен успеть в него попасть (design, решение 3).
@@ -98,6 +128,14 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 			Accepted: false,
 			Message:  "несовместимая версия протокола: ожидается " + protocolVersion,
 		}, nil
+	}
+	// Reconnect убивает деплой-goroutine прежней сессии runner'а: его
+	// активная публикация проваливается сразу, не дожидаясь watchdog
+	// (UpsertRunner ниже сбрасывает занятость).
+	if depID, err := s.St.RunnerActiveDeployment(ctx, req.RunnerId); err == nil && depID != "" {
+		if err := s.Engine.FailDeploymentNow(ctx, depID, "runner переподключился — джоба потеряна"); err != nil {
+			return nil, err
+		}
 	}
 	err := s.St.UpsertRunner(ctx, domain.Runner{
 		ID: req.RunnerId, Agent: req.Agent, Model: req.Model,
@@ -214,6 +252,18 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 
 	case *pb.RunnerMsg_Transcript:
 		t := k.Transcript
+		if t.DeployId != "" {
+			// Лог деплой-джобы: свой буфер и live-событие deploy.log.
+			if !s.Engine.DeployMatches(ctx, t.DeployId, runnerID) {
+				return nil
+			}
+			r := s.redactor("deploy:"+t.DeployId, t.DeployId)
+			r.mu.Lock()
+			masked := r.stream.Feed(t.Data)
+			r.mu.Unlock()
+			s.emitDeployLog(ctx, t.DeployId, masked)
+			return nil
+		}
 		if !s.Engine.SessionMatches(ctx, t.TaskId, t.SessionId) {
 			return nil // чужая сессия (replay) — отбрасываем, но ack'аем
 		}
@@ -254,6 +304,15 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 	case *pb.RunnerMsg_Blocked:
 		s.flushRedactor(ctx, k.Blocked.TaskId, k.Blocked.SessionId)
 		return s.Engine.OnBlocked(ctx, runnerID, k.Blocked)
+
+	case *pb.RunnerMsg_DeployResult:
+		dr := k.DeployResult
+		// Хвост лога — до реакции (финал уводит буфер в blob), но только
+		// для владельца: чужой/stale результат не трогает редактор.
+		if s.Engine.DeployMatches(ctx, dr.DeploymentId, runnerID) {
+			s.flushDeployRedactor(ctx, dr.DeploymentId)
+		}
+		return s.Engine.OnDeployResult(ctx, runnerID, dr)
 	}
 	return nil
 }

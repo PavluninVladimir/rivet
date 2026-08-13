@@ -85,14 +85,15 @@ func (s EpicStatus) CanTransition(to EpicStatus) bool {
 type RunnerStatus string
 
 const (
-	RunnerIdle    RunnerStatus = "idle"
-	RunnerRunning RunnerStatus = "running"
-	RunnerTesting RunnerStatus = "testing"
-	RunnerReview  RunnerStatus = "review"
-	RunnerOffline RunnerStatus = "offline"
+	RunnerIdle      RunnerStatus = "idle"
+	RunnerRunning   RunnerStatus = "running"
+	RunnerTesting   RunnerStatus = "testing"
+	RunnerReview    RunnerStatus = "review"
+	RunnerDeploying RunnerStatus = "deploying"
+	RunnerOffline   RunnerStatus = "offline"
 )
 
-// Busy — runner занят этапом задачи.
+// Busy — runner занят этапом задачи или публикацией.
 func (s RunnerStatus) Busy() bool {
-	return s == RunnerRunning || s == RunnerTesting || s == RunnerReview
+	return s == RunnerRunning || s == RunnerTesting || s == RunnerReview || s == RunnerDeploying
 }

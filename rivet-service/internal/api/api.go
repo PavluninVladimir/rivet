@@ -61,6 +61,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/epics/{id}/pause", s.epicAction(domain.EpicPaused, "Epic приостановлен"))
 	mux.HandleFunc("POST /api/v1/epics/{id}/resume", s.epicAction(domain.EpicRunning, "Epic возобновлён"))
 	mux.HandleFunc("POST /api/v1/epics/{id}/archive", s.epicAction(domain.EpicArchived, "Epic архивирован"))
+	mux.HandleFunc("GET /api/v1/projects/{id}/environments", s.listEnvironments)
+	mux.HandleFunc("POST /api/v1/projects/{id}/environments", s.createEnvironment)
+	mux.HandleFunc("PATCH /api/v1/environments/{id}", s.patchEnvironment)
+	mux.HandleFunc("DELETE /api/v1/environments/{id}", s.deleteEnvironment)
+	mux.HandleFunc("POST /api/v1/environments/{id}/deploy", s.envDeploy)
+	mux.HandleFunc("POST /api/v1/environments/{id}/resume", s.envResume)
+	mux.HandleFunc("GET /api/v1/environments/{id}/deployments", s.envDeployments)
+	mux.HandleFunc("GET /api/v1/deployments/{id}/log", s.deploymentLog)
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
 	mux.HandleFunc("GET /api/v1/tasks/{id}/sessions", s.listTaskSessions)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/transcript", s.sessionTranscript)
@@ -555,8 +563,13 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case c := <-logs:
-			payload, _ := json.Marshal(map[string]string{"task_id": c.TaskID, "data": string(c.Data)})
-			fmt.Fprintf(w, "event: session.log\ndata: %s\n\n", payload)
+			if c.DeployID != "" {
+				payload, _ := json.Marshal(map[string]string{"deploy_id": c.DeployID, "data": string(c.Data)})
+				fmt.Fprintf(w, "event: deploy.log\ndata: %s\n\n", payload)
+			} else {
+				payload, _ := json.Marshal(map[string]string{"task_id": c.TaskID, "data": string(c.Data)})
+				fmt.Fprintf(w, "event: session.log\ndata: %s\n\n", payload)
+			}
 			fl.Flush()
 		case <-poll.C:
 			if ticks++; ticks%recheckEvery == 0 && !accessAlive() {

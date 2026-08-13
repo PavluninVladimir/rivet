@@ -92,7 +92,7 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id, ts, actor_kind, actor_id, type, COALESCE(project_id::text,''),
-		       COALESCE(epic_id::text,''), COALESCE(task_id::text,''), text
+		       COALESCE(epic_id::text,''), COALESCE(task_id::text,''), text, payload
 		FROM events
 		WHERE ($1 = '' OR project_id = $1::uuid)
 		  AND ($2 = '' OR epic_id = $2::uuid)
@@ -110,9 +110,16 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 	var out []domain.Event
 	for rows.Next() {
 		var e domain.Event
+		var payload []byte
 		if err := rows.Scan(&e.ID, &e.TS, &e.ActorKind, &e.ActorID, &e.Type,
-			&e.ProjectID, &e.EpicID, &e.TaskID, &e.Text); err != nil {
+			&e.ProjectID, &e.EpicID, &e.TaskID, &e.Text, &payload); err != nil {
 			return nil, err
+		}
+		// Payload аддитивен: пустой объект не тащим в JSON ответа.
+		if len(payload) > 0 && string(payload) != "{}" {
+			if err := json.Unmarshal(payload, &e.Payload); err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, e)
 	}

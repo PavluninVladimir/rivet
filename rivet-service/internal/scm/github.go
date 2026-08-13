@@ -81,14 +81,40 @@ func (g *GitHub) Diff(ctx context.Context, repo string, number int) (string, err
 	return string(raw), nil
 }
 
-func (g *GitHub) Merge(ctx context.Context, repo string, number int) error {
+func (g *GitHub) Merge(ctx context.Context, repo string, number int) (string, error) {
 	raw, code, err := g.do(ctx, "PUT", fmt.Sprintf("/repos/%s/pulls/%d/merge", repo, number),
 		map[string]any{"merge_method": "squash"}, "")
 	if err != nil {
-		return err
+		return "", err
 	}
 	if code != http.StatusOK {
-		return fmt.Errorf("github merge: %d: %s", code, raw)
+		return "", fmt.Errorf("github merge: %d: %s", code, raw)
 	}
-	return nil
+	var out struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", err
+	}
+	return out.SHA, nil
+}
+
+// HeadSHA — sha вершины ветки через branches API.
+func (g *GitHub) HeadSHA(ctx context.Context, repo, branch string) (string, error) {
+	raw, code, err := g.do(ctx, "GET", fmt.Sprintf("/repos/%s/branches/%s", repo, branch), nil, "")
+	if err != nil {
+		return "", err
+	}
+	if code != http.StatusOK {
+		return "", fmt.Errorf("github branch: %d: %s", code, raw)
+	}
+	var out struct {
+		Commit struct {
+			SHA string `json:"sha"`
+		} `json:"commit"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", err
+	}
+	return out.Commit.SHA, nil
 }

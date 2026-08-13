@@ -42,6 +42,7 @@ message RunnerMsg {
     Usage usage = 6;
     StageResult stage_result = 7;
     BlockedQuestion blocked = 8;
+    DeployResult deploy_result = 9;
   }
 }
 
@@ -66,6 +67,7 @@ message TranscriptChunk {
   int64 seq = 2;
   bytes data = 3;
   string session_id = 4; // сессия стадии из Assignment; несовпадение — сообщение отбрасывается
+  string deploy_id = 5;  // вывод деплой-джобы: заполняется вместо task_id/session_id
 }
 
 // Usage — отчёт о расходе за стадию. Отсутствие optional-поля означает
@@ -114,6 +116,7 @@ message PlaneMsg {
     Answer answer = 4;
     CancelTask cancel = 5;
     PauseRunner pause = 6;
+    DeployJob deploy = 7;
   }
 }
 
@@ -154,4 +157,39 @@ message CancelTask {
 
 message PauseRunner {
   bool drain = 1;
+}
+
+// DeployJob — публикация окружения (спека backend/deployment): runner
+// с capability deploy исполняет deploy_cmd/verify_cmd как shell-скрипт
+// с переменными RIVET_REPO/VERSION/PREV_VERSION/ENV — по ssh на host или
+// локально при пустом host. Откат — та же джоба с rollback=true и
+// version=prev (деплой идемпотентен по версии).
+message DeployJob {
+  string deployment_id = 1;
+  string env_name = 2;
+  string repo = 3;      // owner/name
+  string version = 4;   // sha публикуемого коммита
+  string prev_version = 5;
+  bool rollback = 6;
+  string host = 7;      // [user@]hostname[:port]; пусто — локальное исполнение
+  string deploy_cmd = 8;
+  string verify_cmd = 9;
+  string verify_url = 10;
+  int32 timeout_s = 11; // дедлайн джобы на runner'е
+}
+
+// DeployResult — итог этапа публикации; чужой/stale deployment_id
+// отбрасывается CAS-переходами статусов.
+message DeployResult {
+  string deployment_id = 1;
+  Stage stage = 2;
+  bool ok = 3;
+  string detail = 4;   // хвост вывода команд / причина
+  bool rollback = 5;   // эхо DeployJob.rollback: результат фазы отката
+
+  enum Stage {
+    STAGE_UNSPECIFIED = 0;
+    DEPLOY = 1;
+    VERIFY = 2;
+  }
 }

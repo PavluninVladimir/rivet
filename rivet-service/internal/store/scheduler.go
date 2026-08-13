@@ -540,24 +540,24 @@ func (s *Store) TransitionWithRunnerRelease(ctx context.Context, taskID string,
 // расходует попытку задачи (спека orchestration: бесконечный перезапуск
 // недопустим): попытки остались → ready, перезапуск через планирование
 // (частичная работа остаётся в ветке); лимит исчерпан → failed + эскалация
-// RUNNER_LOST. Возвращает задачи потерянных runner'ов: их сессии закрыты,
-// вызывающий (Engine) инвалидирует свой кеш сессий.
-func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int) ([]string, error) {
-	var affected []string
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		affected = affected[:0]
+// RUNNER_LOST. Возвращает задачи и публикации потерянных runner'ов:
+// вызывающий (Engine) инвалидирует кеш сессий и проваливает публикации.
+func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int) (taskIDs, depIDs []string, err error) {
+	var affected, deps []string
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		affected, deps = affected[:0], deps[:0]
 		rows, err := tx.Query(ctx, `
-			SELECT r.id, COALESCE(r.task_id::text,'') FROM runners r
+			SELECT r.id, COALESCE(r.task_id::text,''), COALESCE(r.deployment_id::text,'') FROM runners r
 			WHERE r.status <> 'offline' AND r.last_seen < now() - make_interval(secs => $1)
 			FOR UPDATE OF r SKIP LOCKED`, timeoutSeconds)
 		if err != nil {
 			return err
 		}
-		type stale struct{ runnerID, taskID string }
+		type stale struct{ runnerID, taskID, depID string }
 		var stales []stale
 		for rows.Next() {
 			var s stale
-			if err := rows.Scan(&s.runnerID, &s.taskID); err != nil {
+			if err := rows.Scan(&s.runnerID, &s.taskID, &s.depID); err != nil {
 				rows.Close()
 				return err
 			}
@@ -569,8 +569,11 @@ func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int)
 		}
 		for _, st := range stales {
 			if _, err := tx.Exec(ctx,
-				`UPDATE runners SET status='offline', task_id=NULL WHERE id=$1`, st.runnerID); err != nil {
+				`UPDATE runners SET status='offline', task_id=NULL, deployment_id=NULL WHERE id=$1`, st.runnerID); err != nil {
 				return err
+			}
+			if st.depID != "" {
+				deps = append(deps, st.depID)
 			}
 			if st.taskID == "" {
 				continue
@@ -633,5 +636,5 @@ func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int)
 		}
 		return nil
 	})
-	return affected, err
+	return affected, deps, err
 }

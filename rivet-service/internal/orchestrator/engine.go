@@ -42,6 +42,9 @@ type Engine struct {
 	transcripts map[string][]byte
 	// открытая сессия стадии задачи
 	sessions map[string]string
+	// публикации: лог и владелец (runner); фаза отката — durable в БД
+	deployLogs  map[string][]byte
+	deployOwner map[string]string
 }
 
 func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, heartbeat time.Duration) *Engine {
@@ -51,6 +54,8 @@ func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, hear
 		stageContext: map[string]string{},
 		transcripts:  map[string][]byte{},
 		sessions:     map[string]string{},
+		deployLogs:   map[string][]byte{},
+		deployOwner:  map[string]string{},
 	}
 }
 
@@ -72,7 +77,7 @@ func (e *Engine) Run(ctx context.Context) {
 
 // Tick — один проход планировщика: протухшие runner'ы, пересчёт DAG, назначения.
 func (e *Engine) Tick(ctx context.Context) error {
-	lost, err := e.St.MarkStaleRunnersOffline(ctx, int(e.HeartbeatTimeout.Seconds()))
+	lost, lostDeps, err := e.St.MarkStaleRunnersOffline(ctx, int(e.HeartbeatTimeout.Seconds()))
 	if err != nil {
 		return fmt.Errorf("stale runners: %w", err)
 	}
@@ -80,6 +85,12 @@ func (e *Engine) Tick(ctx context.Context) error {
 	// иначе replay стадии пройдёт SessionMatches по памяти.
 	for _, taskID := range lost {
 		e.DropSession(taskID)
+	}
+	// Публикации потерянных runner'ов проваливаются полной цепочкой.
+	for _, depID := range lostDeps {
+		if err := e.failDeployNow(ctx, depID, "", "deploy-runner потерян (heartbeat)"); err != nil {
+			slog.Error("deploy runner lost", "deployment", depID, "err", err)
+		}
 	}
 	epics, err := e.St.RunningEpics(ctx)
 	if err != nil {
@@ -142,7 +153,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		}
 		e.dispatch(ctx, a, pb.StageResult_REVIEW, extra)
 	}
-	return nil
+	return e.tickDeployments(ctx)
 }
 
 func (e *Engine) takeStageContext(taskID string) string {
@@ -513,12 +524,13 @@ func (e *Engine) MergeTask(ctx context.Context, taskID, userID string) error {
 	if err != nil {
 		return err
 	}
+	mergeSHA := ""
 	if task.PRURL != "" {
 		num, err := prNumber(task.PRURL)
 		if err != nil {
 			return err
 		}
-		if err := e.SCM.Merge(ctx, p.Repo, num); err != nil {
+		if mergeSHA, err = e.SCM.Merge(ctx, p.Repo, num); err != nil {
 			return fmt.Errorf("merge PR: %w", err)
 		}
 	}
@@ -527,7 +539,23 @@ func (e *Engine) MergeTask(ctx context.Context, taskID, userID string) error {
 			Text: "PR смержен — задача выполнена", Payload: map[string]any{"status": "done"}}); err != nil {
 		return err
 	}
-	return e.St.RecomputeEpic(ctx, task.EpicID)
+	if err := e.St.RecomputeEpic(ctx, task.EpicID); err != nil {
+		return err
+	}
+	e.enqueueAutoDeploys(ctx, p.ID, mergeSHA)
+	return nil
+}
+
+// enqueueAutoDeploys ставит автопубликации проекта после merge (спека
+// deployment «Режимы запуска»); ошибка не валит merge — публикация догонит
+// со следующим merge, а проблему видно в логе.
+func (e *Engine) enqueueAutoDeploys(ctx context.Context, projectID, version string) {
+	if version == "" {
+		return
+	}
+	if err := e.St.EnqueueAutoDeployments(ctx, projectID, version); err != nil {
+		slog.Error("enqueue auto deployments", "project", projectID, "err", err)
+	}
 }
 
 func (e *Engine) diffForTask(ctx context.Context, task domain.Task) (string, error) {

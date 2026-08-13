@@ -29,9 +29,12 @@ func (f *fakeSCM) CreatePR(ctx context.Context, repo, branch, base, title, body 
 func (f *fakeSCM) Diff(ctx context.Context, repo string, number int) (string, error) {
 	return "diff --git a/x b/x", nil
 }
-func (f *fakeSCM) Merge(ctx context.Context, repo string, number int) error {
+func (f *fakeSCM) Merge(ctx context.Context, repo string, number int) (string, error) {
 	f.merged = append(f.merged, number)
-	return nil
+	return fmt.Sprintf("sha-merge-%d", number), nil
+}
+func (f *fakeSCM) HeadSHA(ctx context.Context, repo, branch string) (string, error) {
+	return "sha-head", nil
 }
 
 type capture struct {

@@ -81,6 +81,55 @@ func (StageResult_Stage) EnumDescriptor() ([]byte, []int) {
 	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{8, 0}
 }
 
+type DeployResult_Stage int32
+
+const (
+	DeployResult_STAGE_UNSPECIFIED DeployResult_Stage = 0
+	DeployResult_DEPLOY            DeployResult_Stage = 1
+	DeployResult_VERIFY            DeployResult_Stage = 2
+)
+
+// Enum value maps for DeployResult_Stage.
+var (
+	DeployResult_Stage_name = map[int32]string{
+		0: "STAGE_UNSPECIFIED",
+		1: "DEPLOY",
+		2: "VERIFY",
+	}
+	DeployResult_Stage_value = map[string]int32{
+		"STAGE_UNSPECIFIED": 0,
+		"DEPLOY":            1,
+		"VERIFY":            2,
+	}
+)
+
+func (x DeployResult_Stage) Enum() *DeployResult_Stage {
+	p := new(DeployResult_Stage)
+	*p = x
+	return p
+}
+
+func (x DeployResult_Stage) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DeployResult_Stage) Descriptor() protoreflect.EnumDescriptor {
+	return file_pkg_protocol_rivet_proto_enumTypes[1].Descriptor()
+}
+
+func (DeployResult_Stage) Type() protoreflect.EnumType {
+	return &file_pkg_protocol_rivet_proto_enumTypes[1]
+}
+
+func (x DeployResult_Stage) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DeployResult_Stage.Descriptor instead.
+func (DeployResult_Stage) EnumDescriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{18, 0}
+}
+
 type RegisterRequest struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	RunnerId        string                 `protobuf:"bytes,1,opt,name=runner_id,json=runnerId,proto3" json:"runner_id,omitempty"`
@@ -238,6 +287,7 @@ type RunnerMsg struct {
 	//	*RunnerMsg_Usage
 	//	*RunnerMsg_StageResult
 	//	*RunnerMsg_Blocked
+	//	*RunnerMsg_DeployResult
 	Kind          isRunnerMsg_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -350,6 +400,15 @@ func (x *RunnerMsg) GetBlocked() *BlockedQuestion {
 	return nil
 }
 
+func (x *RunnerMsg) GetDeployResult() *DeployResult {
+	if x != nil {
+		if x, ok := x.Kind.(*RunnerMsg_DeployResult); ok {
+			return x.DeployResult
+		}
+	}
+	return nil
+}
+
 type isRunnerMsg_Kind interface {
 	isRunnerMsg_Kind()
 }
@@ -382,6 +441,10 @@ type RunnerMsg_Blocked struct {
 	Blocked *BlockedQuestion `protobuf:"bytes,8,opt,name=blocked,proto3,oneof"`
 }
 
+type RunnerMsg_DeployResult struct {
+	DeployResult *DeployResult `protobuf:"bytes,9,opt,name=deploy_result,json=deployResult,proto3,oneof"`
+}
+
 func (*RunnerMsg_Hello) isRunnerMsg_Kind() {}
 
 func (*RunnerMsg_Heartbeat) isRunnerMsg_Kind() {}
@@ -395,6 +458,8 @@ func (*RunnerMsg_Usage) isRunnerMsg_Kind() {}
 func (*RunnerMsg_StageResult) isRunnerMsg_Kind() {}
 
 func (*RunnerMsg_Blocked) isRunnerMsg_Kind() {}
+
+func (*RunnerMsg_DeployResult) isRunnerMsg_Kind() {}
 
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -552,6 +617,7 @@ type TranscriptChunk struct {
 	Seq           int64                  `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
 	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
 	SessionId     string                 `protobuf:"bytes,4,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // сессия стадии из Assignment; несовпадение — сообщение отбрасывается
+	DeployId      string                 `protobuf:"bytes,5,opt,name=deploy_id,json=deployId,proto3" json:"deploy_id,omitempty"`    // вывод деплой-джобы: заполняется вместо task_id/session_id
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -610,6 +676,13 @@ func (x *TranscriptChunk) GetData() []byte {
 func (x *TranscriptChunk) GetSessionId() string {
 	if x != nil {
 		return x.SessionId
+	}
+	return ""
+}
+
+func (x *TranscriptChunk) GetDeployId() string {
+	if x != nil {
+		return x.DeployId
 	}
 	return ""
 }
@@ -872,6 +945,7 @@ type PlaneMsg struct {
 	//	*PlaneMsg_Answer
 	//	*PlaneMsg_Cancel
 	//	*PlaneMsg_Pause
+	//	*PlaneMsg_Deploy
 	Kind          isPlaneMsg_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -966,6 +1040,15 @@ func (x *PlaneMsg) GetPause() *PauseRunner {
 	return nil
 }
 
+func (x *PlaneMsg) GetDeploy() *DeployJob {
+	if x != nil {
+		if x, ok := x.Kind.(*PlaneMsg_Deploy); ok {
+			return x.Deploy
+		}
+	}
+	return nil
+}
+
 type isPlaneMsg_Kind interface {
 	isPlaneMsg_Kind()
 }
@@ -990,6 +1073,10 @@ type PlaneMsg_Pause struct {
 	Pause *PauseRunner `protobuf:"bytes,6,opt,name=pause,proto3,oneof"`
 }
 
+type PlaneMsg_Deploy struct {
+	Deploy *DeployJob `protobuf:"bytes,7,opt,name=deploy,proto3,oneof"`
+}
+
 func (*PlaneMsg_Ack) isPlaneMsg_Kind() {}
 
 func (*PlaneMsg_Assign) isPlaneMsg_Kind() {}
@@ -999,6 +1086,8 @@ func (*PlaneMsg_Answer) isPlaneMsg_Kind() {}
 func (*PlaneMsg_Cancel) isPlaneMsg_Kind() {}
 
 func (*PlaneMsg_Pause) isPlaneMsg_Kind() {}
+
+func (*PlaneMsg_Deploy) isPlaneMsg_Kind() {}
 
 type Ack struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1363,6 +1452,213 @@ func (x *PauseRunner) GetDrain() bool {
 	return false
 }
 
+// DeployJob — публикация окружения (спека backend/deployment): runner
+// с capability deploy исполняет deploy_cmd/verify_cmd как shell-скрипт
+// с переменными RIVET_REPO/VERSION/PREV_VERSION/ENV — по ssh на host или
+// локально при пустом host. Откат — та же джоба с rollback=true и
+// version=prev (деплой идемпотентен по версии).
+type DeployJob struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DeploymentId  string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
+	EnvName       string                 `protobuf:"bytes,2,opt,name=env_name,json=envName,proto3" json:"env_name,omitempty"`
+	Repo          string                 `protobuf:"bytes,3,opt,name=repo,proto3" json:"repo,omitempty"`       // owner/name
+	Version       string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"` // sha публикуемого коммита
+	PrevVersion   string                 `protobuf:"bytes,5,opt,name=prev_version,json=prevVersion,proto3" json:"prev_version,omitempty"`
+	Rollback      bool                   `protobuf:"varint,6,opt,name=rollback,proto3" json:"rollback,omitempty"`
+	Host          string                 `protobuf:"bytes,7,opt,name=host,proto3" json:"host,omitempty"` // [user@]hostname[:port]; пусто — локальное исполнение
+	DeployCmd     string                 `protobuf:"bytes,8,opt,name=deploy_cmd,json=deployCmd,proto3" json:"deploy_cmd,omitempty"`
+	VerifyCmd     string                 `protobuf:"bytes,9,opt,name=verify_cmd,json=verifyCmd,proto3" json:"verify_cmd,omitempty"`
+	VerifyUrl     string                 `protobuf:"bytes,10,opt,name=verify_url,json=verifyUrl,proto3" json:"verify_url,omitempty"`
+	TimeoutS      int32                  `protobuf:"varint,11,opt,name=timeout_s,json=timeoutS,proto3" json:"timeout_s,omitempty"` // дедлайн джобы на runner'е
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeployJob) Reset() {
+	*x = DeployJob{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeployJob) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeployJob) ProtoMessage() {}
+
+func (x *DeployJob) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeployJob.ProtoReflect.Descriptor instead.
+func (*DeployJob) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *DeployJob) GetDeploymentId() string {
+	if x != nil {
+		return x.DeploymentId
+	}
+	return ""
+}
+
+func (x *DeployJob) GetEnvName() string {
+	if x != nil {
+		return x.EnvName
+	}
+	return ""
+}
+
+func (x *DeployJob) GetRepo() string {
+	if x != nil {
+		return x.Repo
+	}
+	return ""
+}
+
+func (x *DeployJob) GetVersion() string {
+	if x != nil {
+		return x.Version
+	}
+	return ""
+}
+
+func (x *DeployJob) GetPrevVersion() string {
+	if x != nil {
+		return x.PrevVersion
+	}
+	return ""
+}
+
+func (x *DeployJob) GetRollback() bool {
+	if x != nil {
+		return x.Rollback
+	}
+	return false
+}
+
+func (x *DeployJob) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *DeployJob) GetDeployCmd() string {
+	if x != nil {
+		return x.DeployCmd
+	}
+	return ""
+}
+
+func (x *DeployJob) GetVerifyCmd() string {
+	if x != nil {
+		return x.VerifyCmd
+	}
+	return ""
+}
+
+func (x *DeployJob) GetVerifyUrl() string {
+	if x != nil {
+		return x.VerifyUrl
+	}
+	return ""
+}
+
+func (x *DeployJob) GetTimeoutS() int32 {
+	if x != nil {
+		return x.TimeoutS
+	}
+	return 0
+}
+
+// DeployResult — итог этапа публикации; чужой/stale deployment_id
+// отбрасывается CAS-переходами статусов.
+type DeployResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	DeploymentId  string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
+	Stage         DeployResult_Stage     `protobuf:"varint,2,opt,name=stage,proto3,enum=rivet.v1.DeployResult_Stage" json:"stage,omitempty"`
+	Ok            bool                   `protobuf:"varint,3,opt,name=ok,proto3" json:"ok,omitempty"`
+	Detail        string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`      // хвост вывода команд / причина
+	Rollback      bool                   `protobuf:"varint,5,opt,name=rollback,proto3" json:"rollback,omitempty"` // эхо DeployJob.rollback: результат фазы отката
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeployResult) Reset() {
+	*x = DeployResult{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeployResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeployResult) ProtoMessage() {}
+
+func (x *DeployResult) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeployResult.ProtoReflect.Descriptor instead.
+func (*DeployResult) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *DeployResult) GetDeploymentId() string {
+	if x != nil {
+		return x.DeploymentId
+	}
+	return ""
+}
+
+func (x *DeployResult) GetStage() DeployResult_Stage {
+	if x != nil {
+		return x.Stage
+	}
+	return DeployResult_STAGE_UNSPECIFIED
+}
+
+func (x *DeployResult) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *DeployResult) GetDetail() string {
+	if x != nil {
+		return x.Detail
+	}
+	return ""
+}
+
+func (x *DeployResult) GetRollback() bool {
+	if x != nil {
+		return x.Rollback
+	}
+	return false
+}
+
 var File_pkg_protocol_rivet_proto protoreflect.FileDescriptor
 
 const file_pkg_protocol_rivet_proto_rawDesc = "" +
@@ -1378,7 +1674,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x10RegisterResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x120\n" +
-	"\x14heartbeat_interval_s\x18\x03 \x01(\x05R\x12heartbeatIntervalS\"\x8f\x03\n" +
+	"\x14heartbeat_interval_s\x18\x03 \x01(\x05R\x12heartbeatIntervalS\"\xce\x03\n" +
 	"\tRunnerMsg\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12'\n" +
 	"\x05hello\x18\x02 \x01(\v2\x0f.rivet.v1.HelloH\x00R\x05hello\x123\n" +
@@ -1389,7 +1685,8 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"transcript\x12'\n" +
 	"\x05usage\x18\x06 \x01(\v2\x0f.rivet.v1.UsageH\x00R\x05usage\x12:\n" +
 	"\fstage_result\x18\a \x01(\v2\x15.rivet.v1.StageResultH\x00R\vstageResult\x125\n" +
-	"\ablocked\x18\b \x01(\v2\x19.rivet.v1.BlockedQuestionH\x00R\ablockedB\x06\n" +
+	"\ablocked\x18\b \x01(\v2\x19.rivet.v1.BlockedQuestionH\x00R\ablocked\x12=\n" +
+	"\rdeploy_result\x18\t \x01(\v2\x16.rivet.v1.DeployResultH\x00R\fdeployResultB\x06\n" +
 	"\x04kind\"$\n" +
 	"\x05Hello\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\"5\n" +
@@ -1402,13 +1699,14 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\tR\tsessionId\"o\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"\x8c\x01\n" +
 	"\x0fTranscriptChunk\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x03R\x03seq\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\fR\x04data\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x04 \x01(\tR\tsessionId\"\xae\x02\n" +
+	"session_id\x18\x04 \x01(\tR\tsessionId\x12\x1b\n" +
+	"\tdeploy_id\x18\x05 \x01(\tR\bdeployId\"\xae\x02\n" +
 	"\x05Usage\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
 	"\n" +
@@ -1448,14 +1746,15 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1a\n" +
 	"\bquestion\x18\x02 \x01(\tR\bquestion\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\tR\tsessionId\"\x87\x02\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"\xb6\x02\n" +
 	"\bPlaneMsg\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12!\n" +
 	"\x03ack\x18\x02 \x01(\v2\r.rivet.v1.AckH\x00R\x03ack\x12.\n" +
 	"\x06assign\x18\x03 \x01(\v2\x14.rivet.v1.AssignmentH\x00R\x06assign\x12*\n" +
 	"\x06answer\x18\x04 \x01(\v2\x10.rivet.v1.AnswerH\x00R\x06answer\x12.\n" +
 	"\x06cancel\x18\x05 \x01(\v2\x14.rivet.v1.CancelTaskH\x00R\x06cancel\x12-\n" +
-	"\x05pause\x18\x06 \x01(\v2\x15.rivet.v1.PauseRunnerH\x00R\x05pauseB\x06\n" +
+	"\x05pause\x18\x06 \x01(\v2\x15.rivet.v1.PauseRunnerH\x00R\x05pause\x12-\n" +
+	"\x06deploy\x18\a \x01(\v2\x13.rivet.v1.DeployJobH\x00R\x06deployB\x06\n" +
 	"\x04kind\"'\n" +
 	"\x03Ack\x12 \n" +
 	"\facked_msg_id\x18\x01 \x01(\tR\n" +
@@ -1485,7 +1784,35 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"CancelTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\"#\n" +
 	"\vPauseRunner\x12\x14\n" +
-	"\x05drain\x18\x01 \x01(\bR\x05drain2\x8a\x01\n" +
+	"\x05drain\x18\x01 \x01(\bR\x05drain\"\xc6\x02\n" +
+	"\tDeployJob\x12#\n" +
+	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12\x19\n" +
+	"\benv_name\x18\x02 \x01(\tR\aenvName\x12\x12\n" +
+	"\x04repo\x18\x03 \x01(\tR\x04repo\x12\x18\n" +
+	"\aversion\x18\x04 \x01(\tR\aversion\x12!\n" +
+	"\fprev_version\x18\x05 \x01(\tR\vprevVersion\x12\x1a\n" +
+	"\brollback\x18\x06 \x01(\bR\brollback\x12\x12\n" +
+	"\x04host\x18\a \x01(\tR\x04host\x12\x1d\n" +
+	"\n" +
+	"deploy_cmd\x18\b \x01(\tR\tdeployCmd\x12\x1d\n" +
+	"\n" +
+	"verify_cmd\x18\t \x01(\tR\tverifyCmd\x12\x1d\n" +
+	"\n" +
+	"verify_url\x18\n" +
+	" \x01(\tR\tverifyUrl\x12\x1b\n" +
+	"\ttimeout_s\x18\v \x01(\x05R\btimeoutS\"\xe3\x01\n" +
+	"\fDeployResult\x12#\n" +
+	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x122\n" +
+	"\x05stage\x18\x02 \x01(\x0e2\x1c.rivet.v1.DeployResult.StageR\x05stage\x12\x0e\n" +
+	"\x02ok\x18\x03 \x01(\bR\x02ok\x12\x16\n" +
+	"\x06detail\x18\x04 \x01(\tR\x06detail\x12\x1a\n" +
+	"\brollback\x18\x05 \x01(\bR\brollback\"6\n" +
+	"\x05Stage\x12\x15\n" +
+	"\x11STAGE_UNSPECIFIED\x10\x00\x12\n" +
+	"\n" +
+	"\x06DEPLOY\x10\x01\x12\n" +
+	"\n" +
+	"\x06VERIFY\x10\x022\x8a\x01\n" +
 	"\rRunnerService\x12A\n" +
 	"\bRegister\x12\x19.rivet.v1.RegisterRequest\x1a\x1a.rivet.v1.RegisterResponse\x126\n" +
 	"\aChannel\x12\x13.rivet.v1.RunnerMsg\x1a\x12.rivet.v1.PlaneMsg(\x010\x01B0Z.github.com/PavluninVladimir/rivet/pkg/protocolb\x06proto3"
@@ -1502,53 +1829,59 @@ func file_pkg_protocol_rivet_proto_rawDescGZIP() []byte {
 	return file_pkg_protocol_rivet_proto_rawDescData
 }
 
-var file_pkg_protocol_rivet_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_pkg_protocol_rivet_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(StageResult_Stage)(0),   // 0: rivet.v1.StageResult.Stage
-	(*RegisterRequest)(nil),  // 1: rivet.v1.RegisterRequest
-	(*RegisterResponse)(nil), // 2: rivet.v1.RegisterResponse
-	(*RunnerMsg)(nil),        // 3: rivet.v1.RunnerMsg
-	(*Hello)(nil),            // 4: rivet.v1.Hello
-	(*Heartbeat)(nil),        // 5: rivet.v1.Heartbeat
-	(*AgentEvent)(nil),       // 6: rivet.v1.AgentEvent
-	(*TranscriptChunk)(nil),  // 7: rivet.v1.TranscriptChunk
-	(*Usage)(nil),            // 8: rivet.v1.Usage
-	(*StageResult)(nil),      // 9: rivet.v1.StageResult
-	(*BlockedQuestion)(nil),  // 10: rivet.v1.BlockedQuestion
-	(*PlaneMsg)(nil),         // 11: rivet.v1.PlaneMsg
-	(*Ack)(nil),              // 12: rivet.v1.Ack
-	(*Assignment)(nil),       // 13: rivet.v1.Assignment
-	(*Check)(nil),            // 14: rivet.v1.Check
-	(*Answer)(nil),           // 15: rivet.v1.Answer
-	(*CancelTask)(nil),       // 16: rivet.v1.CancelTask
-	(*PauseRunner)(nil),      // 17: rivet.v1.PauseRunner
+	(DeployResult_Stage)(0),  // 1: rivet.v1.DeployResult.Stage
+	(*RegisterRequest)(nil),  // 2: rivet.v1.RegisterRequest
+	(*RegisterResponse)(nil), // 3: rivet.v1.RegisterResponse
+	(*RunnerMsg)(nil),        // 4: rivet.v1.RunnerMsg
+	(*Hello)(nil),            // 5: rivet.v1.Hello
+	(*Heartbeat)(nil),        // 6: rivet.v1.Heartbeat
+	(*AgentEvent)(nil),       // 7: rivet.v1.AgentEvent
+	(*TranscriptChunk)(nil),  // 8: rivet.v1.TranscriptChunk
+	(*Usage)(nil),            // 9: rivet.v1.Usage
+	(*StageResult)(nil),      // 10: rivet.v1.StageResult
+	(*BlockedQuestion)(nil),  // 11: rivet.v1.BlockedQuestion
+	(*PlaneMsg)(nil),         // 12: rivet.v1.PlaneMsg
+	(*Ack)(nil),              // 13: rivet.v1.Ack
+	(*Assignment)(nil),       // 14: rivet.v1.Assignment
+	(*Check)(nil),            // 15: rivet.v1.Check
+	(*Answer)(nil),           // 16: rivet.v1.Answer
+	(*CancelTask)(nil),       // 17: rivet.v1.CancelTask
+	(*PauseRunner)(nil),      // 18: rivet.v1.PauseRunner
+	(*DeployJob)(nil),        // 19: rivet.v1.DeployJob
+	(*DeployResult)(nil),     // 20: rivet.v1.DeployResult
 }
 var file_pkg_protocol_rivet_proto_depIdxs = []int32{
-	4,  // 0: rivet.v1.RunnerMsg.hello:type_name -> rivet.v1.Hello
-	5,  // 1: rivet.v1.RunnerMsg.heartbeat:type_name -> rivet.v1.Heartbeat
-	6,  // 2: rivet.v1.RunnerMsg.event:type_name -> rivet.v1.AgentEvent
-	7,  // 3: rivet.v1.RunnerMsg.transcript:type_name -> rivet.v1.TranscriptChunk
-	8,  // 4: rivet.v1.RunnerMsg.usage:type_name -> rivet.v1.Usage
-	9,  // 5: rivet.v1.RunnerMsg.stage_result:type_name -> rivet.v1.StageResult
-	10, // 6: rivet.v1.RunnerMsg.blocked:type_name -> rivet.v1.BlockedQuestion
-	0,  // 7: rivet.v1.StageResult.stage:type_name -> rivet.v1.StageResult.Stage
-	12, // 8: rivet.v1.PlaneMsg.ack:type_name -> rivet.v1.Ack
-	13, // 9: rivet.v1.PlaneMsg.assign:type_name -> rivet.v1.Assignment
-	15, // 10: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
-	16, // 11: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
-	17, // 12: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
-	0,  // 13: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
-	14, // 14: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
-	1,  // 15: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
-	3,  // 16: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
-	2,  // 17: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
-	11, // 18: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
-	17, // [17:19] is the sub-list for method output_type
-	15, // [15:17] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	5,  // 0: rivet.v1.RunnerMsg.hello:type_name -> rivet.v1.Hello
+	6,  // 1: rivet.v1.RunnerMsg.heartbeat:type_name -> rivet.v1.Heartbeat
+	7,  // 2: rivet.v1.RunnerMsg.event:type_name -> rivet.v1.AgentEvent
+	8,  // 3: rivet.v1.RunnerMsg.transcript:type_name -> rivet.v1.TranscriptChunk
+	9,  // 4: rivet.v1.RunnerMsg.usage:type_name -> rivet.v1.Usage
+	10, // 5: rivet.v1.RunnerMsg.stage_result:type_name -> rivet.v1.StageResult
+	11, // 6: rivet.v1.RunnerMsg.blocked:type_name -> rivet.v1.BlockedQuestion
+	20, // 7: rivet.v1.RunnerMsg.deploy_result:type_name -> rivet.v1.DeployResult
+	0,  // 8: rivet.v1.StageResult.stage:type_name -> rivet.v1.StageResult.Stage
+	13, // 9: rivet.v1.PlaneMsg.ack:type_name -> rivet.v1.Ack
+	14, // 10: rivet.v1.PlaneMsg.assign:type_name -> rivet.v1.Assignment
+	16, // 11: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
+	17, // 12: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
+	18, // 13: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
+	19, // 14: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
+	0,  // 15: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
+	15, // 16: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
+	1,  // 17: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
+	2,  // 18: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
+	4,  // 19: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
+	3,  // 20: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
+	12, // 21: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
+	20, // [20:22] is the sub-list for method output_type
+	18, // [18:20] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_pkg_protocol_rivet_proto_init() }
@@ -1564,6 +1897,7 @@ func file_pkg_protocol_rivet_proto_init() {
 		(*RunnerMsg_Usage)(nil),
 		(*RunnerMsg_StageResult)(nil),
 		(*RunnerMsg_Blocked)(nil),
+		(*RunnerMsg_DeployResult)(nil),
 	}
 	file_pkg_protocol_rivet_proto_msgTypes[4].OneofWrappers = []any{}
 	file_pkg_protocol_rivet_proto_msgTypes[7].OneofWrappers = []any{}
@@ -1573,14 +1907,15 @@ func file_pkg_protocol_rivet_proto_init() {
 		(*PlaneMsg_Answer)(nil),
 		(*PlaneMsg_Cancel)(nil),
 		(*PlaneMsg_Pause)(nil),
+		(*PlaneMsg_Deploy)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_protocol_rivet_proto_rawDesc), len(file_pkg_protocol_rivet_proto_rawDesc)),
-			NumEnums:      1,
-			NumMessages:   17,
+			NumEnums:      2,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
