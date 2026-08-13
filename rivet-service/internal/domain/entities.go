@@ -1,7 +1,10 @@
 package domain
 
 import (
+	"errors"
+	"net/url"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -108,6 +111,79 @@ type Session struct {
 	Ended   *time.Time
 }
 
+// Environment — окружение публикации проекта (спека backend/deployment).
+// Config несёт несекретные параметры исполнения и Verify.
+type Environment struct {
+	ID        string
+	ProjectID string
+	Name      string
+	ExecType  string // ssh
+	Trigger   string // auto | manual
+	Config    EnvConfig
+	Paused    bool
+	Created   time.Time
+}
+
+// EnvConfig — конфигурация исполнения ssh-окружения. Пустой Host —
+// команды исполняются локально на deploy-runner'е (e2e, деплой «на себя»).
+type EnvConfig struct {
+	Host      string `json:"host,omitempty"`
+	DeployCmd string `json:"deploy_cmd"`
+	VerifyCmd string `json:"verify_cmd,omitempty"`
+	VerifyURL string `json:"verify_url,omitempty"`
+}
+
+// envHostRe — [user@]hostname[:port]; ведущий «-» запрещён отдельно
+// (аргумент ssh не должен читаться как опция).
+var envHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]+(@[A-Za-z0-9._-]+)?(:[0-9]{1,5})?$`)
+
+// Validate — валидация конфигурации окружения (спека deployment «Окружение
+// как сущность»): доставка и Verify обязательны, verify_url — только
+// http/https без userinfo, host — безопасный аргумент ssh.
+func (c EnvConfig) Validate() error {
+	if strings.TrimSpace(c.DeployCmd) == "" {
+		return errors.New("нужна команда доставки deploy_cmd")
+	}
+	if strings.TrimSpace(c.VerifyCmd) == "" && strings.TrimSpace(c.VerifyURL) == "" {
+		return errors.New("нужен этап Verify: verify_cmd и/или verify_url")
+	}
+	if c.VerifyCmd != "" && strings.TrimSpace(c.VerifyCmd) == "" {
+		return errors.New("verify_cmd: пустая команда")
+	}
+	if c.VerifyURL != "" {
+		u, err := url.Parse(c.VerifyURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return errors.New("verify_url: ожидается http(s)-URL")
+		}
+		if u.User != nil {
+			return errors.New("verify_url: userinfo в URL запрещён")
+		}
+	}
+	if c.Host != "" && (strings.HasPrefix(c.Host, "-") || !envHostRe.MatchString(c.Host)) {
+		return errors.New("host: ожидается [user@]hostname[:port]")
+	}
+	return nil
+}
+
+// Deployment — публикация окружения. Created — постановка в очередь,
+// Started — взята runner'ом, Ended — финал.
+type Deployment struct {
+	ID        string
+	EnvID     string
+	Version   string
+	Status    string // queued | deploying | verifying | done | failed | rolled_back
+	Initiator string // login участника или auto
+	RunnerID  string
+	Detail    string
+	// Rollback — публикация в фазе отката к предыдущей версии
+	// (durable: переживает рестарт control plane).
+	Rollback bool
+	LogRef   string
+	Created  time.Time
+	Started  *time.Time
+	Ended    *time.Time
+}
+
 // loginRe — формат login: URL-safe (login живёт в путях API и event log).
 var loginRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 
@@ -161,24 +237,31 @@ type Event struct {
 	EpicID    string
 	TaskID    string
 	Text      string
+	// Payload — структурированные данные события (например, статус публикации
+	// для deploy.status); nil, если событие их не несёт.
+	Payload map[string]any
 }
 
 type AttentionReason string
 
 const (
-	AttBlocked     AttentionReason = "BLOCKED"
-	AttReviewLimit AttentionReason = "REVIEW_LIMIT"
-	AttTestFailed  AttentionReason = "TEST_FAILED"
-	AttRunnerLost  AttentionReason = "RUNNER_LOST"
+	AttBlocked      AttentionReason = "BLOCKED"
+	AttReviewLimit  AttentionReason = "REVIEW_LIMIT"
+	AttTestFailed   AttentionReason = "TEST_FAILED"
+	AttRunnerLost   AttentionReason = "RUNNER_LOST"
+	AttDeployFailed AttentionReason = "DEPLOY_FAILED"
 )
 
 type Attention struct {
 	ID        string
 	ProjectID string
-	TaskID    string
-	Reason    AttentionReason
-	Message   string
-	Status    string // open | claimed | resolved
-	ClaimedBy string
-	Created   time.Time
+	// Предмет эскалации: задача или публикация (ровно одно из двух,
+	// CHECK attention_subject в 0006).
+	TaskID       string
+	DeploymentID string
+	Reason       AttentionReason
+	Message      string
+	Status       string // open | claimed | resolved
+	ClaimedBy    string
+	Created      time.Time
 }

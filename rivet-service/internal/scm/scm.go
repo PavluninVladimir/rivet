@@ -14,6 +14,9 @@ type Adapter interface {
 	CreatePR(ctx context.Context, repo, branch, base, title, body string) (PR, error)
 	// Diff возвращает diff PR (контекст для review-агента).
 	Diff(ctx context.Context, repo string, number int) (string, error)
-	// Merge выполняет merge PR.
-	Merge(ctx context.Context, repo string, number int) error
+	// Merge выполняет merge PR и возвращает sha merge-коммита
+	// (версия для автопубликаций, спека backend/deployment).
+	Merge(ctx context.Context, repo string, number int) (string, error)
+	// HeadSHA — текущий HEAD ветки (версия для ручного запуска публикации).
+	HeadSHA(ctx context.Context, repo, branch string) (string, error)
 }

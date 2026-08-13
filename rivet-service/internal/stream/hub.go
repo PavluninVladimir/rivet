@@ -7,6 +7,7 @@ import "sync"
 type LogChunk struct {
 	ProjectID string
 	TaskID    string
+	DeployID  string // вывод деплой-джобы (SSE deploy.log); пусто у сессий задач
 	Data      []byte
 }
 

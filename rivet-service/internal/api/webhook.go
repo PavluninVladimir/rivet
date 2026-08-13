@@ -43,9 +43,10 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 			FullName string `json:"full_name"`
 		} `json:"repository"`
 		PullRequest struct {
-			Merged  bool   `json:"merged"`
-			HTMLURL string `json:"html_url"`
-			Head    struct {
+			Merged         bool   `json:"merged"`
+			HTMLURL        string `json:"html_url"`
+			MergeCommitSHA string `json:"merge_commit_sha"`
+			Head           struct {
 				Ref string `json:"ref"`
 			} `json:"head"`
 			MergedBy struct {
@@ -99,6 +100,14 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := s.St.RecomputeEpic(r.Context(), task.EpicID); err != nil {
 		writeErr(w, err)
 		return
+	}
+	// Внешний merge запускает автопубликации так же, как merge кнопкой
+	// (спека deployment «Режимы запуска»).
+	if sha := payload.PullRequest.MergeCommitSHA; sha != "" {
+		if err := s.St.EnqueueAutoDeployments(r.Context(), project.ID, sha); err != nil {
+			writeErr(w, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "done"})
 }

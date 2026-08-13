@@ -228,11 +228,13 @@ func (s *Store) ListEpicTasks(ctx context.Context, epicID string) ([]domain.Task
 // ─── runners ─────────────────────────────────────────────────────────────
 
 func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
+	// Reconnect сбрасывает занятость целиком: и задачу, и публикацию
+	// (активную публикацию перед этим проваливает вызывающий — Register).
 	_, err := s.Pool.Exec(ctx, `
 		INSERT INTO runners (id, agent, model, host, capabilities, status, last_seen)
 		VALUES ($1,$2,$3,$4,$5,'idle',now())
 		ON CONFLICT (id) DO UPDATE SET agent=$2, model=$3, host=$4, capabilities=$5,
-			status='idle', task_id=NULL, ctx_pct=NULL, last_seen=now()`,
+			status='idle', task_id=NULL, deployment_id=NULL, ctx_pct=NULL, last_seen=now()`,
 		r.ID, r.Agent, r.Model, r.Host, r.Capabilities)
 	return err
 }
@@ -280,7 +282,8 @@ func (s *Store) SetRunnerDraining(ctx context.Context, id string, draining bool)
 // ListAttention — эскалации проектов пользователя (слой 1 access-policy).
 func (s *Store) ListAttention(ctx context.Context, userID string) ([]domain.Attention, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT a.id, a.project_id, a.task_id, a.reason, a.message, a.status, COALESCE(a.claimed_by,''), a.created_at
+		SELECT a.id, a.project_id, COALESCE(a.task_id::text,''), COALESCE(a.deployment_id::text,''),
+		       a.reason, a.message, a.status, COALESCE(a.claimed_by,''), a.created_at
 		FROM attention a
 		JOIN project_members m ON m.project_id = a.project_id AND m.user_id = $1
 		WHERE a.status <> 'resolved' ORDER BY a.created_at`, userID)
@@ -291,7 +294,7 @@ func (s *Store) ListAttention(ctx context.Context, userID string) ([]domain.Atte
 	var out []domain.Attention
 	for rows.Next() {
 		var a domain.Attention
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.TaskID, &a.Reason, &a.Message,
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.TaskID, &a.DeploymentID, &a.Reason, &a.Message,
 			&a.Status, &a.ClaimedBy, &a.Created); err != nil {
 			return nil, err
 		}

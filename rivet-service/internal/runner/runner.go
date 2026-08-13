@@ -18,9 +18,9 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 2: session_id обязателен во всех сообщениях стадии
-// (add-session-visibility); runner'ы версии 1 отклоняются при Register.
-const protocolVersion = "2"
+// Версия 3: деплой-джобы (implement-deployment); версия 2 добавила
+// обязательный session_id. Runner'ы младших версий отклоняются при Register.
+const protocolVersion = "3"
 
 type Config struct {
 	PlaneAddr    string
@@ -176,6 +176,8 @@ func (a *agent) session(ctx context.Context) error {
 			a.outbox.ack(k.Ack.AckedMsgId)
 		case *pb.PlaneMsg_Assign:
 			go a.executeStage(sctx, k.Assign, emit)
+		case *pb.PlaneMsg_Deploy:
+			go a.executeDeploy(sctx, k.Deploy, emit)
 		case *pb.PlaneMsg_Cancel:
 			a.mu.Lock()
 			if c := a.cancel[k.Cancel.TaskId]; c != nil {

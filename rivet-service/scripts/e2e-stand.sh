@@ -62,6 +62,11 @@ RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/
 RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
   "$STAND_DIR/rivet-runner" -id e2e-reviewer -agent fake -caps coding,review \
   -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-reviewer" &
+# Деплой-runner: окружения e2e исполняют команды локально (пустой host).
+mkdir -p "$STAND_DIR/rw-deployer"
+RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
+  "$STAND_DIR/rivet-runner" -id e2e-deployer -agent fake -caps deploy \
+  -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-deployer" &
 
 # Control plane на переднем плане.
 exec env \
