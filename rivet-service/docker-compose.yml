@@ -14,6 +14,13 @@ services:
       # По умолчанию fake: с github без RIVET_GITHUB_TOKEN конвейер падает на CreatePR.
       # Для реальных PR задай RIVET_SCM=github и RIVET_GITHUB_TOKEN в окружении/.env.
       RIVET_SCM: ${RIVET_SCM:-fake}
+      # Ключ шифрования учётных данных хостингов (32 байта base64): без него
+      # подключение репозитория с токеном отключено. Дефолт — только для
+      # локального стенда за loopback, как и пароль администратора ниже.
+      RIVET_SECRET_KEY: ${RIVET_SECRET_KEY:-cml2ZXQtbG9jYWwtZGV2LWtleS0zMi1ieXRlcyEhISE=}
+      # Внешний адрес установки: нужен, чтобы система сама регистрировала
+      # webhook на хостинге. Пусто — данные для ручной настройки в консоли.
+      RIVET_PUBLIC_URL: ${RIVET_PUBLIC_URL:-}
       # Bootstrap первого администратора (rivetd не стартует без владельца).
       # Дефолт только для локального стенда за loopback: смени при публикации.
       RIVET_ADMIN_LOGIN: ${RIVET_ADMIN_LOGIN:-admin}
