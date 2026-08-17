@@ -42,7 +42,9 @@ func forbidden(w http.ResponseWriter, msg string) {
 // (у него собственная HMAC-подпись, спека scm-integration).
 func authExempt(r *http.Request) bool {
 	switch r.URL.Path {
-	case "/api/v1/health", "/api/v1/auth/login", "/api/v1/webhooks/github":
+	case "/api/v1/health", "/api/v1/auth/login",
+		// Webhook'и аутентифицируются подписью хостинга, а не сессией.
+		"/api/v1/webhooks/github", "/api/v1/webhooks/gitlab":
 		return true
 	}
 	return false

@@ -62,7 +62,7 @@ func buildPrompt(epic domain.Epic, project domain.Project) string {
 
 Правила: задачи небольшие (одна сессия агента); зависимости образуют ациклический граф;
 у каждой задачи минимум один проверяемый acceptance criterion; независимые задачи не связывай
-зависимостями — они пойдут параллельно.`, project.Repo, epic.Title, epic.Goal)
+зависимостями — они пойдут параллельно.`, project.Repo(), epic.Title, epic.Goal)
 	return b.String()
 }
 

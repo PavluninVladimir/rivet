@@ -210,7 +210,12 @@ func (s *Server) envDeploy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	version, err := s.Engine.SCM.HeadSHA(r.Context(), p.Repo, s.Engine.BaseBranch)
+	adapter, err := s.Engine.SCMFor(r.Context(), p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	version, err := adapter.HeadSHA(r.Context(), p.RepoPath, p.DefaultBranch)
 	if err != nil {
 		writeErr(w, err)
 		return

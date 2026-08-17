@@ -6,12 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/blob"
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/planner"
+	"github.com/PavluninVladimir/rivet/internal/scm"
+	"github.com/PavluninVladimir/rivet/internal/secretbox"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	"github.com/PavluninVladimir/rivet/internal/stream"
 )
@@ -27,6 +30,10 @@ type Server struct {
 	// WebhookSecret — секрет HMAC-подписи входящих webhook'ов;
 	// пустой выключает endpoint (fail-closed, спека scm-integration).
 	WebhookSecret string
+	// Secrets шифрует учётные данные хостингов; выключён без ключа.
+	Secrets *secretbox.Box
+	// PublicURL — внешний адрес установки для регистрации webhook.
+	PublicURL string
 	// TrustProxy — доверять X-Forwarded-Proto при выставлении Secure-cookie
 	// (rivetd за TLS-терминирующим прокси; design, решение 12).
 	TrustProxy bool
@@ -52,6 +59,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
 	mux.HandleFunc("POST /api/v1/projects", s.createProject)
+	mux.HandleFunc("PATCH /api/v1/projects/{id}", s.patchProject)
+	mux.HandleFunc("POST /api/v1/scm/probe", s.scmProbe)
+	mux.HandleFunc("GET /api/v1/projects/{id}/repository", s.getRepository)
+	mux.HandleFunc("PUT /api/v1/projects/{id}/credentials", s.putCredentials)
 	mux.HandleFunc("GET /api/v1/projects/{id}/epics", s.listEpics)
 	mux.HandleFunc("POST /api/v1/projects/{id}/epics", s.createEpic)
 	mux.HandleFunc("GET /api/v1/epics/{id}", s.getEpic)
@@ -85,6 +96,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/usage", s.usage)
 	mux.HandleFunc("GET /api/v1/stream", s.sse)
 	mux.HandleFunc("POST /api/v1/webhooks/github", s.githubWebhook)
+	mux.HandleFunc("POST /api/v1/webhooks/gitlab", s.gitlabWebhook)
 	return s.withAuth(mux)
 }
 
@@ -139,30 +151,212 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 // ─── projects ────────────────────────────────────────────────────────────
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
-	out, err := s.St.ListProjects(r.Context(), currentUser(r).ID)
+	list, err := s.St.ListProjects(r.Context(), currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	// DTO, а не доменная структура: у неё нет json-тегов, и подключение
+	// репозитория не доехало бы до консоли.
+	out := make([]projectView, 0, len(list))
+	for _, p := range list {
+		out = append(out, projectDTO(p))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
+// createProject — подключение репозитория при создании проекта
+// (api-contract add-repo-onboarding): режимы «подключить существующий» и
+// «создать новый», плюс устаревшая форма {name, repo} для необновлённой
+// консоли. Проект не создаётся, пока проверка доступа не прошла.
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name   string         `json:"name"`
-		Repo   string         `json:"repo"`
+		Repo   string         `json:"repo"` // устаревшая форма
 		Checks []domain.Check `json:"checks"`
+
+		Provider string `json:"provider"`
+		RepoURL  string `json:"repo_url"`
+		BaseURL  string `json:"base_url"`
+		Token    string `json:"token"`
+		Create   *struct {
+			Owner      string `json:"owner"`
+			RepoName   string `json:"repo_name"`
+			Visibility string `json:"visibility"`
+		} `json:"create"`
 	}
-	if err := decode(r, &in); err != nil || in.Name == "" || in.Repo == "" {
-		unprocessable(w, "нужны name и repo (owner/name)")
+	if err := decode(r, &in); err != nil || in.Name == "" {
+		unprocessable(w, "нужно название проекта")
 		return
 	}
-	p, err := s.St.CreateProject(r.Context(), in.Name, in.Repo, in.Checks, currentUser(r).ID)
+	// Устаревшая форма: GitHub на глобальном токене установки.
+	if in.Token == "" && in.RepoURL == "" && in.Create == nil {
+		if in.Repo == "" {
+			unprocessable(w, "нужен repo_url и токен (или устаревшее поле repo)")
+			return
+		}
+		p, err := s.St.CreateProject(r.Context(), in.Name, in.Repo, in.Checks, currentUser(r).ID)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, projectDTO(p))
+		return
+	}
+	if in.Token == "" {
+		unprocessable(w, "нужен токен доступа к хостингу")
+		return
+	}
+	if !s.Secrets.Enabled() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]apiError{"error": {
+			Code: "no_secret_key", Message: "ключ шифрования не настроен: учётные данные не сохранить"}})
+		return
+	}
+	provider, baseURL, repoPath, err := probeInput{
+		Provider: in.Provider, RepoURL: in.RepoURL, BaseURL: in.BaseURL,
+	}.resolve()
+	if err != nil {
+		unprocessable(w, err.Error())
+		return
+	}
+	provider = s.effectiveProvider(provider)
+
+	// Режим «создать новый»: сначала проверяем токен, затем создаём
+	// репозиторий — он инициализируется с базовой веткой.
+	if in.Create != nil {
+		res := s.probe(r, provider, baseURL, "", in.Token)
+		if !res.OK {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+				"error": apiError{Code: res.Reason, Message: res.Message}, "probe": res})
+			return
+		}
+		adapter, aerr := s.adapters().For(provider, baseURL, in.Token)
+		if aerr != nil {
+			writeErr(w, aerr)
+			return
+		}
+		info, cerr := adapter.CreateRepo(r.Context(), scm.NewRepo{
+			Owner: in.Create.Owner, Name: in.Create.RepoName,
+			Private: in.Create.Visibility != "public",
+		})
+		if errors.Is(cerr, scm.ErrRepoExists) {
+			writeErr(w, store.ErrConflict)
+			return
+		}
+		if cerr != nil {
+			writeErr(w, cerr)
+			return
+		}
+		s.finishProject(w, r, in.Name, in.Checks, store.NewRepoConnection{
+			Provider: string(provider), BaseURL: baseURL, RepoPath: info.Path,
+			DefaultBranch: info.DefaultBranch, Token: in.Token, TokenOwner: res.TokenOwner,
+		})
+		return
+	}
+
+	if repoPath == "" {
+		unprocessable(w, "нужен URL репозитория")
+		return
+	}
+	res := s.probe(r, provider, baseURL, repoPath, in.Token)
+	if !res.OK {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error": apiError{Code: res.Reason, Message: res.Message}, "probe": res})
+		return
+	}
+	s.finishProject(w, r, in.Name, in.Checks, store.NewRepoConnection{
+		Provider: string(provider), BaseURL: baseURL, RepoPath: res.RepoPath,
+		DefaultBranch: res.DefaultBranch, Token: in.Token, TokenOwner: res.TokenOwner,
+	})
+}
+
+// finishProject создаёт проект с подключением и подписывает хостинг на события.
+func (s *Server) finishProject(w http.ResponseWriter, r *http.Request, name string,
+	checks []domain.Check, conn store.NewRepoConnection) {
+
+	p, err := s.St.CreateProjectWithRepo(r.Context(), name, checks, currentUser(r).ID, conn, s.Secrets)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, p)
+	s.registerWebhook(r, p, conn.Token)
+	s.repoEvent(r, p, "репозиторий подключён: "+p.RepoPath)
+	writeJSON(w, http.StatusCreated, projectDTO(p))
+}
+
+// patchProject — правка названия и проверок (api-contract: checks
+// заменяются целиком).
+func (s *Server) patchProject(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMember(w, r, r.PathValue("id")) {
+		return
+	}
+	p, err := s.St.GetProject(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var in struct {
+		Name   *string         `json:"name"`
+		Checks *[]domain.Check `json:"checks"`
+	}
+	if err := decode(r, &in); err != nil {
+		unprocessable(w, "невалидный JSON")
+		return
+	}
+	name, checks := p.Name, p.Checks
+	if in.Name != nil {
+		name = strings.TrimSpace(*in.Name)
+	}
+	if in.Checks != nil {
+		checks = *in.Checks
+	}
+	if name == "" {
+		unprocessable(w, "название проекта не может быть пустым")
+		return
+	}
+	for _, c := range checks {
+		if strings.TrimSpace(c.Name) == "" || strings.TrimSpace(c.Cmd) == "" {
+			unprocessable(w, "у проверки должны быть имя и команда")
+			return
+		}
+	}
+	p, err = s.St.UpdateProjectSettings(r.Context(), p.ID, name, checks)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if _, err := s.St.AppendEvent(r.Context(), store.EventInput{
+		ActorKind: domain.ActorUser, ActorID: user(r), Type: "project.settings",
+		ProjectID: p.ID, Text: "настройки проекта изменены",
+	}); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, projectDTO(p))
+}
+
+// projectView — проект в API. Поля перечислены явно: доменная структура
+// несёт секрет webhook и ссылку на учётные данные, и встраивание вынесло
+// бы их наружу. Repo дублирует repo_path для клиентов старой формы.
+type projectView struct {
+	ID            string         `json:"ID"`
+	Name          string         `json:"Name"`
+	Checks        []domain.Check `json:"Checks"`
+	Created       time.Time      `json:"Created"`
+	Repo          string         `json:"Repo"`
+	Provider      string         `json:"provider"`
+	BaseURL       string         `json:"base_url"`
+	RepoPath      string         `json:"repo_path"`
+	DefaultBranch string         `json:"default_branch"`
+	WebURL        string         `json:"web_url"`
+}
+
+func projectDTO(p domain.Project) projectView {
+	return projectView{
+		ID: p.ID, Name: p.Name, Checks: p.Checks, Created: p.Created,
+		Repo: p.RepoPath, Provider: p.Provider, BaseURL: p.BaseURL,
+		RepoPath: p.RepoPath, DefaultBranch: p.DefaultBranch, WebURL: p.WebURL(),
+	}
 }
 
 // ─── epics ───────────────────────────────────────────────────────────────

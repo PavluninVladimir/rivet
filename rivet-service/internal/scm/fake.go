@@ -34,3 +34,30 @@ func (f *Fake) Merge(ctx context.Context, repo string, number int) (string, erro
 func (f *Fake) HeadSHA(ctx context.Context, repo, branch string) (string, error) {
 	return fmt.Sprintf("fake-head-%04d", f.seq.Add(1)), nil
 }
+
+// Probe в fake-режиме всегда успешен: стенд не ходит на хостинг.
+func (f *Fake) Probe(ctx context.Context, repo string) ProbeResult {
+	if repo == "" {
+		return ProbeResult{OK: true, TokenOwner: "e2e-bot"}
+	}
+	return ProbeResult{
+		OK: true, TokenOwner: "e2e-bot", RepoPath: repo, DefaultBranch: "main",
+		CanPush: true, CanMergeRequest: true,
+	}
+}
+
+// CreateRepo возвращает репозиторий так, будто он создан на хостинге:
+// физический bare-репозиторий стенда готовит e2e-скрипт.
+func (f *Fake) CreateRepo(ctx context.Context, in NewRepo) (RepoInfo, error) {
+	owner := in.Owner
+	if owner == "" {
+		owner = "e2e"
+	}
+	path := owner + "/" + in.Name
+	return RepoInfo{Path: path, WebURL: "https://fake.local/" + path, DefaultBranch: "main"}, nil
+}
+
+// RegisterWebhook в fake-режиме подписки не делает: стенд шлёт события сам.
+func (f *Fake) RegisterWebhook(ctx context.Context, repo, url, secret string) (bool, error) {
+	return false, nil
+}

@@ -18,9 +18,10 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 3: деплой-джобы (implement-deployment); версия 2 добавила
-// обязательный session_id. Runner'ы младших версий отклоняются при Register.
-const protocolVersion = "3"
+// Версия 4: репозиторий проекта в Assignment (add-repo-onboarding); v3
+// добавила деплой-джобы, v2 — session_id. Runner'ы младших версий
+// отклоняются при Register.
+const protocolVersion = "4"
 
 type Config struct {
 	PlaneAddr    string

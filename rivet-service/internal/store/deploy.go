@@ -263,7 +263,7 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 		}
 		var projectID, repo string
 		if err := tx.QueryRow(ctx, `
-			SELECT p.id::text, p.repo FROM environments e JOIN projects p ON p.id=e.project_id
+			SELECT p.id::text, p.repo_path FROM environments e JOIN projects p ON p.id=e.project_id
 			WHERE e.id=$1`, envID).Scan(&projectID, &repo); err != nil {
 			return err
 		}

@@ -36,6 +36,16 @@ func (f *fakeSCM) Merge(ctx context.Context, repo string, number int) (string, e
 func (f *fakeSCM) HeadSHA(ctx context.Context, repo, branch string) (string, error) {
 	return "sha-head", nil
 }
+func (f *fakeSCM) Probe(ctx context.Context, repo string) scm.ProbeResult {
+	return scm.ProbeResult{OK: true, TokenOwner: "bot", RepoPath: repo, DefaultBranch: "main",
+		CanPush: true, CanMergeRequest: true}
+}
+func (f *fakeSCM) CreateRepo(ctx context.Context, in scm.NewRepo) (scm.RepoInfo, error) {
+	return scm.RepoInfo{Path: in.Owner + "/" + in.Name, DefaultBranch: "main"}, nil
+}
+func (f *fakeSCM) RegisterWebhook(ctx context.Context, repo, url, secret string) (bool, error) {
+	return false, nil
+}
 
 type capture struct {
 	mu   sync.Mutex

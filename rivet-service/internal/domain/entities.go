@@ -8,12 +8,51 @@ import (
 	"time"
 )
 
+// Project — проект с подключённым репозиторием (спека domain-model
+// «Репозиторий проекта»): провайдера и инстанс хранит сам проект, а не
+// конфигурация установки.
 type Project struct {
 	ID      string
 	Name    string
-	Repo    string // owner/name на GitHub
 	Checks  []Check
 	Created time.Time
+
+	Provider      string // github | gitlab | fake
+	BaseURL       string // корень инстанса, например https://github.com
+	RepoPath      string // owner/name; у GitLab возможны вложенные группы
+	DefaultBranch string
+	// CredentialID — учётные данные проекта; пусто у проектов, работающих
+	// на глобальном токене установки (созданы до add-repo-onboarding).
+	CredentialID  string
+	WebhookSecret string
+	// WebhookRegistered — подписку на события создала система (иначе её
+	// настраивают на хостинге руками).
+	WebhookRegistered bool
+}
+
+// Repo — путь репозитория. Метод сохраняет привычное имя для мест, где
+// нужен только owner/name (промпты планировщика, сверка webhook).
+func (p Project) Repo() string { return p.RepoPath }
+
+// WebURL — адрес репозитория на хостинге.
+func (p Project) WebURL() string {
+	if p.BaseURL == "" || p.RepoPath == "" {
+		return ""
+	}
+	return p.BaseURL + "/" + p.RepoPath
+}
+
+// ScmCredential — учётные данные хостинга. Секрет наружу не отдаётся:
+// только владелец и префикс (спека scm-integration «Учётные данные хостинга»).
+type ScmCredential struct {
+	ID          string
+	Provider    string
+	BaseURL     string
+	Owner       string
+	TokenPrefix string
+	State       string // ok | invalid | unchecked
+	CheckedAt   *time.Time
+	Created     time.Time
 }
 
 // Check — команда этапа testing из конфига проекта.

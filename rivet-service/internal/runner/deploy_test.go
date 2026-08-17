@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -82,5 +83,47 @@ func TestExecuteDeployTimeout(t *testing.T) {
 	})
 	if len(results) != 1 || results[0].Ok {
 		t.Fatalf("зависшая команда должна провалить DEPLOY: %+v", results)
+	}
+}
+
+// Токен доступа к репозиторию уходит в git через askpass, а не аргументом
+// команды: в транскрипте стадии его быть не должно (design, решение 8).
+func TestGitTokenNotInTranscript(t *testing.T) {
+	a := &agent{cfg: Config{Workdir: t.TempDir()}}
+	as := &pb.Assignment{
+		TaskId: "t1", Repo: "own/proj", Branch: "agent/task-1",
+		RepoUrl: "https://host/own/proj", GitToken: "ghp_secretCloneToken",
+		BaseBranch: "main", Stage: pb.StageResult_CODING,
+	}
+	var log strings.Builder
+	// Клонирование не удастся (хоста нет) — важно, что вывод не содержит токен.
+	_, err := a.workspace(context.Background(), as, func(s string) { log.WriteString(s + "\n") })
+	if err == nil {
+		t.Skip("клонирование неожиданно удалось — среда с доступом в сеть")
+	}
+	if strings.Contains(err.Error(), as.GitToken) || strings.Contains(log.String(), as.GitToken) {
+		t.Fatalf("токен попал в вывод: %v / %s", err, log.String())
+	}
+	// Переменные askpass готовятся, но самого секрета в файле нет.
+	env, cleanup, err := a.gitCredentials(as)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	var askpass string
+	for _, e := range env {
+		if strings.HasPrefix(e, "GIT_ASKPASS=") {
+			askpass = strings.TrimPrefix(e, "GIT_ASKPASS=")
+		}
+	}
+	if askpass == "" {
+		t.Fatal("askpass-хелпер не подготовлен")
+	}
+	body, err := os.ReadFile(askpass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), as.GitToken) {
+		t.Fatalf("секрет записан в файл хелпера: %s", body)
 	}
 }

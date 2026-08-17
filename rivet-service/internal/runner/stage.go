@@ -86,7 +86,15 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			return
 		}
 		step("реализация завершена — фиксация изменений")
-		if err := gitCommitPush(sctx, ws, as.Branch,
+		// push идёт в тот же репозиторий: без askpass приватный репозиторий
+		// запросил бы пароль и подвис (GIT_TERMINAL_PROMPT=0 даёт ошибку).
+		gitEnv, gitCleanup, err := a.gitCredentials(as)
+		if err != nil {
+			result(false, "git credentials: "+err.Error())
+			return
+		}
+		defer gitCleanup()
+		if err := gitCommitPush(sctx, ws, as.Branch, gitEnv,
 			fmt.Sprintf("task-%d: %s (%s)", as.TaskNum, as.Title, strings.ToLower(as.Stage.String()))); err != nil {
 			result(false, "git: "+err.Error())
 			return
@@ -128,32 +136,148 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	}
 }
 
-// workspace готовит клон репозитория и нужную ветку.
+// workspace готовит клон репозитория и нужную ветку. Адрес клонирования
+// приходит в Assignment (репозиторий живёт у проекта); пустой repo_url —
+// старое поведение по RIVET_GIT_BASE для e2e-стенда.
 func (a *agent) workspace(ctx context.Context, as *pb.Assignment, step func(string)) (string, error) {
-	dir := a.cfg.Workdir + "/repos/" + strings.ReplaceAll(as.Repo, "/", "__")
+	dir := a.cfg.Workdir + "/repos/" + workspaceKey(as)
+	env, cleanup, err := a.gitCredentials(as)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
 	if _, err := os.Stat(dir + "/.git"); err != nil {
 		step("клонирование " + as.Repo)
-		base := a.cfg.GitBase
-		if base == "" {
-			base = "https://github.com/"
+		// clone запускается напрямую, без /bin/sh: URL и путь приходят
+		// снаружи, а Go-кавычки shell не экранируют.
+		cmd := exec.CommandContext(ctx, "git", "clone", "--", cloneURL(a.cfg.GitBase, as), dir)
+		cmd.Dir = a.cfg.Workdir
+		if len(env) > 0 {
+			cmd.Env = append(os.Environ(), env...)
 		}
-		if out, err := runShell(ctx, a.cfg.Workdir,
-			fmt.Sprintf("git clone %s%s.git %q", base, as.Repo, dir), nil); err != nil {
+		if out, err := cmd.CombinedOutput(); err != nil {
 			return "", fmt.Errorf("clone: %v: %s", err, out)
 		}
 	}
+	base := as.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	// Имена веток уезжают в /bin/sh: %q — это кавычки Go, а не shell,
+	// поэтому значения проверяются и экранируются одинарными кавычками.
+	if err := validBranch(as.Branch); err != nil {
+		return "", err
+	}
+	if err := validBranch(base); err != nil {
+		return "", err
+	}
+	br, bs := shellQuote(as.Branch), shellQuote(base)
 	var script string
 	switch as.Stage {
 	case pb.StageResult_CODING:
-		script = fmt.Sprintf("git fetch origin && git checkout -B %q origin/main", as.Branch)
+		script = fmt.Sprintf("git fetch origin && git checkout -B %s origin/%s", br, bs)
 	default: // FIXING, TESTING, REVIEW — ветка уже существует (локально или на origin)
-		script = fmt.Sprintf("git fetch origin && (git checkout %q || git checkout -b %q origin/%q) && (git pull --ff-only origin %q || true)",
-			as.Branch, as.Branch, as.Branch, as.Branch)
+		script = fmt.Sprintf("git fetch origin && (git checkout %s || git checkout -b %s origin/%s) && (git pull --ff-only origin %s || true)",
+			br, br, br, br)
 	}
-	if out, err := runShell(ctx, dir, script, nil); err != nil {
+	if out, err := runShellEnv(ctx, dir, script, env, nil); err != nil {
 		return "", fmt.Errorf("checkout: %v: %s", err, out)
 	}
 	return dir, nil
+}
+
+// validBranch — имя ветки как безопасный аргумент git: без пробелов,
+// подстановок и переходов на другую команду.
+func validBranch(b string) error {
+	if b == "" {
+		return fmt.Errorf("пустое имя ветки")
+	}
+	if strings.HasPrefix(b, "-") {
+		return fmt.Errorf("имя ветки %q начинается с дефиса", b)
+	}
+	for _, r := range b {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '/', r == '-', r == '_', r == '.':
+		default:
+			return fmt.Errorf("недопустимый символ %q в имени ветки %q", r, b)
+		}
+	}
+	return nil
+}
+
+// shellQuote — значение одним аргументом /bin/sh.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// workspaceKey — каталог клона по полной идентичности репозитория, а не
+// по одному пути: один и тот же owner/name встречается на разных
+// инстансах, и общий каталог отправил бы push не туда.
+func workspaceKey(as *pb.Assignment) string {
+	id := as.Repo
+	if as.RepoUrl != "" {
+		id = strings.TrimPrefix(strings.TrimPrefix(as.RepoUrl, "https://"), "http://")
+	}
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+// cloneURL — адрес клонирования: из Assignment (репозиторий проекта) или
+// по RIVET_GIT_BASE, если репозиторий не передан (e2e-стенд).
+func cloneURL(gitBase string, as *pb.Assignment) string {
+	if as.RepoUrl != "" {
+		return as.RepoUrl + ".git"
+	}
+	if gitBase == "" {
+		gitBase = "https://github.com/"
+	}
+	return gitBase + as.Repo + ".git"
+}
+
+// gitCredentials готовит askpass-хелпер: токен уходит в git через
+// переменные окружения, а не в аргументы команд — иначе он попал бы
+// в транскрипт стадии (design, решение 8).
+func (a *agent) gitCredentials(as *pb.Assignment) ([]string, func(), error) {
+	if as.GitToken == "" {
+		return nil, func() {}, nil
+	}
+	f, err := os.CreateTemp(a.cfg.Workdir, "askpass-*.sh")
+	if err != nil {
+		return nil, func() {}, err
+	}
+	cleanup := func() { _ = os.Remove(f.Name()) }
+	// Хелпер отвечает на запрос логина и пароля: логин — служебный,
+	// пароль — токен из окружения (в файле секрета нет).
+	script := "#!/bin/sh\n" +
+		`case "$1" in *Username*) echo "$RIVET_GIT_USER";; *) echo "$RIVET_GIT_TOKEN";; esac` + "\n"
+	if _, err := f.WriteString(script); err != nil {
+		_ = f.Close()
+		cleanup()
+		return nil, func() {}, err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	if err := os.Chmod(f.Name(), 0o700); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	return []string{
+		"GIT_ASKPASS=" + f.Name(),
+		"GIT_TERMINAL_PROMPT=0",
+		"RIVET_GIT_USER=rivet",
+		"RIVET_GIT_TOKEN=" + as.GitToken,
+	}, cleanup, nil
 }
 
 // runAgent запускает CLI-агента в PTY; промпт кладётся во временный файл,
@@ -171,20 +295,32 @@ func (a *agent) runAgent(ctx context.Context, dir, prompt string, transcript fun
 	return runPTY(ctx, dir, a.cfg.AgentCmd, []string{"RIVET_PROMPT_FILE=" + pf.Name()}, transcript)
 }
 
-func gitCommitPush(ctx context.Context, dir, branch, message string) error {
+func gitCommitPush(ctx context.Context, dir, branch string, env []string, message string) error {
+	if err := validBranch(branch); err != nil {
+		return err
+	}
 	// Identity задаём явно: на CI глобального git config нет.
 	script := fmt.Sprintf(
-		`git add -A && (git diff --cached --quiet || git -c user.name=rivet-runner -c user.email=runner@rivet.local commit -m %q) && git push -u origin %q`,
-		message, branch)
-	if out, err := runShell(ctx, dir, script, nil); err != nil {
+		`git add -A && (git diff --cached --quiet || git -c user.name=rivet-runner -c user.email=runner@rivet.local commit -m %s) && git push -u origin %s`,
+		shellQuote(message), shellQuote(branch))
+	if out, err := runShellEnv(ctx, dir, script, env, nil); err != nil {
 		return fmt.Errorf("%v: %s", err, out)
 	}
 	return nil
 }
 
 func runShell(ctx context.Context, dir, script string, transcript func([]byte)) (string, error) {
+	return runShellEnv(ctx, dir, script, nil, transcript)
+}
+
+// runShellEnv — runShell с дополнительными переменными окружения
+// (askpass-хелпер git: секрет не попадает в аргументы команды).
+func runShellEnv(ctx context.Context, dir, script string, env []string, transcript func([]byte)) (string, error) {
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
 	cmd.Dir = dir
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	out, err := cmd.CombinedOutput()
 	if transcript != nil && len(out) > 0 {
 		transcript(out)
