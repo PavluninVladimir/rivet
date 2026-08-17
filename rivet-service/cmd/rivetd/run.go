@@ -18,6 +18,7 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/planner"
 	"github.com/PavluninVladimir/rivet/internal/scm"
+	"github.com/PavluninVladimir/rivet/internal/secretbox"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	"github.com/PavluninVladimir/rivet/internal/stream"
 	"github.com/PavluninVladimir/rivet/internal/webui"
@@ -74,7 +75,20 @@ func run(ctx context.Context, cfg config.Config) error {
 		slog.Warn("SCM-провайдер fake: PR и merge фиктивные (режим e2e-стенда)")
 		adapter = scm.NewFake()
 	}
+	// Ключ шифрования учётных данных хостингов; без него подключение
+	// репозиториев с токеном отключено (fail-closed), установка работает
+	// на глобальном токене.
+	box, err := secretbox.New(cfg.SecretKey)
+	if err != nil {
+		return err
+	}
+	if !box.Enabled() {
+		slog.Warn("RIVET_SECRET_KEY не задан: подключение репозиториев с токеном отключено")
+	}
 	engine := orchestrator.New(st, adapter, bl, reg, cfg.RunnerHeartbeatTimeout)
+	engine.Box = box
+	// RIVET_SCM=fake — установка без настоящих хостингов (e2e-стенд).
+	engine.Adapters.Force = cfg.SCM == "fake"
 
 	grpcSrv := grpc.NewServer()
 	pb.RegisterRunnerServiceServer(grpcSrv, &stream.Server{
@@ -89,6 +103,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	root := http.NewServeMux()
 	root.Handle("/api/", (&api.Server{
 		St: st, Engine: engine, Hub: hub, Planner: pl, Blob: bl,
+		Secrets: box, PublicURL: cfg.PublicURL,
 		WebhookSecret: cfg.GitHubWebhookSecret,
 		TrustProxy:    cfg.TrustProxy,
 	}).Handler())

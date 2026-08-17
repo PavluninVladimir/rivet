@@ -139,6 +139,12 @@ message Assignment {
   // Сессия стадии: runner повторяет session_id во всех сообщениях стадии
   // (Transcript, Usage, StageResult, Blocked); replay с чужим id отбрасывается.
   string session_id = 11;
+  // Репозиторий проекта: адрес клонирования без секрета и токен доступа.
+  // Токен уезжает в git через askpass-хелпер, а не аргументом команды.
+  // Пустой repo_url — старое поведение по RIVET_GIT_BASE (e2e-стенд).
+  string repo_url = 12;
+  string git_token = 13;
+  string base_branch = 14; // базовая ветка проекта
 }
 
 message Check {

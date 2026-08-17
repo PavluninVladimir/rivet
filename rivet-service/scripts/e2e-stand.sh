@@ -69,8 +69,13 @@ RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/
   -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-deployer" &
 
 # Control plane на переднем плане.
+# Ключ шифрования учётных данных хостингов: без него подключение
+# репозитория с токеном отключено (fail-closed), и мастер не создаст проект.
+SECRET_KEY=${E2E_SECRET_KEY:-$(head -c 32 /dev/urandom | base64)}
+
 exec env \
   RIVET_HTTP_ADDR=":$HTTP_PORT" \
+  RIVET_SECRET_KEY="$SECRET_KEY" \
   RIVET_GRPC_ADDR=":$GRPC_PORT" \
   RIVET_DATABASE_URL="$DB_URL" \
   RIVET_SCM=fake \

@@ -66,7 +66,7 @@ func cmdProjects(args []string) error {
 	tw := tabwriter.NewWriter(output, 2, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tNAME\tREPO")
 	for _, p := range projects {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", p.ID, p.Name, p.Repo)
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", p.ID, p.Name, p.RepoPath)
 	}
 	return tw.Flush()
 }

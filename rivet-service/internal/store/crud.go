@@ -15,32 +15,36 @@ import (
 
 // CreateProject создаёт проект; создатель становится его участником в той же
 // транзакции (design add-users-and-access, решение 6).
+// CreateProject — проект на глобальном токене установки (устаревшая форма
+// запроса и e2e-стенд). Подключение репозитория с учётными данными —
+// CreateProjectWithRepo.
 func (s *Store) CreateProject(ctx context.Context, name, repo string, checks []domain.Check, creatorID string) (domain.Project, error) {
-	raw, _ := json.Marshal(checks)
-	p := domain.Project{Name: name, Repo: repo, Checks: checks}
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx,
-			`INSERT INTO projects (name, repo, checks) VALUES ($1,$2,$3) RETURNING id, created_at`,
-			name, repo, raw).Scan(&p.ID, &p.Created); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx,
-			`INSERT INTO project_members (project_id, user_id) VALUES ($1,$2)`, p.ID, creatorID)
-		return err
-	})
-	return p, err
+	provider := "github"
+	baseURL := "https://github.com"
+	return s.CreateProjectWithRepo(ctx, name, checks, creatorID, NewRepoConnection{
+		Provider: provider, BaseURL: baseURL, RepoPath: repo, DefaultBranch: "main",
+	}, nil)
+}
+
+// projectCols — колонки проекта в порядке scanProject.
+const projectCols = `id, name, checks, provider, base_url, repo_path, default_branch,
+	COALESCE(credential_id::text,''), COALESCE(webhook_secret,''), webhook_registered, created_at`
+
+func scanProject(row pgx.Row) (domain.Project, error) {
+	var p domain.Project
+	var raw []byte
+	if err := row.Scan(&p.ID, &p.Name, &raw, &p.Provider, &p.BaseURL, &p.RepoPath,
+		&p.DefaultBranch, &p.CredentialID, &p.WebhookSecret, &p.WebhookRegistered, &p.Created); err != nil {
+		return p, err
+	}
+	return p, json.Unmarshal(raw, &p.Checks)
 }
 
 func (s *Store) GetProject(ctx context.Context, id string) (domain.Project, error) {
-	var p domain.Project
-	var raw []byte
-	err := s.Pool.QueryRow(ctx,
-		`SELECT id, name, repo, checks, created_at FROM projects WHERE id=$1`, id).
-		Scan(&p.ID, &p.Name, &p.Repo, &raw, &p.Created)
+	p, err := scanProject(s.Pool.QueryRow(ctx, `SELECT `+projectCols+` FROM projects WHERE id=$1`, id))
 	if err != nil {
 		return p, nf(err)
 	}
-	err = json.Unmarshal(raw, &p.Checks)
 	return p, err
 }
 
@@ -48,7 +52,7 @@ func (s *Store) GetProject(ctx context.Context, id string) (domain.Project, erro
 // исключения для админа нет, спека domain-model).
 func (s *Store) ListProjects(ctx context.Context, userID string) ([]domain.Project, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT p.id, p.name, p.repo, p.checks, p.created_at FROM projects p
+		SELECT `+projectCols+` FROM projects p
 		JOIN project_members m ON m.project_id = p.id AND m.user_id = $1
 		ORDER BY p.created_at`, userID)
 	if err != nil {
@@ -57,12 +61,10 @@ func (s *Store) ListProjects(ctx context.Context, userID string) ([]domain.Proje
 	defer rows.Close()
 	var out []domain.Project
 	for rows.Next() {
-		var p domain.Project
-		var raw []byte
-		if err := rows.Scan(&p.ID, &p.Name, &p.Repo, &raw, &p.Created); err != nil {
+		p, err := scanProject(rows)
+		if err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(raw, &p.Checks)
 		out = append(out, p)
 	}
 	return out, rows.Err()

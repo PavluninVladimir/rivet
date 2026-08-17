@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -32,8 +33,13 @@ type Config struct {
 	// webhook'ов (спека scm-integration). Пустой секрет выключает приём
 	// webhook'ов (fail-closed).
 	GitHubWebhookSecret string
-	// SCM — провайдер хостинга: github (по умолчанию) или fake (e2e-стенды).
+	// SCM — запасной провайдер хостинга для проектов без собственных
+	// учётных данных: github (по умолчанию) или fake (e2e-стенды).
 	SCM string
+	// SecretKey — ключ шифрования учётных данных хостингов (base64, 32 байта).
+	SecretKey string
+	// PublicURL — внешний адрес установки; нужен для регистрации webhook.
+	PublicURL string
 	// LLMProvider — провайдер модели декомпозиции: anthropic или deepseek.
 	// Без RIVET_LLM_PROVIDER выбирается по наличию ключа, при обоих ключах anthropic.
 	LLMProvider string
@@ -70,6 +76,8 @@ func FromEnv() (Config, error) {
 		GitHubToken:            os.Getenv("RIVET_GITHUB_TOKEN"),
 		GitHubWebhookSecret:    os.Getenv("RIVET_GITHUB_WEBHOOK_SECRET"),
 		SCM:                    getenv("RIVET_SCM", "github"),
+		SecretKey:              os.Getenv("RIVET_SECRET_KEY"),
+		PublicURL:              strings.TrimSuffix(os.Getenv("RIVET_PUBLIC_URL"), "/"),
 		LLMProvider:            os.Getenv("RIVET_LLM_PROVIDER"),
 		AnthropicAPIKey:        os.Getenv("ANTHROPIC_API_KEY"),
 		DeepSeekAPIKey:         os.Getenv("DEEPSEEK_API_KEY"),

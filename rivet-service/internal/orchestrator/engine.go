@@ -17,6 +17,7 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/scm"
+	"github.com/PavluninVladimir/rivet/internal/secretbox"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
@@ -27,8 +28,13 @@ type Sender interface {
 }
 
 type Engine struct {
-	St   *store.Store
-	SCM  scm.Adapter
+	St *store.Store
+	// SCM — запасной адаптер установки (глобальный токен, fake на стендах);
+	// у проекта с учётными данными адаптер берётся через SCMFor.
+	SCM      scm.Adapter
+	Adapters *scm.Factory
+	// Box расшифровывает учётные данные проектов; nil — ключ не настроен.
+	Box  *secretbox.Box
 	Blob *blob.Store
 	Out  Sender
 
@@ -49,7 +55,7 @@ type Engine struct {
 
 func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, heartbeat time.Duration) *Engine {
 	return &Engine{
-		St: st, SCM: adapter, Blob: bl, Out: send,
+		St: st, SCM: adapter, Adapters: &scm.Factory{Fallback: adapter}, Blob: bl, Out: send,
 		HeartbeatTimeout: heartbeat, BaseBranch: "main",
 		stageContext: map[string]string{},
 		transcripts:  map[string][]byte{},
@@ -164,6 +170,17 @@ func (e *Engine) takeStageContext(taskID string) string {
 	return c
 }
 
+// SCMFor — адаптер хостинга проекта: провайдер, инстанс и учётные данные
+// живут у проекта (design add-repo-onboarding, решение 5). Проект без
+// собственных учётных данных работает на запасном адаптере установки.
+func (e *Engine) SCMFor(ctx context.Context, p domain.Project) (scm.Adapter, error) {
+	token, err := e.St.ProjectToken(ctx, p.ID, e.Box)
+	if err != nil {
+		return nil, fmt.Errorf("учётные данные проекта %s: %w", p.ID, err)
+	}
+	return e.Adapters.For(scm.Provider(p.Provider), p.BaseURL, token)
+}
+
 func (e *Engine) projectOf(ctx context.Context, task domain.Task) (domain.Project, domain.Epic, error) {
 	epic, err := e.St.GetEpic(ctx, task.EpicID)
 	if err != nil {
@@ -206,13 +223,27 @@ func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.Stag
 	e.sessions[a.Task.ID] = sessionID
 	delete(e.transcripts, a.Task.ID)
 	e.mu.Unlock()
+	// Репозиторий проекта: адрес клонирования и токен доступа (design
+	// решение 8). Токен уедет в git через askpass, не в аргументы команд.
+	gitToken, err := e.St.ProjectToken(ctx, p.ID, e.Box)
+	if err != nil {
+		slog.Error("dispatch: учётные данные проекта", "project", p.ID, "err", err)
+		return
+	}
+	// У fake-провайдера (e2e-стенд) настоящего адреса нет: клонирование
+	// идёт по RIVET_GIT_BASE, как до этого изменения.
+	repoURL := p.WebURL()
+	if p.Provider == string(scm.ProviderFake) {
+		repoURL, gitToken = "", ""
+	}
 	msg := &pb.PlaneMsg{
 		MsgId: fmt.Sprintf("assign-%s-%s-%d", a.Task.ID, stage, time.Now().UnixNano()),
 		Kind: &pb.PlaneMsg_Assign{Assign: &pb.Assignment{
 			TaskId: a.Task.ID, TaskNum: a.Task.Num, Stage: stage,
 			Title: a.Task.Title, Description: a.Task.Description,
-			Criteria: criteria, Repo: p.Repo, Branch: a.Task.Branch,
+			Criteria: criteria, Repo: p.Repo(), Branch: a.Task.Branch,
 			Checks: checks, ExtraContext: extra, SessionId: sessionID,
+			RepoUrl: repoURL, GitToken: gitToken, BaseBranch: p.DefaultBranch,
 		}},
 	}
 	if !e.Out.Send(runnerID, msg) {
@@ -408,7 +439,11 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 			if err != nil {
 				return err
 			}
-			pr, err := e.SCM.CreatePR(ctx, p.Repo, task.Branch, e.BaseBranch,
+			adapter, err := e.SCMFor(ctx, p)
+			if err != nil {
+				return err
+			}
+			pr, err := adapter.CreatePR(ctx, p.RepoPath, task.Branch, p.DefaultBranch,
 				fmt.Sprintf("task-%d: %s", task.Num, task.Title), task.Description)
 			if err != nil {
 				return fmt.Errorf("create PR: %w", err)
@@ -530,7 +565,11 @@ func (e *Engine) MergeTask(ctx context.Context, taskID, userID string) error {
 		if err != nil {
 			return err
 		}
-		if mergeSHA, err = e.SCM.Merge(ctx, p.Repo, num); err != nil {
+		adapter, aerr := e.SCMFor(ctx, p)
+		if aerr != nil {
+			return aerr
+		}
+		if mergeSHA, err = adapter.Merge(ctx, p.RepoPath, num); err != nil {
 			return fmt.Errorf("merge PR: %w", err)
 		}
 	}
@@ -567,7 +606,11 @@ func (e *Engine) diffForTask(ctx context.Context, task domain.Task) (string, err
 	if err != nil {
 		return "", err
 	}
-	return e.SCM.Diff(ctx, p.Repo, num)
+	adapter, err := e.SCMFor(ctx, p)
+	if err != nil {
+		return "", err
+	}
+	return adapter.Diff(ctx, p.RepoPath, num)
 }
 
 // prNumber извлекает номер PR из https://github.com/owner/repo/pull/N.

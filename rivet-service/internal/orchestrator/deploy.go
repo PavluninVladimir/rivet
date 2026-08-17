@@ -238,7 +238,7 @@ func (e *Engine) failDeploy(ctx context.Context, depID, runnerID, detail string,
 			}
 			var repo string
 			if p, perr := e.St.GetProject(ctx, projectID); perr == nil {
-				repo = p.Repo
+				repo = p.Repo()
 			}
 			if err := e.deployEvent(ctx, depID, "rolling_back",
 				"этап провалился — откат к версии "+prev); err != nil {
