@@ -116,7 +116,7 @@ func mustStatus(t *testing.T, resp *http.Response, want int, what string) {
 func TestAuthLoginLogout(t *testing.T) {
 	st, srv := testServer(t)
 	ctx := context.Background()
-	if err := st.Bootstrap(ctx, "root", "secret"); err != nil {
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -134,10 +134,10 @@ func TestAuthLoginLogout(t *testing.T) {
 		t.Fatalf("ответы должны быть одинаковыми 401: %d %s против %d %s", r1.StatusCode, b1, r2.StatusCode, b2)
 	}
 
-	session := loginSession(t, srv, "root", "secret")
+	session := loginSession(t, srv, "root", "root-secret")
 	resp, body = call(t, "GET", srv.URL+"/api/v1/auth/me", session, "", nil)
 	mustStatus(t, resp, http.StatusOK, "me")
-	if !strings.Contains(string(body), `"Login":"root"`) {
+	if !strings.Contains(string(body), `"login":"root"`) {
 		t.Fatalf("me должен вернуть пользователя: %s", body)
 	}
 
@@ -152,24 +152,24 @@ func TestAuthLoginLogout(t *testing.T) {
 // даже с верным паролем, ответ остаётся одинаковым 401.
 func TestLoginBackoff(t *testing.T) {
 	st, srv := testServer(t)
-	if err := st.Bootstrap(context.Background(), "root", "secret"); err != nil {
+	if err := st.Bootstrap(context.Background(), "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < throttleFreeAttempts+1; i++ {
 		resp, _ := call(t, "POST", srv.URL+"/api/v1/auth/login", "", "", map[string]string{"login": "root", "password": "wrong"})
 		mustStatus(t, resp, http.StatusUnauthorized, "неверный пароль")
 	}
-	resp, _ := call(t, "POST", srv.URL+"/api/v1/auth/login", "", "", map[string]string{"login": "root", "password": "secret"})
+	resp, _ := call(t, "POST", srv.URL+"/api/v1/auth/login", "", "", map[string]string{"login": "root", "password": "root-secret"})
 	mustStatus(t, resp, http.StatusUnauthorized, "верный пароль в окне задержки")
 }
 
 // Сценарий «Personal access token»: создание, использование, отзыв, срок.
 func TestAccessTokens(t *testing.T) {
 	st, srv := testServer(t)
-	if err := st.Bootstrap(context.Background(), "root", "secret"); err != nil {
+	if err := st.Bootstrap(context.Background(), "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
-	session := loginSession(t, srv, "root", "secret")
+	session := loginSession(t, srv, "root", "root-secret")
 
 	resp, body := call(t, "POST", srv.URL+"/api/v1/tokens", session, "", map[string]string{"name": "cli"})
 	mustStatus(t, resp, http.StatusCreated, "создание PAT")
@@ -210,14 +210,14 @@ func TestAccessTokens(t *testing.T) {
 func TestProjectVisibility(t *testing.T) {
 	st, srv := testServer(t)
 	ctx := context.Background()
-	if err := st.Bootstrap(ctx, "root", "secret"); err != nil {
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateUser(ctx, "alice", "", "pw-alice", false); err != nil {
+	if _, err := st.CreateUser(ctx, "alice", "", "pw-alice-secret", false); err != nil {
 		t.Fatal(err)
 	}
-	alice := loginSession(t, srv, "alice", "pw-alice")
-	root := loginSession(t, srv, "root", "secret")
+	alice := loginSession(t, srv, "alice", "pw-alice-secret")
+	root := loginSession(t, srv, "root", "root-secret")
 
 	// alice создаёт проект и epic.
 	resp, body := call(t, "POST", srv.URL+"/api/v1/projects", alice, "",
@@ -267,16 +267,16 @@ func TestProjectVisibility(t *testing.T) {
 func TestAdminAndDeactivation(t *testing.T) {
 	st, srv := testServer(t)
 	ctx := context.Background()
-	if err := st.Bootstrap(ctx, "root", "secret"); err != nil {
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
 	var bob domain.User
 	var err error
-	if bob, err = st.CreateUser(ctx, "bob", "", "pw-bob", false); err != nil {
+	if bob, err = st.CreateUser(ctx, "bob", "", "pw-bob-secret", false); err != nil {
 		t.Fatal(err)
 	}
-	root := loginSession(t, srv, "root", "secret")
-	bobSession := loginSession(t, srv, "bob", "pw-bob")
+	root := loginSession(t, srv, "root", "root-secret")
+	bobSession := loginSession(t, srv, "bob", "pw-bob-secret")
 
 	// Не-админ: 403 на users и drain.
 	resp, _ := call(t, "GET", srv.URL+"/api/v1/users", bobSession, "", nil)
@@ -297,7 +297,7 @@ func TestAdminAndDeactivation(t *testing.T) {
 	mustStatus(t, resp, http.StatusUnauthorized, "сессия деактивированного")
 	resp, _ = call(t, "GET", srv.URL+"/api/v1/projects", "", created.Secret, nil)
 	mustStatus(t, resp, http.StatusUnauthorized, "PAT деактивированного")
-	resp, _ = call(t, "POST", srv.URL+"/api/v1/auth/login", "", "", map[string]string{"login": "bob", "password": "pw-bob"})
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/auth/login", "", "", map[string]string{"login": "bob", "password": "pw-bob-secret"})
 	mustStatus(t, resp, http.StatusUnauthorized, "вход деактивированного")
 
 	// Реактивация возвращает вход, но не старые credentials.
@@ -308,7 +308,7 @@ func TestAdminAndDeactivation(t *testing.T) {
 	mustStatus(t, resp, http.StatusUnauthorized, "старая сессия после реактивации")
 	resp, _ = call(t, "GET", srv.URL+"/api/v1/projects", "", created.Secret, nil)
 	mustStatus(t, resp, http.StatusUnauthorized, "старый PAT после реактивации")
-	_ = loginSession(t, srv, "bob", "pw-bob")
+	_ = loginSession(t, srv, "bob", "pw-bob-secret")
 
 	// Последний активный админ не деактивируется.
 	rootID := ""
@@ -329,10 +329,10 @@ func TestAdminAndDeactivation(t *testing.T) {
 // родной Origin и запросы без браузерных заголовков проходят.
 func TestCSRFOriginCheck(t *testing.T) {
 	st, srv := testServer(t)
-	if err := st.Bootstrap(context.Background(), "root", "secret"); err != nil {
+	if err := st.Bootstrap(context.Background(), "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
-	session := loginSession(t, srv, "root", "secret")
+	session := loginSession(t, srv, "root", "root-secret")
 
 	mutate := func(hdr map[string]string) int {
 		t.Helper()
@@ -369,12 +369,12 @@ func TestCSRFOriginCheck(t *testing.T) {
 // Формат login: URL-safe, иначе 422.
 func TestCreateUserLoginValidation(t *testing.T) {
 	st, srv := testServer(t)
-	if err := st.Bootstrap(context.Background(), "root", "secret"); err != nil {
+	if err := st.Bootstrap(context.Background(), "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
-	root := loginSession(t, srv, "root", "secret")
+	root := loginSession(t, srv, "root", "root-secret")
 	for _, bad := range []string{"", "с пробелом", "a/b", strings.Repeat("x", 65)} {
-		resp, _ := call(t, "POST", srv.URL+"/api/v1/users", root, "", map[string]string{"login": bad, "password": "pw"})
+		resp, _ := call(t, "POST", srv.URL+"/api/v1/users", root, "", map[string]string{"login": bad, "password": "pw-testpass"})
 		mustStatus(t, resp, http.StatusUnprocessableEntity, "login "+bad)
 	}
 }
@@ -382,10 +382,10 @@ func TestCreateUserLoginValidation(t *testing.T) {
 // Logout — операция cookie-сессии: Bearer-запросу гасить нечего.
 func TestLogoutRequiresCookie(t *testing.T) {
 	st, srv := testServer(t)
-	if err := st.Bootstrap(context.Background(), "root", "secret"); err != nil {
+	if err := st.Bootstrap(context.Background(), "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
-	session := loginSession(t, srv, "root", "secret")
+	session := loginSession(t, srv, "root", "root-secret")
 	_, body := call(t, "POST", srv.URL+"/api/v1/tokens", session, "", map[string]string{"name": "cli"})
 	var created struct{ Secret string }
 	_ = json.Unmarshal(body, &created)
@@ -398,10 +398,10 @@ func TestLogoutRequiresCookie(t *testing.T) {
 func TestSSECookieOnly(t *testing.T) {
 	st, srv := testServer(t)
 	ctx := context.Background()
-	if err := st.Bootstrap(ctx, "root", "secret"); err != nil {
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
-	session := loginSession(t, srv, "root", "secret")
+	session := loginSession(t, srv, "root", "root-secret")
 	resp, body := call(t, "POST", srv.URL+"/api/v1/projects", session, "", map[string]string{"name": "p", "repo": "o/r"})
 	mustStatus(t, resp, http.StatusCreated, "проект")
 	var project domain.Project
@@ -420,14 +420,14 @@ func TestSSECookieOnly(t *testing.T) {
 func TestRunnerTaskRedaction(t *testing.T) {
 	st, srv := testServer(t)
 	ctx := context.Background()
-	if err := st.Bootstrap(ctx, "root", "secret"); err != nil {
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateUser(ctx, "alice", "", "pw-alice", false); err != nil {
+	if _, err := st.CreateUser(ctx, "alice", "", "pw-alice-secret", false); err != nil {
 		t.Fatal(err)
 	}
-	alice := loginSession(t, srv, "alice", "pw-alice")
-	root := loginSession(t, srv, "root", "secret")
+	alice := loginSession(t, srv, "alice", "pw-alice-secret")
+	root := loginSession(t, srv, "root", "root-secret")
 
 	resp, body := call(t, "POST", srv.URL+"/api/v1/projects", alice, "", map[string]string{"name": "p", "repo": "o/r"})
 	mustStatus(t, resp, http.StatusCreated, "проект")
@@ -458,4 +458,247 @@ func TestRunnerTaskRedaction(t *testing.T) {
 	if strings.Contains(string(body), task.ID) {
 		t.Fatalf("TaskID чужой задачи должен скрываться: %s", body)
 	}
+}
+
+// Сценарии «Выдача и снятие прав администратора» и «Последний администратор
+// защищён» (спека access-policy).
+func TestAdminRightsGrantAndRevoke(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
+		t.Fatal(err)
+	}
+	alice, err := st.CreateUser(ctx, "alice", "", "pw-alice-secret", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := loginSession(t, srv, "root", "root-secret")
+	aliceSess := loginSession(t, srv, "alice", "pw-alice-secret")
+
+	// Пока alice не админ, администрирование ей закрыто.
+	resp, _ := call(t, "GET", srv.URL+"/api/v1/users", aliceSess, "", nil)
+	mustStatus(t, resp, http.StatusForbidden, "список пользователей не админу")
+
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/users/"+alice.ID, root, "", map[string]any{"admin": true})
+	mustStatus(t, resp, http.StatusOK, "выдача прав администратора")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/users", aliceSess, "", nil)
+	mustStatus(t, resp, http.StatusOK, "список пользователей новому админу")
+
+	// Событие о выдаче прав попало в event log.
+	events, err := st.Events(ctx, store.EventFilter{Type: "user.admin_changed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].ActorID != "root" {
+		t.Fatalf("ожидалось событие о выдаче прав от root, получено %+v", events)
+	}
+
+	// Снятие прав возвращает отказ на администрирование.
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/users/"+alice.ID, root, "", map[string]any{"admin": false})
+	mustStatus(t, resp, http.StatusOK, "снятие прав администратора")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/users", aliceSess, "", nil)
+	mustStatus(t, resp, http.StatusForbidden, "список пользователей после снятия прав")
+
+	// Последний активный админ не может снять права сам с себя.
+	rootUser, err := st.Authenticate(ctx, "root", "root-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/users/"+rootUser.ID, root, "", map[string]any{"admin": false})
+	mustStatus(t, resp, http.StatusConflict, "снятие прав у последнего админа")
+}
+
+// Сценарии «Смена своего пароля», «Сброс пароля администратором» и вход
+// одноразовым паролем (спека access-policy).
+func TestPasswordChangeAndReset(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
+		t.Fatal(err)
+	}
+	alice, err := st.CreateUser(ctx, "alice", "", "pw-alice-secret", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := loginSession(t, srv, "root", "root-secret")
+	first := loginSession(t, srv, "alice", "pw-alice-secret")
+	second := loginSession(t, srv, "alice", "pw-alice-secret")
+
+	// Короткий пароль и неверный текущий отклоняются.
+	resp, _ := call(t, "POST", srv.URL+"/api/v1/auth/password", first, "",
+		map[string]string{"current": "pw-alice-secret", "new": "short"})
+	mustStatus(t, resp, http.StatusUnprocessableEntity, "короткий новый пароль")
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/auth/password", first, "",
+		map[string]string{"current": "wrong-password", "new": "brand-new-password"})
+	mustStatus(t, resp, http.StatusUnauthorized, "неверный текущий пароль")
+
+	// Успешная смена: текущая сессия жива, вторая завершена.
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/auth/password", first, "",
+		map[string]string{"current": "pw-alice-secret", "new": "brand-new-password"})
+	mustStatus(t, resp, http.StatusNoContent, "смена пароля")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/auth/me", first, "", nil)
+	mustStatus(t, resp, http.StatusOK, "текущая сессия после смены пароля")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/auth/me", second, "", nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "остальные сессии после смены пароля")
+	_ = loginSession(t, srv, "alice", "brand-new-password")
+
+	// Сброс администратором: одноразовый пароль, сессии погашены.
+	resp, body := call(t, "POST", srv.URL+"/api/v1/users/"+alice.ID+"/password/reset", root, "", nil)
+	mustStatus(t, resp, http.StatusOK, "сброс пароля")
+	var reset struct {
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(body, &reset); err != nil || reset.Password == "" {
+		t.Fatalf("ожидался одноразовый пароль: %s", body)
+	}
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/auth/me", first, "", nil)
+	mustStatus(t, resp, http.StatusUnauthorized, "сессия после сброса пароля")
+
+	// Вход одноразовым паролем работает, остальное API закрыто до смены.
+	temp := loginSession(t, srv, "alice", reset.Password)
+	resp, body = call(t, "GET", srv.URL+"/api/v1/projects", temp, "", nil)
+	mustStatus(t, resp, http.StatusForbidden, "API до смены пароля")
+	if !strings.Contains(string(body), "password_change_required") {
+		t.Fatalf("ожидался код password_change_required: %s", body)
+	}
+	resp, body = call(t, "GET", srv.URL+"/api/v1/auth/me", temp, "", nil)
+	mustStatus(t, resp, http.StatusOK, "профиль до смены пароля")
+	if !strings.Contains(string(body), `"must_change_password":true`) {
+		t.Fatalf("профиль должен требовать смену пароля: %s", body)
+	}
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/auth/password", temp, "",
+		map[string]string{"current": reset.Password, "new": "after-reset-password"})
+	mustStatus(t, resp, http.StatusNoContent, "смена одноразового пароля")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/projects", temp, "", nil)
+	mustStatus(t, resp, http.StatusOK, "API после смены пароля")
+}
+
+// Сценарии «Участник без роли owner не меняет настройки» и «Проект не
+// остаётся без owner» (спека domain-model).
+func TestProjectMemberRoles(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, "alice", "", "pw-alice-secret", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, "bob", "", "pw-bob-secret", false); err != nil {
+		t.Fatal(err)
+	}
+	alice := loginSession(t, srv, "alice", "pw-alice-secret")
+	bob := loginSession(t, srv, "bob", "pw-bob-secret")
+
+	resp, body := call(t, "POST", srv.URL+"/api/v1/projects", alice, "",
+		map[string]string{"name": "p", "repo": "o/r"})
+	mustStatus(t, resp, http.StatusCreated, "проект")
+	var project domain.Project
+	_ = json.Unmarshal(body, &project)
+
+	// Создатель проекта — владелец.
+	_, body = call(t, "GET", srv.URL+"/api/v1/projects/"+project.ID+"/members", alice, "", nil)
+	if !strings.Contains(string(body), `"role":"owner"`) {
+		t.Fatalf("создатель должен быть owner: %s", body)
+	}
+
+	// bob добавлен участником: видит проект, но не меняет его настройки.
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/members", alice, "",
+		map[string]string{"login": "bob"})
+	mustStatus(t, resp, http.StatusCreated, "добавление участника")
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/projects/"+project.ID+"/members", bob, "", nil)
+	mustStatus(t, resp, http.StatusOK, "участник видит состав")
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/projects/"+project.ID, bob, "", map[string]any{"name": "hijacked"})
+	mustStatus(t, resp, http.StatusForbidden, "member меняет настройки проекта")
+	resp, _ = call(t, "DELETE", srv.URL+"/api/v1/projects/"+project.ID+"/members/alice", bob, "", nil)
+	mustStatus(t, resp, http.StatusForbidden, "member исключает участника")
+
+	// Epic'и участнику доступны: роль не влияет на работу с задачами.
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/epics", bob, "",
+		map[string]string{"title": "E", "goal": ""})
+	mustStatus(t, resp, http.StatusCreated, "member создаёт epic")
+
+	// Последний владелец не понижается и не исключается.
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/projects/"+project.ID+"/members/alice", alice, "",
+		map[string]string{"role": "member"})
+	mustStatus(t, resp, http.StatusConflict, "понижение последнего owner")
+	resp, _ = call(t, "DELETE", srv.URL+"/api/v1/projects/"+project.ID+"/members/alice", alice, "", nil)
+	mustStatus(t, resp, http.StatusConflict, "исключение последнего owner")
+
+	// После повышения bob'а владельцем alice может уйти.
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/projects/"+project.ID+"/members/bob", alice, "",
+		map[string]string{"role": "owner"})
+	mustStatus(t, resp, http.StatusOK, "повышение до owner")
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/projects/"+project.ID, bob, "", map[string]any{"name": "renamed"})
+	mustStatus(t, resp, http.StatusOK, "новый owner меняет настройки")
+	resp, _ = call(t, "DELETE", srv.URL+"/api/v1/projects/"+project.ID+"/members/alice", bob, "", nil)
+	mustStatus(t, resp, http.StatusOK, "исключение бывшего owner")
+}
+
+// Находки ревью: деактивация не оставляет проект без активного владельца,
+// свой пароль сбросом не меняется.
+func TestDeactivationKeepsProjectOwner(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
+		t.Fatal(err)
+	}
+	alice, err := st.CreateUser(ctx, "alice", "", "pw-alice-secret", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, "bob", "", "pw-bob-secret", false); err != nil {
+		t.Fatal(err)
+	}
+	root := loginSession(t, srv, "root", "root-secret")
+	aliceSess := loginSession(t, srv, "alice", "pw-alice-secret")
+
+	resp, body := call(t, "POST", srv.URL+"/api/v1/projects", aliceSess, "",
+		map[string]string{"name": "p", "repo": "o/r"})
+	mustStatus(t, resp, http.StatusCreated, "проект")
+	var project domain.Project
+	_ = json.Unmarshal(body, &project)
+
+	// alice — единственный активный владелец: администратор её не отключит.
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/users/"+alice.ID, root, "", map[string]any{"disabled": true})
+	mustStatus(t, resp, http.StatusConflict, "деактивация последнего владельца проекта")
+
+	// Со вторым владельцем деактивация проходит.
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/members", aliceSess, "",
+		map[string]string{"login": "bob", "role": "owner"})
+	mustStatus(t, resp, http.StatusCreated, "второй владелец")
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/users/"+alice.ID, root, "", map[string]any{"disabled": true})
+	mustStatus(t, resp, http.StatusOK, "деактивация при втором владельце")
+
+	// Отключённый владелец не считается: bob теперь единственный активный.
+	users, err := st.ListUsers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobID := ""
+	for _, u := range users {
+		if u.Login == "bob" {
+			bobID = u.ID
+		}
+	}
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/users/"+bobID, root, "", map[string]any{"disabled": true})
+	mustStatus(t, resp, http.StatusConflict, "деактивация оставшегося владельца")
+}
+
+func TestSelfPasswordResetRejected(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
+		t.Fatal(err)
+	}
+	root := loginSession(t, srv, "root", "root-secret")
+	rootUser, err := st.Authenticate(ctx, "root", "root-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := call(t, "POST", srv.URL+"/api/v1/users/"+rootUser.ID+"/password/reset", root, "", nil)
+	mustStatus(t, resp, http.StatusUnprocessableEntity, "сброс собственного пароля")
+	// Сессия администратора цела.
+	resp, _ = call(t, "GET", srv.URL+"/api/v1/users", root, "", nil)
+	mustStatus(t, resp, http.StatusOK, "сессия после отказа")
 }

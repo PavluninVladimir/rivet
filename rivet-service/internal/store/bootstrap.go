@@ -40,7 +40,9 @@ func (s *Store) Bootstrap(ctx context.Context, adminLogin, adminPassword string)
 	var orphans int
 	if err := s.Pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM projects p
-		WHERE NOT EXISTS (SELECT 1 FROM project_members m WHERE m.project_id=p.id)`).Scan(&orphans); err != nil {
+		WHERE NOT EXISTS (
+			SELECT 1 FROM project_members m JOIN users u ON u.id=m.user_id
+			WHERE m.project_id=p.id AND m.role='owner' AND NOT u.disabled)`).Scan(&orphans); err != nil {
 		return err
 	}
 	if orphans == 0 {
@@ -53,7 +55,7 @@ func (s *Store) Bootstrap(ctx context.Context, adminLogin, adminPassword string)
 	for _, id := range ids {
 		if _, err := s.AppendEvent(ctx, EventInput{
 			ActorKind: domain.ActorSystem, ActorID: "bootstrap", Type: "project.member_backfill",
-			ProjectID: id, Text: "проект без участников передан администратору",
+			ProjectID: id, Text: "проект без активного владельца передан администратору",
 		}); err != nil {
 			return err
 		}

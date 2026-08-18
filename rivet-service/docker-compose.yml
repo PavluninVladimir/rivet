@@ -23,8 +23,9 @@ services:
       RIVET_PUBLIC_URL: ${RIVET_PUBLIC_URL:-}
       # Bootstrap первого администратора (rivetd не стартует без владельца).
       # Дефолт только для локального стенда за loopback: смени при публикации.
+      # Пароль не короче 8 символов — общее требование ко всем путям задания.
       RIVET_ADMIN_LOGIN: ${RIVET_ADMIN_LOGIN:-admin}
-      RIVET_ADMIN_PASSWORD: ${RIVET_ADMIN_PASSWORD:-admin}
+      RIVET_ADMIN_PASSWORD: ${RIVET_ADMIN_PASSWORD:-admin-local}
       RIVET_LLM_PROVIDER: ${RIVET_LLM_PROVIDER:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}

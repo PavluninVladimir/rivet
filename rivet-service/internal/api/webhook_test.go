@@ -40,7 +40,7 @@ func seedHook(t *testing.T, provider, repoPath string) hookFixture {
 	t.Helper()
 	ctx := context.Background()
 	st, srv := testServer(t)
-	owner, err := st.CreateUser(ctx, fmt.Sprintf("owner-%d", time.Now().UnixNano()), "", "pw", false)
+	owner, err := st.CreateUser(ctx, fmt.Sprintf("owner-%d", time.Now().UnixNano()), "", "pw-testpass", false)
 	if err != nil {
 		t.Fatal(err)
 	}

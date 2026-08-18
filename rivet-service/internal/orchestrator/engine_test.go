@@ -107,7 +107,7 @@ func testStore(t *testing.T) *store.Store {
 // mustOwner — владелец проектов в тестах конвейера (членство обязательно).
 func mustOwner(t *testing.T, st *store.Store) domain.User {
 	t.Helper()
-	u, err := st.CreateUser(context.Background(), fmt.Sprintf("owner-%d", time.Now().UnixNano()), "", "pw", false)
+	u, err := st.CreateUser(context.Background(), fmt.Sprintf("owner-%d", time.Now().UnixNano()), "", "pw-testpass", false)
 	if err != nil {
 		t.Fatal(err)
 	}

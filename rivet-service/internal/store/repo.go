@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -81,6 +82,17 @@ func (s *Store) CreateProjectWithRepo(ctx context.Context, name string, checks [
 		RepoPath: conn.RepoPath, DefaultBranch: conn.DefaultBranch, WebhookSecret: secret,
 	}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		// Создатель становится владельцем, поэтому его учётная запись
+		// блокируется на чтение первой: параллельная деактивация дождётся
+		// коммита и увидит новый проект, а не оставит его без владельца.
+		var disabled bool
+		if err := tx.QueryRow(ctx,
+			`SELECT disabled FROM users WHERE id=$1 FOR SHARE`, creatorID).Scan(&disabled); err != nil {
+			return nf(err)
+		}
+		if disabled {
+			return fmt.Errorf("учётная запись отключена: %w", ErrConflict)
+		}
 		credID, err := insertCredential(ctx, tx, conn, box)
 		if err != nil {
 			return err
@@ -99,8 +111,10 @@ func (s *Store) CreateProjectWithRepo(ctx context.Context, name string, checks [
 			conn.DefaultBranch, secret, cred).Scan(&p.ID, &p.Created); err != nil {
 			return err
 		}
+		// Создатель проекта становится его владельцем (спека domain-model).
 		_, err = tx.Exec(ctx,
-			`INSERT INTO project_members (project_id, user_id) VALUES ($1,$2)`, p.ID, creatorID)
+			`INSERT INTO project_members (project_id, user_id, role) VALUES ($1,$2,'owner')`,
+			p.ID, creatorID)
 		return err
 	})
 	return p, err
