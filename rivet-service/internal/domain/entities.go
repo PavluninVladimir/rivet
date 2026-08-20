@@ -229,6 +229,10 @@ var loginRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 // ValidLogin — допустим ли login: латиница/цифры/._-, до 64 символов.
 func ValidLogin(login string) bool { return loginRe.MatchString(login) }
 
+// MinPasswordLen — нижняя граница длины пароля на всех путях его задания
+// (спека access-policy, design add-user-management).
+const MinPasswordLen = 8
+
 // User — учётная запись человека (спека domain-model «Пользователи и членство
 // в проекте»). Login неизменяем: по нему атрибутируются события.
 type User struct {
@@ -238,12 +242,26 @@ type User struct {
 	Admin    bool
 	Disabled bool
 	Created  time.Time
+	// MustChangePassword — пароль сброшен администратором: вход работает,
+	// остальное API закрыто до смены пароля.
+	MustChangePassword bool
 }
+
+// Роли участника проекта: owner меняет настройки проекта, member работает
+// с задачами (спека domain-model «Пользователи и членство в проекте»).
+const (
+	RoleOwner  = "owner"
+	RoleMember = "member"
+)
+
+// ValidRole — допустима ли роль участника.
+func ValidRole(role string) bool { return role == RoleOwner || role == RoleMember }
 
 // Member — участник проекта.
 type Member struct {
 	Login string
 	Name  string
+	Role  string
 	Added time.Time
 }
 

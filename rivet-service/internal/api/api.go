@@ -47,11 +47,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
 	mux.HandleFunc("GET /api/v1/auth/me", s.me)
+	mux.HandleFunc("POST /api/v1/auth/password", s.changePassword)
 	mux.HandleFunc("GET /api/v1/users", s.listUsers)
 	mux.HandleFunc("POST /api/v1/users", s.createUser)
 	mux.HandleFunc("PATCH /api/v1/users/{id}", s.patchUser)
+	mux.HandleFunc("POST /api/v1/users/{id}/password/reset", s.resetUserPassword)
 	mux.HandleFunc("GET /api/v1/projects/{id}/members", s.listMembers)
 	mux.HandleFunc("POST /api/v1/projects/{id}/members", s.addMember)
+	mux.HandleFunc("PATCH /api/v1/projects/{id}/members/{login}", s.setMemberRole)
 	mux.HandleFunc("DELETE /api/v1/projects/{id}/members/{login}", s.removeMember)
 	mux.HandleFunc("GET /api/v1/tokens", s.listTokens)
 	mux.HandleFunc("POST /api/v1/tokens", s.createToken)
@@ -119,8 +122,13 @@ func writeErr(w http.ResponseWriter, err error) {
 		status, code = http.StatusConflict, "bad_transition"
 	case errors.Is(err, store.ErrConflict),
 		errors.Is(err, store.ErrLastAdmin),
-		errors.Is(err, store.ErrLastMember):
+		errors.Is(err, store.ErrLastMember),
+		errors.Is(err, store.ErrLastOwner):
 		status, code = http.StatusConflict, "conflict"
+	case errors.Is(err, store.ErrWeakPassword), errors.Is(err, store.ErrSamePassword):
+		status, code = http.StatusUnprocessableEntity, "invalid"
+	case errors.Is(err, store.ErrBadPassword):
+		status, code = http.StatusUnauthorized, "unauthorized"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -287,7 +295,7 @@ func (s *Server) finishProject(w http.ResponseWriter, r *http.Request, name stri
 // patchProject — правка названия и проверок (api-contract: checks
 // заменяются целиком).
 func (s *Server) patchProject(w http.ResponseWriter, r *http.Request) {
-	if !s.requireMember(w, r, r.PathValue("id")) {
+	if !s.requireOwner(w, r, r.PathValue("id")) {
 		return
 	}
 	p, err := s.St.GetProject(r.Context(), r.PathValue("id"))

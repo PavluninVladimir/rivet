@@ -195,7 +195,7 @@ func (s *Server) webhookURL(provider string) string {
 
 // PUT /api/v1/projects/{id}/credentials — замена учётных данных проекта.
 func (s *Server) putCredentials(w http.ResponseWriter, r *http.Request) {
-	if !s.requireMember(w, r, r.PathValue("id")) {
+	if !s.requireOwner(w, r, r.PathValue("id")) {
 		return
 	}
 	var in struct {

@@ -16,15 +16,15 @@ func TestBootstrap(t *testing.T) {
 		t.Fatalf("ожидался fail-fast с подсказкой, получено %v", err)
 	}
 
-	if err := s.Bootstrap(ctx, "root", "secret"); err != nil {
+	if err := s.Bootstrap(ctx, "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Authenticate(ctx, "root", "secret"); err != nil {
+	if _, err := s.Authenticate(ctx, "root", "root-secret"); err != nil {
 		t.Fatalf("вход bootstrap-админа: %v", err)
 	}
 
 	// Повторный старт идемпотентен: env игнорируется, второй админ не создаётся.
-	if err := s.Bootstrap(ctx, "other", "pw"); err != nil {
+	if err := s.Bootstrap(ctx, "other", "pw-testpass"); err != nil {
 		t.Fatal(err)
 	}
 	if n, _ := s.CountUsers(ctx); n != 1 {
@@ -36,7 +36,7 @@ func TestBootstrap(t *testing.T) {
 func TestBootstrapBackfillOrphans(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	if err := s.Bootstrap(ctx, "root", "secret"); err != nil {
+	if err := s.Bootstrap(ctx, "root", "root-secret"); err != nil {
 		t.Fatal(err)
 	}
 	owner := mustOwner(t, s)

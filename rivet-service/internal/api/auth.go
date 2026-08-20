@@ -50,6 +50,16 @@ func authExempt(r *http.Request) bool {
 	return false
 }
 
+// passwordChangeExempt — что разрешено, пока пароль сброшен администратором:
+// свой профиль, смена пароля и выход (спека access-policy, api-contract).
+func passwordChangeExempt(r *http.Request) bool {
+	switch r.URL.Path {
+	case "/api/v1/auth/me", "/api/v1/auth/password", "/api/v1/auth/logout":
+		return true
+	}
+	return false
+}
+
 // withAuth аутентифицирует запрос: cookie сессии, затем Bearer-PAT.
 // Мутации с cookie дополнительно проверяются на Origin (CSRF, решение 12).
 func (s *Server) withAuth(next http.Handler) http.Handler {
@@ -76,6 +86,12 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		}
 		if viaCookie && !s.crossSiteSafe(r) {
 			forbidden(w, "запрос отклонён CSRF-защитой (Origin не совпадает)")
+			return
+		}
+		if u.MustChangePassword && !passwordChangeExempt(r) {
+			writeJSON(w, http.StatusForbidden, map[string]apiError{"error": {
+				Code:    "password_change_required",
+				Message: "пароль сброшен администратором: смените его, чтобы продолжить"}})
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))
@@ -230,7 +246,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, s.sessionCookie(r, secret, int(store.SessionTTL.Seconds())))
-	writeJSON(w, http.StatusOK, u)
+	writeJSON(w, http.StatusOK, userDTO(u))
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -249,7 +265,71 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, currentUser(r))
+	writeJSON(w, http.StatusOK, userDTO(currentUser(r)))
+}
+
+// changePassword — смена собственного пароля (api-contract). Текущая сессия
+// сохраняется, остальные завершаются.
+func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Current string `json:"current"`
+		New     string `json:"new"`
+	}
+	if err := decode(r, &in); err != nil || in.Current == "" || in.New == "" {
+		unprocessable(w, "нужны current и new")
+		return
+	}
+	keep := ""
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		keep = c.Value
+	}
+	if err := s.St.ChangePassword(r.Context(), currentUser(r).ID, in.Current, in.New, keep); err != nil {
+		writeErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ─── DTO пользователей, участников и токенов ─────────────────────────────
+
+type userView struct {
+	ID                 string    `json:"id"`
+	Login              string    `json:"login"`
+	Name               string    `json:"name"`
+	Admin              bool      `json:"admin"`
+	Disabled           bool      `json:"disabled"`
+	CreatedAt          time.Time `json:"created_at"`
+	MustChangePassword bool      `json:"must_change_password"`
+}
+
+func userDTO(u domain.User) userView {
+	return userView{
+		ID: u.ID, Login: u.Login, Name: u.Name, Admin: u.Admin,
+		Disabled: u.Disabled, CreatedAt: u.Created, MustChangePassword: u.MustChangePassword,
+	}
+}
+
+type memberView struct {
+	Login   string    `json:"login"`
+	Name    string    `json:"name"`
+	Role    string    `json:"role"`
+	AddedAt time.Time `json:"added_at"`
+}
+
+type tokenView struct {
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	Prefix     string     `json:"prefix"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ExpiresAt  *time.Time `json:"expires_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+}
+
+func tokenDTO(t domain.AccessToken) tokenView {
+	return tokenView{
+		ID: t.ID, Name: t.Name, Prefix: t.Prefix,
+		CreatedAt: t.Created, ExpiresAt: t.ExpiresAt, LastUsedAt: t.LastUsed,
+	}
 }
 
 // sessionCookie строит cookie сессии; Secure — за TLS или доверенным прокси
@@ -276,10 +356,14 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	out, err := s.St.ListUsers(r.Context())
+	list, err := s.St.ListUsers(r.Context())
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	out := make([]userView, 0, len(list))
+	for _, u := range list {
+		out = append(out, userDTO(u))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -314,7 +398,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, u)
+	writeJSON(w, http.StatusCreated, userDTO(u))
 }
 
 func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
@@ -324,17 +408,39 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name     *string `json:"name"`
 		Disabled *bool   `json:"disabled"`
+		Admin    *bool   `json:"admin"`
 	}
-	if err := decode(r, &in); err != nil || (in.Name == nil && in.Disabled == nil) {
-		unprocessable(w, "нужны name и/или disabled")
+	if err := decode(r, &in); err != nil || (in.Name == nil && in.Disabled == nil && in.Admin == nil) {
+		unprocessable(w, "нужны name, disabled и/или admin")
 		return
 	}
-	u, err := s.St.SetUserState(r.Context(), r.PathValue("id"), in.Name, in.Disabled)
+	// События изменения прав и состояния пишет store в той же транзакции.
+	u, err := s.St.SetUserState(r.Context(), r.PathValue("id"), in.Name, in.Disabled, in.Admin, user(r))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, u)
+	writeJSON(w, http.StatusOK, userDTO(u))
+}
+
+// resetUserPassword — сброс чужого пароля администратором. Одноразовый пароль
+// существует только в этом ответе (api-contract).
+func (s *Server) resetUserPassword(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	// Свой пароль сбрасывать нельзя: сброс гасит сессии, и администратор
+	// потерял бы доступ вместе с единственной копией одноразового пароля.
+	if r.PathValue("id") == currentUser(r).ID {
+		unprocessable(w, "свой пароль меняется в профиле, а не сбросом")
+		return
+	}
+	_, password, err := s.St.ResetPassword(r.Context(), r.PathValue("id"), user(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"password": password})
 }
 
 // ─── участники проекта ───────────────────────────────────────────────────
@@ -349,6 +455,22 @@ func (s *Server) requireMember(w http.ResponseWriter, r *http.Request, projectID
 	}
 	if !ok {
 		writeErr(w, store.ErrNotFound)
+		return false
+	}
+	return true
+}
+
+// requireOwner — право менять настройки проекта (спека domain-model). Не
+// участник получает 404 (существование проекта не раскрывается), участник без
+// роли owner — 403: проект ему и так виден, скрывать нечего.
+func (s *Server) requireOwner(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	role, err := s.St.MemberRole(r.Context(), projectID, currentUser(r).ID)
+	if err != nil {
+		writeErr(w, err)
+		return false
+	}
+	if role != domain.RoleOwner {
+		forbidden(w, "нужна роль owner в проекте")
 		return false
 	}
 	return true
@@ -378,33 +500,46 @@ func (s *Server) listMembers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireMember(w, r, projectID) {
 		return
 	}
-	out, err := s.St.ListMembers(r.Context(), projectID)
+	list, err := s.St.ListMembers(r.Context(), projectID)
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	out := make([]memberView, 0, len(list))
+	for _, m := range list {
+		out = append(out, memberView{Login: m.Login, Name: m.Name, Role: m.Role, AddedAt: m.Added})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
-	if !s.requireMember(w, r, projectID) {
+	if !s.requireOwner(w, r, projectID) {
 		return
 	}
 	var in struct {
 		Login string `json:"login"`
+		Role  string `json:"role"`
 	}
 	if err := decode(r, &in); err != nil || in.Login == "" {
 		unprocessable(w, "нужен login")
 		return
 	}
-	if err := s.St.AddMember(r.Context(), projectID, in.Login); err != nil {
+	if in.Role == "" {
+		in.Role = domain.RoleMember
+	}
+	if !domain.ValidRole(in.Role) {
+		unprocessable(w, "role: owner или member")
+		return
+	}
+	if err := s.St.AddMember(r.Context(), projectID, in.Login, in.Role); err != nil {
 		writeErr(w, err)
 		return
 	}
 	if _, err := s.St.AppendEvent(r.Context(), store.EventInput{
 		ActorKind: domain.ActorUser, ActorID: user(r), Type: "project.member_added",
-		ProjectID: projectID, Text: "добавлен участник " + in.Login,
+		ProjectID: projectID, Text: "добавлен участник " + in.Login + " (" + in.Role + ")",
+		Payload: map[string]any{"login": in.Login, "role": in.Role},
 	}); err != nil {
 		writeErr(w, err)
 		return
@@ -412,9 +547,38 @@ func (s *Server) addMember(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"status": "added"})
 }
 
+// setMemberRole — изменение роли участника (api-contract).
+func (s *Server) setMemberRole(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("id")
+	if !s.requireOwner(w, r, projectID) {
+		return
+	}
+	var in struct {
+		Role string `json:"role"`
+	}
+	if err := decode(r, &in); err != nil || !domain.ValidRole(in.Role) {
+		unprocessable(w, "role: owner или member")
+		return
+	}
+	login := r.PathValue("login")
+	if err := s.St.SetMemberRole(r.Context(), projectID, login, in.Role); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if _, err := s.St.AppendEvent(r.Context(), store.EventInput{
+		ActorKind: domain.ActorUser, ActorID: user(r), Type: "project.member_role_changed",
+		ProjectID: projectID, Text: "роль участника " + login + " изменена на " + in.Role,
+		Payload: map[string]any{"login": login, "role": in.Role},
+	}); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"login": login, "role": in.Role})
+}
+
 func (s *Server) removeMember(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("id")
-	if !s.requireMember(w, r, projectID) {
+	if !s.requireOwner(w, r, projectID) {
 		return
 	}
 	login := r.PathValue("login")
@@ -435,10 +599,14 @@ func (s *Server) removeMember(w http.ResponseWriter, r *http.Request) {
 // ─── personal access tokens ──────────────────────────────────────────────
 
 func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {
-	out, err := s.St.ListAccessTokens(r.Context(), currentUser(r).ID)
+	list, err := s.St.ListAccessTokens(r.Context(), currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	out := make([]tokenView, 0, len(list))
+	for _, t := range list {
+		out = append(out, tokenDTO(t))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -458,7 +626,7 @@ func (s *Server) createToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Секрет существует только в этом ответе (api-contract).
-	writeJSON(w, http.StatusCreated, map[string]any{"token": t, "secret": secret})
+	writeJSON(w, http.StatusCreated, map[string]any{"token": tokenDTO(t), "secret": secret})
 }
 
 func (s *Server) deleteToken(w http.ResponseWriter, r *http.Request) {

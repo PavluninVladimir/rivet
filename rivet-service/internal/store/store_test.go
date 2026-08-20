@@ -64,7 +64,7 @@ var ownerSeq int
 func mustOwner(t *testing.T, s *Store) domain.User {
 	t.Helper()
 	ownerSeq++
-	u, err := s.CreateUser(context.Background(), fmt.Sprintf("owner-%d", ownerSeq), "", "pw", false)
+	u, err := s.CreateUser(context.Background(), fmt.Sprintf("owner-%d", ownerSeq), "", "pw-testpass", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -479,5 +479,131 @@ func TestStaleRunnerConsumesAttempt(t *testing.T) {
 	atts, _ := s.ListAttention(ctx, owner.ID)
 	if len(atts) != 1 || atts[0].Reason != domain.AttRunnerLost {
 		t.Fatalf("ожидали эскалацию RUNNER_LOST: %+v", atts)
+	}
+}
+
+// Находки ревью: деактивация обязана сериализоваться с правкой членства по
+// проекту, причём по всем проектам пользователя, а не только там, где он уже
+// владелец (иначе параллельное повышение до владельца пройдёт мимо проверки).
+func TestOwnerDeactivationSerializesWithMembership(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	// Админ установки отдельно: иначе сработала бы защита последнего админа
+	// и тест проверял бы не то правило.
+	if _, err := s.CreateUser(ctx, "root", "", "root-secret", true); err != nil {
+		t.Fatal(err)
+	}
+	bob, err := s.CreateUser(ctx, "bob", "", "pw-bob-secret", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, err := s.CreateUser(ctx, "alice", "", "pw-alice-secret", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.CreateProject(ctx, "p", "o/r", nil, bob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// alice пока обычный участник: её деактивация всё равно обязана ждать
+	// правку членства этого проекта.
+	if err := s.AddMember(ctx, p.ID, "alice", domain.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+
+	// Транзакция, имитирующая правку членства проекта (SetMemberRole,
+	// RemoveMember берут ту же сериализацию).
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lockProjects(ctx, tx, []string{p.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	yes := true
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.SetUserState(ctx, alice.ID, nil, &yes, nil, "root")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		_ = tx.Rollback(ctx)
+		t.Fatalf("деактивация прошла мимо сериализации по проекту: %v", err)
+	case <-time.After(700 * time.Millisecond):
+	}
+
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("деактивация после освобождения блокировки: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("деактивация не завершилась после освобождения блокировки")
+	}
+
+	// Инвариант цел: у проекта остался активный владелец.
+	var activeOwners int
+	if err := s.Pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM project_members m JOIN users u ON u.id=m.user_id
+		WHERE m.project_id=$1 AND m.role='owner' AND NOT u.disabled`, p.ID).Scan(&activeOwners); err != nil {
+		t.Fatal(err)
+	}
+	if activeOwners == 0 {
+		t.Fatal("проект остался без активного владельца")
+	}
+}
+
+// Находка ревью: пути, делающие пользователя владельцем, обязаны ждать
+// деактивацию (общий порядок: строка users, затем проект).
+func TestDisabledUserCannotBecomeOwner(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	if _, err := s.CreateUser(ctx, "root", "", "root-secret", true); err != nil {
+		t.Fatal(err)
+	}
+	alice, err := s.CreateUser(ctx, "alice", "", "pw-alice-secret", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := s.CreateUser(ctx, "bob", "", "pw-bob-secret", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := s.CreateProject(ctx, "p", "o/r", nil, alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	yes := true
+	if _, err := s.SetUserState(ctx, bob.ID, nil, &yes, nil, "root"); err != nil {
+		t.Fatal(err)
+	}
+	// Отключённого не берут в проект ни участником, ни владельцем.
+	if err := s.AddMember(ctx, p.ID, "bob", domain.RoleMember); !errors.Is(err, ErrConflict) {
+		t.Fatalf("ожидался отказ добавить отключённого, получено %v", err)
+	}
+	// Отключённый создатель не создаёт проект.
+	if _, err := s.CreateProject(ctx, "p2", "o/r2", nil, bob.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("ожидался отказ создать проект отключённым, получено %v", err)
+	}
+	// Уже состоящего в проекте участника нельзя повысить после отключения.
+	carol, err := s.CreateUser(ctx, "carol", "", "pw-carol-secret", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddMember(ctx, p.ID, "carol", domain.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetUserState(ctx, carol.ID, nil, &yes, nil, "root"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMemberRole(ctx, p.ID, "carol", domain.RoleOwner); !errors.Is(err, ErrConflict) {
+		t.Fatalf("ожидался отказ повысить отключённого, получено %v", err)
 	}
 }

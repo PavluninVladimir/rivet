@@ -35,11 +35,11 @@ func seedSessions(t *testing.T) sessionsFixture {
 	f := sessionsFixture{st: st, transcript: "строка вывода агента\n"}
 	suffix := time.Now().UnixNano()
 	f.owner, f.outsider = fmt.Sprintf("owner-%d", suffix), fmt.Sprintf("mallory-%d", suffix)
-	ownerU, err := st.CreateUser(ctx, f.owner, "", "pw", false)
+	ownerU, err := st.CreateUser(ctx, f.owner, "", "pw-testpass", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateUser(ctx, f.outsider, "", "pw", false); err != nil {
+	if _, err := st.CreateUser(ctx, f.outsider, "", "pw-testpass", false); err != nil {
 		t.Fatal(err)
 	}
 	p, err := st.CreateProject(ctx, "demo", "o/r", nil, ownerU.ID)
@@ -112,7 +112,7 @@ func envDef(key, def string) string {
 // nullable tokens, пустая история — []); не-участник получает 404.
 func TestTaskSessionsAPI(t *testing.T) {
 	f := seedSessions(t)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	resp, body := call(t, "GET", f.srv.URL+"/api/v1/tasks/"+f.task.ID+"/sessions", sess, "", nil)
 	mustStatus(t, resp, http.StatusOK, "сессии задачи")
@@ -150,7 +150,7 @@ func TestTaskSessionsAPI(t *testing.T) {
 	}
 
 	// Не-участник: 404, существование задачи не раскрывается.
-	mal := loginSession(t, f.srv, f.outsider, "pw")
+	mal := loginSession(t, f.srv, f.outsider, "pw-testpass")
 	resp, _ = call(t, "GET", f.srv.URL+"/api/v1/tasks/"+f.task.ID+"/sessions", mal, "", nil)
 	mustStatus(t, resp, http.StatusNotFound, "сессии для не-участника")
 
@@ -163,7 +163,7 @@ func TestTaskSessionsAPI(t *testing.T) {
 // 404 не различает не-участника, отсутствие транскрипта и чужой id.
 func TestSessionTranscriptAPI(t *testing.T) {
 	f := seedSessions(t)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	if f.blobUp {
 		resp, body := call(t, "GET", f.srv.URL+"/api/v1/sessions/"+f.withRef+"/transcript", sess, "", nil)
@@ -183,7 +183,7 @@ func TestSessionTranscriptAPI(t *testing.T) {
 	mustStatus(t, resp, http.StatusNotFound, "сессия без транскрипта")
 
 	// Не-участник.
-	mal := loginSession(t, f.srv, f.outsider, "pw")
+	mal := loginSession(t, f.srv, f.outsider, "pw-testpass")
 	resp, _ = call(t, "GET", f.srv.URL+"/api/v1/sessions/"+f.withRef+"/transcript", mal, "", nil)
 	mustStatus(t, resp, http.StatusNotFound, "транскрипт для не-участника")
 

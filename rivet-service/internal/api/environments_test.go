@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
@@ -33,14 +34,14 @@ func seedEnvAPI(t *testing.T) envFixture {
 	f.admin = fmt.Sprintf("boss-%d", suffix)
 	f.member = fmt.Sprintf("dev-%d", suffix)
 	f.mallory = fmt.Sprintf("mallory-%d", suffix)
-	adminU, err := st.CreateUser(ctx, f.admin, "", "pw", true)
+	adminU, err := st.CreateUser(ctx, f.admin, "", "pw-testpass", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateUser(ctx, f.member, "", "pw", false); err != nil {
+	if _, err := st.CreateUser(ctx, f.member, "", "pw-testpass", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateUser(ctx, f.mallory, "", "pw", false); err != nil {
+	if _, err := st.CreateUser(ctx, f.mallory, "", "pw-testpass", false); err != nil {
 		t.Fatal(err)
 	}
 	p, err := st.CreateProject(ctx, "demo", "o/r", nil, adminU.ID)
@@ -48,7 +49,7 @@ func seedEnvAPI(t *testing.T) envFixture {
 		t.Fatal(err)
 	}
 	f.projectID = p.ID
-	if err := st.AddMember(ctx, p.ID, f.member); err != nil {
+	if err := st.AddMember(ctx, p.ID, f.member, domain.RoleMember); err != nil {
 		t.Fatal(err)
 	}
 
@@ -73,9 +74,9 @@ func validEnvBody(name string) map[string]any {
 // CRUD окружений: только админ; участник видит список, не-участник — 404.
 func TestEnvironmentAPIRolesAndValidation(t *testing.T) {
 	f := seedEnvAPI(t)
-	admin := loginSession(t, f.srv, f.admin, "pw")
-	member := loginSession(t, f.srv, f.member, "pw")
-	mallory := loginSession(t, f.srv, f.mallory, "pw")
+	admin := loginSession(t, f.srv, f.admin, "pw-testpass")
+	member := loginSession(t, f.srv, f.member, "pw-testpass")
+	mallory := loginSession(t, f.srv, f.mallory, "pw-testpass")
 	base := f.srv.URL + "/api/v1/projects/" + f.projectID + "/environments"
 
 	// Участник не создаёт (403), админ создаёт (201).
@@ -138,8 +139,8 @@ func TestEnvironmentAPIRolesAndValidation(t *testing.T) {
 func TestEnvironmentDeployAndResume(t *testing.T) {
 	f := seedEnvAPI(t)
 	ctx := context.Background()
-	admin := loginSession(t, f.srv, f.admin, "pw")
-	member := loginSession(t, f.srv, f.member, "pw")
+	admin := loginSession(t, f.srv, f.admin, "pw-testpass")
+	member := loginSession(t, f.srv, f.member, "pw-testpass")
 	base := f.srv.URL + "/api/v1/projects/" + f.projectID + "/environments"
 
 	resp, body := call(t, "POST", base, admin, "", validEnvBody("staging"))
@@ -202,7 +203,7 @@ func TestEnvironmentDeployAndResume(t *testing.T) {
 	mustStatus(t, resp, http.StatusNotFound, "лог без blob")
 
 	// Не-участник не видит ни окружение, ни deploy.
-	mallory := loginSession(t, f.srv, f.mallory, "pw")
+	mallory := loginSession(t, f.srv, f.mallory, "pw-testpass")
 	resp, _ = call(t, "POST", envURL+"/deploy", mallory, "", nil)
 	mustStatus(t, resp, http.StatusNotFound, "deploy не-участником")
 }

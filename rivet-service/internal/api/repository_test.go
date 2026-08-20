@@ -64,10 +64,10 @@ func seedRepoAPI(t *testing.T, host *httptest.Server, withKey bool) repoFixture 
 	f := repoFixture{st: st, host: host}
 	suffix := time.Now().UnixNano()
 	f.owner, f.mallory = fmt.Sprintf("owner-%d", suffix), fmt.Sprintf("mallory-%d", suffix)
-	if _, err := st.CreateUser(ctx, f.owner, "", "pw", true); err != nil {
+	if _, err := st.CreateUser(ctx, f.owner, "", "pw-testpass", true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateUser(ctx, f.mallory, "", "pw", false); err != nil {
+	if _, err := st.CreateUser(ctx, f.mallory, "", "pw-testpass", false); err != nil {
 		t.Fatal(err)
 	}
 	key := ""
@@ -104,7 +104,7 @@ func hostRoutes(extra map[string]string) map[string]string {
 func TestScmProbe(t *testing.T) {
 	host := fakeHost(t, hostRoutes(nil), nil)
 	f := seedRepoAPI(t, host, true)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	resp, body := call(t, "POST", f.srv.URL+"/api/v1/scm/probe", sess, "", map[string]any{
 		"provider": "github", "repo_url": host.URL + "/own/proj", "token": "ghp_x",
@@ -141,7 +141,7 @@ func TestScmProbe(t *testing.T) {
 func TestCreateProjectConnectsRepo(t *testing.T) {
 	host := fakeHost(t, hostRoutes(nil), nil)
 	f := seedRepoAPI(t, host, true)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	resp, body := call(t, "POST", f.srv.URL+"/api/v1/projects", sess, "", map[string]any{
 		"name": "demo", "provider": "github", "repo_url": host.URL + "/own/proj", "token": "ghp_secret_value",
@@ -181,7 +181,7 @@ func TestCreateProjectConnectsRepo(t *testing.T) {
 	}
 
 	// Не-участник не видит подключение.
-	mal := loginSession(t, f.srv, f.mallory, "pw")
+	mal := loginSession(t, f.srv, f.mallory, "pw-testpass")
 	resp, _ = call(t, "GET", f.srv.URL+"/api/v1/projects/"+p.ID+"/repository", mal, "", nil)
 	mustStatus(t, resp, http.StatusNotFound, "состояние для не-участника")
 }
@@ -190,7 +190,7 @@ func TestCreateProjectConnectsRepo(t *testing.T) {
 func TestCreateProjectRejectsBadAccess(t *testing.T) {
 	host := fakeHost(t, map[string]string{"GET /api/v3/user": `{"login":"bot"}`}, nil)
 	f := seedRepoAPI(t, host, true)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	resp, body := call(t, "POST", f.srv.URL+"/api/v1/projects", sess, "", map[string]any{
 		"name": "demo", "provider": "github", "repo_url": host.URL + "/own/proj", "token": "ghp_x",
@@ -215,7 +215,7 @@ func TestCreateProjectCreatesRepo(t *testing.T) {
 	codes := map[string]int{"POST /api/v3/user/repos": http.StatusCreated}
 	host := fakeHost(t, routes, codes)
 	f := seedRepoAPI(t, host, true)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	resp, body := call(t, "POST", f.srv.URL+"/api/v1/projects", sess, "", map[string]any{
 		"name": "svc", "provider": "github", "base_url": host.URL, "token": "ghp_x",
@@ -247,7 +247,7 @@ func TestCreateProjectCreatesRepo(t *testing.T) {
 func TestCreateProjectWithoutSecretKey(t *testing.T) {
 	host := fakeHost(t, hostRoutes(nil), nil)
 	f := seedRepoAPI(t, host, false)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	resp, _ := call(t, "POST", f.srv.URL+"/api/v1/projects", sess, "", map[string]any{
 		"name": "demo", "provider": "github", "repo_url": host.URL + "/own/proj", "token": "ghp_x",
@@ -265,7 +265,7 @@ func TestCreateProjectWithoutSecretKey(t *testing.T) {
 func TestReplaceCredentials(t *testing.T) {
 	host := fakeHost(t, hostRoutes(nil), nil)
 	f := seedRepoAPI(t, host, true)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	_, body := call(t, "POST", f.srv.URL+"/api/v1/projects", sess, "", map[string]any{
 		"name": "demo", "provider": "github", "repo_url": host.URL + "/own/proj", "token": "ghp_first_token",
@@ -300,7 +300,7 @@ func TestReplaceCredentials(t *testing.T) {
 func TestPatchProjectSettings(t *testing.T) {
 	host := fakeHost(t, hostRoutes(nil), nil)
 	f := seedRepoAPI(t, host, true)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 	_, body := call(t, "POST", f.srv.URL+"/api/v1/projects", sess, "", map[string]any{
 		"name": "demo", "provider": "github", "repo_url": host.URL + "/own/proj", "token": "ghp_x",
 		"checks": []map[string]string{{"name": "tests", "cmd": "go test ./..."}},
@@ -333,7 +333,7 @@ func TestPatchProjectSettings(t *testing.T) {
 	mustStatus(t, resp, http.StatusUnprocessableEntity, "проверка без команды")
 
 	// Не-участник получает 404.
-	mal := loginSession(t, f.srv, f.mallory, "pw")
+	mal := loginSession(t, f.srv, f.mallory, "pw-testpass")
 	resp, _ = call(t, "PATCH", url, mal, "", map[string]any{"name": "hijack"})
 	mustStatus(t, resp, http.StatusNotFound, "правка не-участником")
 }
@@ -343,7 +343,7 @@ func TestPatchProjectSettings(t *testing.T) {
 func TestProjectResponsesHideSecrets(t *testing.T) {
 	host := fakeHost(t, hostRoutes(nil), nil)
 	f := seedRepoAPI(t, host, true)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	_, body := call(t, "POST", f.srv.URL+"/api/v1/projects", sess, "", map[string]any{
 		"name": "demo", "provider": "github", "repo_url": host.URL + "/own/proj", "token": "ghp_secret_value",
@@ -377,7 +377,7 @@ func TestProjectResponsesHideSecrets(t *testing.T) {
 func TestFakeProviderRejectedFromOutside(t *testing.T) {
 	host := fakeHost(t, hostRoutes(nil), nil)
 	f := seedRepoAPI(t, host, true)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	resp, _ := call(t, "POST", f.srv.URL+"/api/v1/scm/probe", sess, "", map[string]any{
 		"provider": "fake", "repo_url": "https://fake.local/any/repo", "token": "x",
@@ -395,7 +395,7 @@ func TestFakeProviderRejectedFromOutside(t *testing.T) {
 func TestLegacyProjectKeepsInstallationSecret(t *testing.T) {
 	host := fakeHost(t, hostRoutes(nil), nil)
 	f := seedRepoAPI(t, host, true)
-	sess := loginSession(t, f.srv, f.owner, "pw")
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
 
 	_, body := call(t, "POST", f.srv.URL+"/api/v1/projects", sess, "", map[string]any{
 		"name": "legacy", "repo": "own/legacy",
