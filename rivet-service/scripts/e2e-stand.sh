@@ -1,6 +1,7 @@
 #!/bin/sh
 # E2E-стенд: чистая база, локальный bare-репозиторий вместо GitHub,
-# rivetd с fake SCM и два runner'а с fake-агентом. Процесс остаётся
+# rivetd с fake SCM и три runner'а с fake-агентом (токен регистрации
+# выпускается через API после старта rivetd). Процесс остаётся
 # на переднем плане (rivetd), Playwright использует его как webServer.
 set -eu
 
@@ -36,37 +37,44 @@ cp -r "$SERVICE_DIR/../rivet-web/dist" "$SERVICE_DIR/internal/webui/dist"
 cleanup() { kill 0 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
-# Идентичность стенда: bootstrap-админ (см. ниже env rivetd) и PAT для
-# CLI/скриптов — выпускается фоном после старта rivetd в $STAND_DIR/token.
+# Идентичность стенда: bootstrap-админ (см. ниже env rivetd), PAT для
+# CLI/скриптов в $STAND_DIR/token и токен регистрации runner'ов. Runner'ы
+# стартуют только после выпуска токена (протокол v5: без токена
+# регистрация отклоняется), поэтому запускаются из этой же фоновой ветки.
 ADMIN_LOGIN="${E2E_ADMIN_LOGIN:-e2e-admin}"
 ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-e2e-password}"
+API="http://localhost:$HTTP_PORT/api/v1"
+AGENT_CMD="sh $SERVICE_DIR/scripts/fake-agent.sh"
 (
   for _ in $(seq 1 120); do
-    curl -sf "http://localhost:$HTTP_PORT/api/v1/health" >/dev/null 2>&1 && break
+    curl -sf "$API/health" >/dev/null 2>&1 && break
     sleep 0.5
   done
   curl -sf -c "$STAND_DIR/cookies" -H 'Content-Type: application/json' \
     -d "{\"login\":\"$ADMIN_LOGIN\",\"password\":\"$ADMIN_PASSWORD\"}" \
-    "http://localhost:$HTTP_PORT/api/v1/auth/login" >/dev/null \
+    "$API/auth/login" >/dev/null \
   && curl -sf -b "$STAND_DIR/cookies" -H 'Content-Type: application/json' \
-    -d '{"name":"e2e-stand"}' "http://localhost:$HTTP_PORT/api/v1/tokens" \
+    -d '{"name":"e2e-stand"}' "$API/tokens" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])' > "$STAND_DIR/token" \
-  || echo "e2e-stand: не удалось выпустить PAT" >&2
+  && curl -sf -b "$STAND_DIR/cookies" -H 'Content-Type: application/json' \
+    -d '{"name":"e2e-runners"}' "$API/runner-tokens" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])' > "$STAND_DIR/runner-token" \
+  || { echo "e2e-stand: не удалось выпустить токены" >&2; exit 1; }
+  RUNNER_TOKEN=$(cat "$STAND_DIR/runner-token")
+  # Runner'ы: fake-агент, клонирование из локального bare.
+  RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
+    "$STAND_DIR/rivet-runner" -id e2e-worker -agent fake -caps coding \
+    -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-worker" &
+  RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
+    "$STAND_DIR/rivet-runner" -id e2e-reviewer -agent fake -caps coding,review \
+    -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-reviewer" &
+  # Деплой-runner: окружения e2e исполняют команды локально (пустой host).
+  mkdir -p "$STAND_DIR/rw-deployer"
+  RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
+    "$STAND_DIR/rivet-runner" -id e2e-deployer -agent fake -caps deploy \
+    -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-deployer" &
+  wait
 ) &
-
-# Runner'ы: fake-агент, клонирование из локального bare.
-AGENT_CMD="sh $SERVICE_DIR/scripts/fake-agent.sh"
-RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
-  "$STAND_DIR/rivet-runner" -id e2e-worker -agent fake -caps coding \
-  -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-worker" &
-RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
-  "$STAND_DIR/rivet-runner" -id e2e-reviewer -agent fake -caps coding,review \
-  -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-reviewer" &
-# Деплой-runner: окружения e2e исполняют команды локально (пустой host).
-mkdir -p "$STAND_DIR/rw-deployer"
-RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
-  "$STAND_DIR/rivet-runner" -id e2e-deployer -agent fake -caps deploy \
-  -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-deployer" &
 
 # Control plane на переднем плане.
 # Ключ шифрования учётных данных хостингов: без него подключение

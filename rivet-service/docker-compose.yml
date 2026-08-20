@@ -1,8 +1,15 @@
+# Runner'ы подключаются с хоста: выпустите токен регистрации в консоли
+# («Управление приложением» → «Runner'ы») и запустите
+#   RIVET_RUNNER_TOKEN=rrt_... rivet-runner -plane localhost:8090 [-tls -tls-ca ca.pem]
 services:
   rivetd:
-    build: .
+    build:
+      context: .
+      args:
+        VERSION: ${RIVET_VERSION:-dev}
     ports:
-      # Только loopback: API и gRPC без аутентификации, наружу не публикуем.
+      # Только loopback: gRPC без TLS несёт токен runner'а открытым текстом,
+      # наружу не публикуем.
       - "127.0.0.1:8080:8080"   # REST API + встроенная веб-консоль
       - "127.0.0.1:8090:8090"   # gRPC для runner'ов (подключаются с хоста)
     environment:
@@ -26,9 +33,15 @@ services:
       # Пароль не короче 8 символов — общее требование ко всем путям задания.
       RIVET_ADMIN_LOGIN: ${RIVET_ADMIN_LOGIN:-admin}
       RIVET_ADMIN_PASSWORD: ${RIVET_ADMIN_PASSWORD:-admin-local}
+      # Ключ модели для декомпозиции из окружения — запасной источник: ключ,
+      # заданный в консоли («Управление приложением» → «Модели»), имеет приоритет.
       RIVET_LLM_PROVIDER: ${RIVET_LLM_PROVIDER:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # TLS протокола runner'ов (необязательно): PEM-файлы сертификата и ключа,
+      # смонтированные в контейнер. Без них порт 8090 держите за периметром.
+      RIVET_GRPC_TLS_CERT: ${RIVET_GRPC_TLS_CERT:-}
+      RIVET_GRPC_TLS_KEY: ${RIVET_GRPC_TLS_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

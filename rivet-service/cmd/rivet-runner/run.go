@@ -17,6 +17,9 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("rivet-runner", flag.ContinueOnError)
 	var cfg runner.Config
 	fs.StringVar(&cfg.PlaneAddr, "plane", envDef("RIVET_PLANE_ADDR", "localhost:8090"), "адрес gRPC control plane")
+	fs.StringVar(&cfg.Token, "token", os.Getenv("RIVET_RUNNER_TOKEN"), "токен регистрации runner'а (обязателен)")
+	fs.BoolVar(&cfg.TLS, "tls", os.Getenv("RIVET_PLANE_TLS") == "1", "подключаться к control plane по TLS")
+	fs.StringVar(&cfg.TLSCA, "tls-ca", os.Getenv("RIVET_PLANE_TLS_CA"), "корневой сертификат control plane (пусто — системные корни)")
 	fs.StringVar(&cfg.ID, "id", envDef("RIVET_RUNNER_ID", hostDefault()), "идентификатор runner'а")
 	fs.StringVar(&cfg.Agent, "agent", envDef("RIVET_AGENT", "claude-code"), "название агента")
 	fs.StringVar(&cfg.Model, "model", os.Getenv("RIVET_MODEL"), "модель агента")

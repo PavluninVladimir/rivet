@@ -1,7 +1,11 @@
 .PHONY: build test lint fuzz up down migrate proto ui e2e-stand
 
+# Версия сборки — в бинарники через ldflags (состояние установки).
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS = -X main.version=$(VERSION)
+
 build:
-	go build ./...
+	go build -ldflags "$(LDFLAGS)" ./...
 
 test:
 	go test ./...

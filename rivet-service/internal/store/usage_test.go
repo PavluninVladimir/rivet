@@ -78,7 +78,7 @@ func TestUsageSummaryNullAggregation(t *testing.T) {
 	rec("m2", taskA.ID, nil, nil) // агент не отчитался
 	rec("m3", taskB.ID, nil, nil) // по задаче B данных нет вовсе
 
-	rows, err := s.UsageSummary(ctx, owner.ID, "task", time.Time{}, time.Time{})
+	rows, err := s.UsageSummary(ctx, UsageScope{ViewerID: owner.ID}, "task", time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestUsageSummaryNullAggregation(t *testing.T) {
 	}
 
 	// Период: будущий from отсекает всё.
-	rows, err = s.UsageSummary(ctx, owner.ID, "task", time.Now().Add(time.Hour), time.Time{})
+	rows, err = s.UsageSummary(ctx, UsageScope{ViewerID: owner.ID}, "task", time.Now().Add(time.Hour), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestUsageSummaryNullAggregation(t *testing.T) {
 		t.Fatalf("будущий from: ожидалось 0 групп, получено %d", len(rows))
 	}
 	// Прошедший to отсекает всё.
-	rows, err = s.UsageSummary(ctx, owner.ID, "task", time.Time{}, time.Now().Add(-time.Hour))
+	rows, err = s.UsageSummary(ctx, UsageScope{ViewerID: owner.ID}, "task", time.Time{}, time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

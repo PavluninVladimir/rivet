@@ -74,3 +74,19 @@ func refKey(ref, bucket string) (string, error) {
 	}
 	return key, nil
 }
+
+// Ping — живая проверка хранилища для состояния установки: bucket
+// существует и доступен.
+func (s *Store) Ping(ctx context.Context) error {
+	ok, err := s.client.BucketExists(ctx, s.bucket)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("bucket %q не существует", s.bucket)
+	}
+	return nil
+}
+
+// Bucket — имя bucket'а (для состояния установки).
+func (s *Store) Bucket() string { return s.bucket }

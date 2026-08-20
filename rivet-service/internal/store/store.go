@@ -84,12 +84,21 @@ type EventFilter struct {
 	// проектов, где пользователь участник. Пустой ViewerID — системный вызов
 	// (SSE-реплей после проверки членства, внутренние потребители).
 	ViewerID string
+	// Installation — лента аудита установки: только события без проекта
+	// (спека observability «Лента аудита установки»). Фильтры проекта, Epic и
+	// задачи при этом не применяются; право администратора проверяет API.
+	Installation bool
 }
 
 func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, error) {
 	if f.Limit <= 0 || f.Limit > 500 {
 		f.Limit = 100
 	}
+	if f.Installation {
+		f.ProjectID, f.EpicID, f.TaskID = "", "", ""
+	}
+	// Обычная лента: project_id IN (...) ложен для NULL, поэтому события
+	// установки в неё не попадают — это и нужно участникам.
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id, ts, actor_kind, actor_id, type, COALESCE(project_id::text,''),
 		       COALESCE(epic_id::text,''), COALESCE(task_id::text,''), text, payload
@@ -99,10 +108,11 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 		  AND ($3 = '' OR task_id = $3::uuid)
 		  AND ($4 = '' OR type = $4)
 		  AND id > $5
-		  AND ($7 = '' OR project_id IN (SELECT project_id FROM project_members WHERE user_id = $7::uuid))
+		  AND (CASE WHEN $8 THEN project_id IS NULL
+		       ELSE ($7 = '' OR project_id IN (SELECT project_id FROM project_members WHERE user_id = $7::uuid)) END)
 		ORDER BY id
 		LIMIT $6`,
-		f.ProjectID, f.EpicID, f.TaskID, f.Type, f.AfterID, f.Limit, f.ViewerID)
+		f.ProjectID, f.EpicID, f.TaskID, f.Type, f.AfterID, f.Limit, f.ViewerID, f.Installation)
 	if err != nil {
 		return nil, err
 	}

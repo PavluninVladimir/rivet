@@ -5,6 +5,8 @@ package runner
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,18 +15,28 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 4: репозиторий проекта в Assignment (add-repo-onboarding); v3
-// добавила деплой-джобы, v2 — session_id. Runner'ы младших версий
-// отклоняются при Register.
-const protocolVersion = "4"
+// Версия 5: токен регистрации в метаданных Register и Channel
+// (add-operations-management); v4 — репозиторий проекта в Assignment, v3 —
+// деплой-джобы, v2 — session_id. Runner'ы младших версий отклоняются при Register.
+const protocolVersion = "5"
 
 type Config struct {
-	PlaneAddr    string
+	PlaneAddr string
+	// Token — токен регистрации, выданный администратором (спека runners);
+	// без него runner не подключается.
+	Token string
+	// TLS — подключаться к control plane по TLS; TLSCA — корневой сертификат
+	// (пусто — системные корни). Без TLS токен идёт открытым текстом и порт
+	// протокола обязан быть закрыт периметром.
+	TLS          bool
+	TLSCA        string
 	ID           string
 	Agent        string
 	Model        string
@@ -44,7 +56,20 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 
-	conn, err := grpc.NewClient(cfg.PlaneAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if cfg.Token == "" {
+		return errors.New("не задан токен регистрации: укажите -token или RIVET_RUNNER_TOKEN (выпускается администратором в разделе «Управление приложением»)")
+	}
+	creds := insecure.NewCredentials()
+	if cfg.TLS {
+		if cfg.TLSCA != "" {
+			if creds, err = credentials.NewClientTLSFromFile(cfg.TLSCA, ""); err != nil {
+				return fmt.Errorf("tls-ca: %w", err)
+			}
+		} else {
+			creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
+		}
+	}
+	conn, err := grpc.NewClient(cfg.PlaneAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		return err
 	}
@@ -86,6 +111,8 @@ type agent struct {
 }
 
 func (a *agent) session(ctx context.Context) error {
+	// Токен регистрации — на обоих RPC (api-contract, протокол v5).
+	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+a.cfg.Token)
 	reg, err := a.client.Register(ctx, &pb.RegisterRequest{
 		RunnerId: a.cfg.ID, Agent: a.cfg.Agent, Model: a.cfg.Model,
 		Host: hostname(), Capabilities: a.cfg.Capabilities, ProtocolVersion: protocolVersion,

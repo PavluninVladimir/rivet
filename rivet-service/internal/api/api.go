@@ -20,10 +20,21 @@ import (
 )
 
 type Server struct {
-	St      *store.Store
-	Engine  *orchestrator.Engine
-	Hub     *stream.Hub
-	Planner *planner.Planner
+	St     *store.Store
+	Engine *orchestrator.Engine
+	Hub    *stream.Hub
+	// Planner — горячо заменяемый планировщик декомпозиции; пересобирается
+	// ReloadPlanner из базы либо EnvPlanner (design add-operations-management).
+	Planner    *planner.Holder
+	EnvPlanner EnvPlanner
+	// Version, ProtocolVersion, StartedAt — для состояния установки.
+	Version         string
+	ProtocolVersion string
+	StartedAt       time.Time
+	// GRPCAddr и GRPCTLS — адрес протокола runner'ов и включён ли на нём TLS:
+	// консоль собирает из них команду запуска runner'а.
+	GRPCAddr string
+	GRPCTLS  bool
 	// Blob — хранилище транскриптов; nil (MinIO отключён) — транскрипты
 	// отвечают 404, остальной API работает.
 	Blob *blob.Store
@@ -60,6 +71,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/tokens", s.createToken)
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.deleteToken)
 	mux.HandleFunc("GET /api/v1/health", s.health)
+	mux.HandleFunc("GET /api/v1/system/status", s.systemStatus)
+	mux.HandleFunc("GET /api/v1/system/models", s.listModels)
+	mux.HandleFunc("PUT /api/v1/system/models/{provider}", s.putModel)
+	mux.HandleFunc("POST /api/v1/system/models/{provider}/check", s.checkModel)
+	mux.HandleFunc("DELETE /api/v1/system/models/{provider}", s.deleteModel)
+	mux.HandleFunc("GET /api/v1/runner-tokens", s.listRunnerTokens)
+	mux.HandleFunc("POST /api/v1/runner-tokens", s.createRunnerToken)
+	mux.HandleFunc("DELETE /api/v1/runner-tokens/{id}", s.revokeRunnerToken)
 	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
 	mux.HandleFunc("POST /api/v1/projects", s.createProject)
 	mux.HandleFunc("PATCH /api/v1/projects/{id}", s.patchProject)
@@ -123,8 +142,11 @@ func writeErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrConflict),
 		errors.Is(err, store.ErrLastAdmin),
 		errors.Is(err, store.ErrLastMember),
-		errors.Is(err, store.ErrLastOwner):
+		errors.Is(err, store.ErrLastOwner),
+		errors.Is(err, store.ErrRevoked):
 		status, code = http.StatusConflict, "conflict"
+	case errors.Is(err, store.ErrInvalid):
+		status, code = http.StatusUnprocessableEntity, "invalid"
 	case errors.Is(err, store.ErrWeakPassword), errors.Is(err, store.ErrSamePassword):
 		status, code = http.StatusUnprocessableEntity, "invalid"
 	case errors.Is(err, store.ErrBadPassword):
@@ -148,12 +170,6 @@ func decode(r *http.Request, v any) error {
 func unprocessable(w http.ResponseWriter, msg string) {
 	writeJSON(w, http.StatusUnprocessableEntity,
 		map[string]apiError{"error": {Code: "invalid", Message: msg}})
-}
-
-// ─── health ──────────────────────────────────────────────────────────────
-
-func (s *Server) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // ─── projects ────────────────────────────────────────────────────────────
@@ -653,10 +669,17 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var after int64
 	_, _ = fmt.Sscanf(q.Get("cursor"), "%d", &after)
+	var limit int
+	_, _ = fmt.Sscanf(q.Get("limit"), "%d", &limit)
+	// Лента аудита установки — только администратору (спека observability).
+	installation := q.Get("scope") == "installation"
+	if installation && !s.requireAdmin(w, r) {
+		return
+	}
 	out, err := s.St.Events(r.Context(), store.EventFilter{
 		ProjectID: q.Get("project"), EpicID: q.Get("epic"),
-		TaskID: q.Get("task"), Type: q.Get("type"), AfterID: after,
-		ViewerID: currentUser(r).ID,
+		TaskID: q.Get("task"), Type: q.Get("type"), AfterID: after, Limit: limit,
+		ViewerID: currentUser(r).ID, Installation: installation,
 	})
 	if err != nil {
 		writeErr(w, err)
@@ -678,7 +701,23 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 			*dst = t
 		}
 	}
-	out, err := s.St.UsageSummary(r.Context(), currentUser(r).ID, q.Get("group_by"), from, to)
+	groupBy := q.Get("group_by")
+	switch groupBy {
+	case "", "epic", "task", "runner", "model", "project":
+	default:
+		unprocessable(w, "group_by: ожидается epic, task, runner, model или project")
+		return
+	}
+	// Установочный срез — только администратору (спека observability
+	// «Установочный срез по проектам»).
+	scope := store.UsageScope{ViewerID: currentUser(r).ID}
+	if q.Get("scope") == "installation" {
+		if !s.requireAdmin(w, r) {
+			return
+		}
+		scope.Installation = true
+	}
+	out, err := s.St.UsageSummary(r.Context(), scope, groupBy, from, to)
 	if err != nil {
 		writeErr(w, err)
 		return

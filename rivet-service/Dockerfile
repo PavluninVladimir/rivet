@@ -6,7 +6,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/rivetd ./cmd/rivetd
+# Версия сборки — в состояние установки (GET /system/status).
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /out/rivetd ./cmd/rivetd
 
 FROM alpine:3.22
 RUN apk add --no-cache ca-certificates
