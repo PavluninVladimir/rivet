@@ -322,3 +322,41 @@ type Attention struct {
 	ClaimedBy    string
 	Created      time.Time
 }
+
+// RunnerToken — токен регистрации runner'ов (спека runners «Токены
+// регистрации runner'ов»): общий секрет установки, секрет существует
+// только в момент создания.
+type RunnerToken struct {
+	ID        string
+	Name      string
+	Prefix    string
+	CreatedBy string // логин администратора
+	Created   time.Time
+	ExpiresAt *time.Time
+	LastUsed  *time.Time
+	RevokedAt *time.Time
+}
+
+// LLMProviderState — результат последней проверки ключа у провайдера.
+type LLMProviderState string
+
+const (
+	LLMStateOK        LLMProviderState = "ok"
+	LLMStateInvalid   LLMProviderState = "invalid"
+	LLMStateUnchecked LLMProviderState = "unchecked"
+)
+
+// LLMProvider — провайдер модели декомпозиции с ключом в базе (спека
+// epic-decomposition «Настройка модели для декомпозиции»). Секрет наружу
+// не отдаётся — только префикс.
+type LLMProvider struct {
+	Provider    string
+	KeyPrefix   string
+	Model       string
+	Active      bool
+	State       LLMProviderState
+	CheckDetail string
+	CheckedAt   *time.Time
+	UpdatedAt   time.Time
+	UpdatedBy   string // логин администратора
+}

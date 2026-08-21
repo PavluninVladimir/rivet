@@ -22,12 +22,13 @@ type Completer interface {
 
 type anthropicCompleter struct {
 	client anthropic.Client
+	model  string
 }
 
 func (a anthropicCompleter) Complete(ctx context.Context, prompt string) (string, error) {
 	adaptive := anthropic.ThinkingConfigAdaptiveParam{}
 	resp, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model:     "claude-opus-5",
+		Model:     anthropic.Model(a.model),
 		MaxTokens: 16000,
 		Thinking:  anthropic.ThinkingConfigParamUnion{OfAdaptive: &adaptive},
 		Messages: []anthropic.MessageParam{
@@ -72,7 +73,7 @@ func (d deepseekCompleter) Complete(ctx context.Context, prompt string) (string,
 		return "", err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.deepseek.com/chat/completions", bytes.NewReader(body))
+		deepseekBase+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -107,15 +108,24 @@ func (d deepseekCompleter) Complete(ctx context.Context, prompt string) (string,
 	return out.Choices[0].Message.Content, nil
 }
 
-// New — planner на Anthropic API.
-func New(apiKey string) *Planner {
-	return &Planner{c: anthropicCompleter{client: anthropic.NewClient(option.WithAPIKey(apiKey))}}
+// deepseekBase — адрес DeepSeek API; переменная, чтобы тесты подменяли его.
+var deepseekBase = "https://api.deepseek.com"
+
+// New — planner на Anthropic API с моделью по умолчанию.
+func New(apiKey string) *Planner { return NewAnthropic(apiKey, "") }
+
+// NewAnthropic — planner на Anthropic API; пустая модель — по умолчанию.
+func NewAnthropic(apiKey, model string) *Planner {
+	if model == "" {
+		model = DefaultModel("anthropic")
+	}
+	return &Planner{c: anthropicCompleter{client: anthropic.NewClient(option.WithAPIKey(apiKey)), model: model}}
 }
 
 // NewDeepSeek — planner на DeepSeek API.
 func NewDeepSeek(apiKey, model string) *Planner {
 	if model == "" {
-		model = "deepseek-v4-flash"
+		model = DefaultModel("deepseek")
 	}
 	return &Planner{c: deepseekCompleter{apiKey: apiKey, model: model}}
 }

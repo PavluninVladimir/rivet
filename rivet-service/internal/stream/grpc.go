@@ -14,10 +14,13 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 4: репозиторий проекта в Assignment (add-repo-onboarding); v3
-// добавила деплой-джобы, v2 — session_id. Runner'ы младших версий
-// отклоняются при Register.
-const protocolVersion = "4"
+// Версия 5: токен регистрации в метаданных Register и Channel
+// (add-operations-management); v4 — репозиторий проекта в Assignment, v3 —
+// деплой-джобы, v2 — session_id. Runner'ы младших версий отклоняются при Register.
+const protocolVersion = "5"
+
+// ProtocolVersion — версия протокола для состояния установки.
+const ProtocolVersion = protocolVersion
 
 // Server — реализация RunnerService: приём соединений runner'ов.
 type Server struct {
@@ -138,14 +141,17 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 			return nil, err
 		}
 	}
-	err := s.St.UpsertRunner(ctx, domain.Runner{
+	// Регистрация фиксирует токен и пишет событие установки (спека runners
+	// «Регистрация фиксируется»).
+	token := tokenFromContext(ctx)
+	err := s.St.RegisterRunner(ctx, domain.Runner{
 		ID: req.RunnerId, Agent: req.Agent, Model: req.Model,
 		Host: req.Host, Capabilities: req.Capabilities,
-	})
+	}, token)
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("runner registered", "runner", req.RunnerId, "agent", req.Agent, "caps", req.Capabilities)
+	slog.Info("runner registered", "runner", req.RunnerId, "agent", req.Agent, "caps", req.Capabilities, "token", token.Name)
 	return &pb.RegisterResponse{
 		Accepted:           true,
 		HeartbeatIntervalS: int32(s.HeartbeatInterval.Seconds()),

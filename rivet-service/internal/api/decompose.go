@@ -1,7 +1,6 @@
 package api
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
@@ -19,8 +18,17 @@ func (s *Server) decompose(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	if s.Planner == nil {
-		writeErr(w, errors.New("декомпозиция недоступна: не задан ключ модели (ANTHROPIC_API_KEY или DEEPSEEK_API_KEY)"))
+	// Модель не настроена или ключ отклонён — машиночитаемый 503, не сбой
+	// (спека epic-decomposition, api-contract).
+	pl, st := s.plannerStatus()
+	switch {
+	case st.State == "invalid":
+		writeJSON(w, http.StatusServiceUnavailable, map[string]apiError{"error": {
+			Code: "planner_invalid", Message: "ключ модели отклонён провайдером: " + st.Detail}})
+		return
+	case pl == nil:
+		writeJSON(w, http.StatusServiceUnavailable, map[string]apiError{"error": {
+			Code: "no_planner", Message: "модель для декомпозиции не настроена: задайте ключ в разделе «Управление приложением» или в окружении установки"}})
 		return
 	}
 	if epic.Status != domain.EpicPlanned {
@@ -40,7 +48,7 @@ func (s *Server) decompose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	plan, err := s.Planner.Decompose(r.Context(), epic, project)
+	plan, err := pl.Decompose(r.Context(), epic, project)
 	if err != nil {
 		unprocessable(w, "план не принят: "+err.Error())
 		return

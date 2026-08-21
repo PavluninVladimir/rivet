@@ -229,15 +229,19 @@ func (s *Store) ListEpicTasks(ctx context.Context, epicID string) ([]domain.Task
 
 // ─── runners ─────────────────────────────────────────────────────────────
 
-func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
-	// Reconnect сбрасывает занятость целиком: и задачу, и публикацию
-	// (активную публикацию перед этим проваливает вызывающий — Register).
-	_, err := s.Pool.Exec(ctx, `
-		INSERT INTO runners (id, agent, model, host, capabilities, status, last_seen)
-		VALUES ($1,$2,$3,$4,$5,'idle',now())
+// upsertRunnerSQL — регистрация/переподключение: reconnect сбрасывает
+// занятость целиком, и задачу, и публикацию (активную публикацию перед этим
+// проваливает вызывающий — Register). $6 — токен регистрации (RegisterRunner).
+const upsertRunnerSQL = `
+		INSERT INTO runners (id, agent, model, host, capabilities, status, last_seen, token_id)
+		VALUES ($1,$2,$3,$4,$5,'idle',now(),$6)
 		ON CONFLICT (id) DO UPDATE SET agent=$2, model=$3, host=$4, capabilities=$5,
-			status='idle', task_id=NULL, deployment_id=NULL, ctx_pct=NULL, last_seen=now()`,
-		r.ID, r.Agent, r.Model, r.Host, r.Capabilities)
+			status='idle', task_id=NULL, deployment_id=NULL, ctx_pct=NULL, last_seen=now()`
+
+// UpsertRunner — регистрация без токена (внутренние потребители и тесты);
+// протокол использует RegisterRunner.
+func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
+	_, err := s.Pool.Exec(ctx, upsertRunnerSQL, r.ID, r.Agent, r.Model, r.Host, r.Capabilities, nil)
 	return err
 }
 
@@ -439,33 +443,50 @@ func (s *Store) RecordUsage(ctx context.Context, u UsageInput) error {
 
 // UsageRow — агрегат группы; null в токенах/стоимости = данных не было
 // ни в одной записи группы (SUM по NULL), клиент показывает «—».
+// Label — название проекта, Epic или задачи для соответствующих группировок
+// (api-contract add-operations-management); для runner'а и модели = Key.
 type UsageRow struct {
 	Key       string   `json:"key"`
+	Label     string   `json:"label"`
 	TokensIn  *int64   `json:"tokens_in"`
 	TokensOut *int64   `json:"tokens_out"`
 	CostUSD   *float64 `json:"cost_usd"`
 	Duration  int64    `json:"duration_s"`
 }
 
+// UsageScope — границы агрегации: проекты зрителя или вся установка.
+type UsageScope struct {
+	// ViewerID — чьи проекты (слой 1 access-policy); игнорируется при Installation.
+	ViewerID string
+	// Installation — установочный срез по всем проектам; право администратора
+	// проверяет API (спека observability «Установочный срез по проектам»).
+	Installation bool
+}
+
 // UsageSummary агрегирует usage за полуинтервал [from, to) по проектам
-// пользователя viewerID (слой 1 access-policy); нулевое время — граница
-// не задана.
-func (s *Store) UsageSummary(ctx context.Context, viewerID, groupBy string, from, to time.Time) ([]UsageRow, error) {
-	col := map[string]string{
-		"epic":   "COALESCE(epic_id::text,'—')",
-		"task":   "COALESCE(task_id::text,'—')",
-		"runner": "COALESCE(runner_id,'—')",
-		"model":  "COALESCE(NULLIF(model,''),'—')",
+// зрителя либо по всей установке; нулевое время — граница не задана.
+func (s *Store) UsageSummary(ctx context.Context, scope UsageScope, groupBy string, from, to time.Time) ([]UsageRow, error) {
+	type grouping struct{ key, label, join string }
+	g := map[string]grouping{
+		"epic": {"COALESCE(u.epic_id::text,'—')", "COALESCE(e.title,'')",
+			"LEFT JOIN epics e ON e.id = u.epic_id"},
+		"task": {"COALESCE(u.task_id::text,'—')", "COALESCE(t.title,'')",
+			"LEFT JOIN tasks t ON t.id = u.task_id"},
+		"project": {"u.project_id::text", "COALESCE(p.name,'')",
+			"LEFT JOIN projects p ON p.id = u.project_id"},
+		"runner": {"COALESCE(u.runner_id,'—')", "COALESCE(u.runner_id,'')", ""},
+		"model":  {"COALESCE(NULLIF(u.model,''),'—')", "COALESCE(NULLIF(u.model,''),'')", ""},
 	}[groupBy]
-	if col == "" {
-		col = "COALESCE(epic_id::text,'—')"
+	if g.key == "" {
+		g = grouping{"COALESCE(u.epic_id::text,'—')", "COALESCE(e.title,'')",
+			"LEFT JOIN epics e ON e.id = u.epic_id"}
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT `+col+` AS k, SUM(tokens_in), SUM(tokens_out), SUM(cost_usd)::float8, SUM(duration_s)
-		FROM usage_records
-		WHERE ($1::timestamptz IS NULL OR ts >= $1) AND ($2::timestamptz IS NULL OR ts < $2)
-		  AND project_id IN (SELECT project_id FROM project_members WHERE user_id = $3)
-		GROUP BY k ORDER BY k`, nullableTime(from), nullableTime(to), viewerID)
+		SELECT `+g.key+` AS k, MIN(`+g.label+`), SUM(u.tokens_in), SUM(u.tokens_out), SUM(u.cost_usd)::float8, SUM(u.duration_s)
+		FROM usage_records u `+g.join+`
+		WHERE ($1::timestamptz IS NULL OR u.ts >= $1) AND ($2::timestamptz IS NULL OR u.ts < $2)
+		  AND ($4 OR u.project_id IN (SELECT project_id FROM project_members WHERE user_id = $3))
+		GROUP BY k ORDER BY k`, nullableTime(from), nullableTime(to), scope.ViewerID, scope.Installation)
 	if err != nil {
 		return nil, err
 	}
@@ -473,7 +494,7 @@ func (s *Store) UsageSummary(ctx context.Context, viewerID, groupBy string, from
 	var out []UsageRow
 	for rows.Next() {
 		var r UsageRow
-		if err := rows.Scan(&r.Key, &r.TokensIn, &r.TokensOut, &r.CostUSD, &r.Duration); err != nil {
+		if err := rows.Scan(&r.Key, &r.Label, &r.TokensIn, &r.TokensOut, &r.CostUSD, &r.Duration); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

@@ -13,12 +13,15 @@ type Config struct {
 	DatabaseURL string
 	// HTTPAddr — адрес клиентского API (REST + SSE).
 	HTTPAddr string
-	// GRPCAddr — адрес протокола runner'ов. Граница угроз (design
-	// add-users-and-access, решение 13): протокол пока не аутентифицируется,
-	// порт обязан быть закрыт сетевым периметром (loopback или приватная
-	// сеть, как в docker-compose). Наружу не публиковать; mTLS/секрет
-	// runner'а — отдельный change.
+	// GRPCAddr — адрес протокола runner'ов. Регистрация аутентифицируется
+	// токеном (спека runners); без TLS токен идёт открытым текстом, поэтому
+	// порт без GRPCTLSCert обязан быть закрыт сетевым периметром (loopback
+	// или приватная сеть, как в docker-compose).
 	GRPCAddr string
+	// GRPCTLSCert/GRPCTLSKey — PEM-файлы сертификата и ключа: включают TLS
+	// на протоколе runner'ов. Клиентские сертификаты (mTLS) не проверяются.
+	GRPCTLSCert string
+	GRPCTLSKey  string
 
 	// S3 — объектное хранилище транскриптов (MinIO в dev).
 	S3Endpoint  string
@@ -68,6 +71,8 @@ func FromEnv() (Config, error) {
 		DatabaseURL:            getenv("RIVET_DATABASE_URL", "postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable"),
 		HTTPAddr:               getenv("RIVET_HTTP_ADDR", ":8080"),
 		GRPCAddr:               getenv("RIVET_GRPC_ADDR", ":8090"),
+		GRPCTLSCert:            os.Getenv("RIVET_GRPC_TLS_CERT"),
+		GRPCTLSKey:             os.Getenv("RIVET_GRPC_TLS_KEY"),
 		S3Endpoint:             getenv("RIVET_S3_ENDPOINT", "localhost:9000"),
 		S3AccessKey:            getenv("RIVET_S3_ACCESS_KEY", "rivet"),
 		S3SecretKey:            getenv("RIVET_S3_SECRET_KEY", "rivetsecret"),
@@ -94,6 +99,9 @@ func FromEnv() (Config, error) {
 		} else if c.DeepSeekAPIKey != "" {
 			c.LLMProvider = "deepseek"
 		}
+	}
+	if (c.GRPCTLSCert == "") != (c.GRPCTLSKey == "") {
+		return c, fmt.Errorf("RIVET_GRPC_TLS_CERT и RIVET_GRPC_TLS_KEY задаются вместе")
 	}
 	if v := os.Getenv("RIVET_RUNNER_HEARTBEAT_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)

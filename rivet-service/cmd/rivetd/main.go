@@ -11,6 +11,9 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/config"
 )
 
+// version — версия сборки; подставляется ldflags (make build), иначе dev.
+var version = "dev"
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
