@@ -88,13 +88,16 @@ type Task struct {
 	Deps         []string
 	AttemptUsed  int
 	AttemptLimit int
-	RunnerID     string
-	Branch       string
-	PRURL        string
-	BlockReason  string
-	BlockedBy    string // id задачи-первопричины при каскадной блокировке
-	Created      time.Time
-	Updated      time.Time
+	// ReviewRejections — отказы review с последнего решения человека;
+	// лимит из политики проекта (спека orchestration «Лимит попыток»).
+	ReviewRejections int
+	RunnerID         string
+	Branch           string
+	PRURL            string
+	BlockReason      string
+	BlockedBy        string // id задачи-первопричины при каскадной блокировке
+	Created          time.Time
+	Updated          time.Time
 }
 
 type Runner struct {
@@ -307,6 +310,9 @@ const (
 	AttTestFailed   AttentionReason = "TEST_FAILED"
 	AttRunnerLost   AttentionReason = "RUNNER_LOST"
 	AttDeployFailed AttentionReason = "DEPLOY_FAILED"
+	// AttPolicyChange — PR меняет файлы политики (.rivet/): авто-merge
+	// заблокирован метаправилом, нужен человек (спека access-policy).
+	AttPolicyChange AttentionReason = "POLICY_CHANGE"
 )
 
 type Attention struct {

@@ -48,7 +48,7 @@ func (g *GitHub) do(ctx context.Context, method, path string, body any, accept s
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
 	return raw, resp.StatusCode, err
 }
 
@@ -80,6 +80,11 @@ func (g *GitHub) Diff(ctx context.Context, repo string, number int) (string, err
 	}
 	if code != http.StatusOK {
 		return "", fmt.Errorf("github diff: %d: %s", code, raw)
+	}
+	// Тело режется лимитом молча: сигнализируем обрезку, чтобы решения по
+	// путям PR не принимались по части diff'а.
+	if len(raw) >= MaxResponseBytes {
+		return string(raw), ErrDiffTruncated
 	}
 	return string(raw), nil
 }

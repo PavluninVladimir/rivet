@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
@@ -159,7 +160,7 @@ func (s *Server) handleMergeEvent(w http.ResponseWriter, r *http.Request, provid
 		writeJSON(w, http.StatusOK, map[string]string{"status": "already done"})
 		return
 	}
-	if err := s.St.TransitionWithRunnerRelease(r.Context(), task.ID, domain.TaskDone,
+	if err := s.St.CompleteTask(r.Context(), task.ID,
 		store.EventInput{ActorKind: domain.ActorUser, ActorID: ev.MergedBy,
 			Type: "task.status", Text: "PR смержен вручную на хостинге",
 			Payload: map[string]any{"status": "done", "pr": ev.URL}}); err != nil {
@@ -173,7 +174,7 @@ func (s *Server) handleMergeEvent(w http.ResponseWriter, r *http.Request, provid
 	// Внешний merge запускает автопубликации так же, как merge кнопкой
 	// (спека deployment «Режимы запуска»).
 	if ev.MergeSHA != "" {
-		if err := s.St.EnqueueAutoDeployments(r.Context(), project.ID, ev.MergeSHA); err != nil {
+		if err := orchestrator.EnqueueAutoDeploys(r.Context(), s.St, project.ID, ev.MergeSHA); err != nil {
 			writeErr(w, err)
 			return
 		}

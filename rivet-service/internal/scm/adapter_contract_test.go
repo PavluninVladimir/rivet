@@ -425,3 +425,19 @@ func TestGitLabDiffFormat(t *testing.T) {
 		t.Fatalf("diff: %q %v", diff, err)
 	}
 }
+
+// GitLab с diff limits отдаёт часть изменений и overflow=true: diff
+// возвращается вместе с ErrDiffTruncated (решения по путям — fail-closed).
+func TestGitLabDiffOverflow(t *testing.T) {
+	body, _ := json.Marshal(map[string]any{"overflow": true, "changes": []map[string]string{
+		{"old_path": "a.go", "new_path": "a.go", "diff": "@@ -1 +1 @@\n-x\n+y"},
+	}})
+	srv := newStub(map[string]stubResp{
+		"GET /api/v4/projects/own%2Fproj/merge_requests/3/changes": {200, string(body)},
+	}).server(t)
+	g := &GitLab{Token: "t", Client: httpClient(), Base: srv.URL}
+	diff, err := g.Diff(context.Background(), "own/proj", 3)
+	if !errors.Is(err, ErrDiffTruncated) || !strings.Contains(diff, "a.go") {
+		t.Fatalf("overflow: %q %v", diff, err)
+	}
+}
