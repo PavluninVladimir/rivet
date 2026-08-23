@@ -13,6 +13,7 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/planner"
+	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/secretbox"
 	"github.com/PavluninVladimir/rivet/internal/store"
@@ -81,7 +82,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/runner-tokens/{id}", s.revokeRunnerToken)
 	mux.HandleFunc("GET /api/v1/projects", s.listProjects)
 	mux.HandleFunc("POST /api/v1/projects", s.createProject)
+	mux.HandleFunc("GET /api/v1/projects/{id}", s.getProject)
 	mux.HandleFunc("PATCH /api/v1/projects/{id}", s.patchProject)
+	mux.HandleFunc("GET /api/v1/system/policy", s.getInstallationPolicy)
+	mux.HandleFunc("PUT /api/v1/system/policy", s.putInstallationPolicy)
+	mux.HandleFunc("GET /api/v1/system/policy/versions", s.listInstallationPolicyVersions)
+	mux.HandleFunc("GET /api/v1/projects/{id}/policy", s.getProjectPolicy)
+	mux.HandleFunc("PUT /api/v1/projects/{id}/policy", s.putProjectPolicy)
+	mux.HandleFunc("GET /api/v1/projects/{id}/policy/versions", s.listProjectPolicyVersions)
 	mux.HandleFunc("POST /api/v1/scm/probe", s.scmProbe)
 	mux.HandleFunc("GET /api/v1/projects/{id}/repository", s.getRepository)
 	mux.HandleFunc("PUT /api/v1/projects/{id}/credentials", s.putCredentials)
@@ -103,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/environments/{id}/deployments", s.envDeployments)
 	mux.HandleFunc("GET /api/v1/deployments/{id}/log", s.deploymentLog)
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
+	mux.HandleFunc("PATCH /api/v1/tasks/{id}", s.patchTask)
 	mux.HandleFunc("GET /api/v1/tasks/{id}/sessions", s.listTaskSessions)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/transcript", s.sessionTranscript)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/answer", s.taskAnswer)
@@ -145,7 +154,7 @@ func writeErr(w http.ResponseWriter, err error) {
 		errors.Is(err, store.ErrLastOwner),
 		errors.Is(err, store.ErrRevoked):
 		status, code = http.StatusConflict, "conflict"
-	case errors.Is(err, store.ErrInvalid):
+	case errors.Is(err, store.ErrInvalid), errors.Is(err, policy.ErrInvalid):
 		status, code = http.StatusUnprocessableEntity, "invalid"
 	case errors.Is(err, store.ErrWeakPassword), errors.Is(err, store.ErrSamePassword):
 		status, code = http.StatusUnprocessableEntity, "invalid"
@@ -182,11 +191,52 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	// DTO, а не доменная структура: у неё нет json-тегов, и подключение
 	// репозитория не доехало бы до консоли.
+	ids := make([]string, 0, len(list))
+	for _, p := range list {
+		ids = append(ids, p.ID)
+	}
+	budgets, err := s.St.ProjectBudgets(r.Context(), ids, time.Now())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	out := make([]projectView, 0, len(list))
 	for _, p := range list {
-		out = append(out, projectDTO(p))
+		v := projectDTO(p)
+		b := budgets[p.ID]
+		v.Budget = &b
+		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMember(w, r, r.PathValue("id")) {
+		return
+	}
+	p, err := s.St.GetProject(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	v, err := s.projectWithBudget(r, p)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+// projectWithBudget — DTO проекта с состоянием дневного бюджета токенов
+// (api-contract add-policy-presets): лимит, засчитано сегодня, пауза до.
+func (s *Server) projectWithBudget(r *http.Request, p domain.Project) (projectView, error) {
+	v := projectDTO(p)
+	b, err := s.St.ProjectBudget(r.Context(), p.ID, time.Now())
+	if err != nil {
+		return v, err
+	}
+	v.Budget = &b
+	return v, nil
 }
 
 // createProject — подключение репозитория при создании проекта
@@ -373,6 +423,9 @@ type projectView struct {
 	RepoPath      string         `json:"repo_path"`
 	DefaultBranch string         `json:"default_branch"`
 	WebURL        string         `json:"web_url"`
+	// Budget — состояние дневного бюджета токенов; заполняется в ответах
+	// списка и карточки проекта.
+	Budget *store.BudgetState `json:"budget,omitempty"`
 }
 
 func projectDTO(p domain.Project) projectView {
@@ -540,6 +593,28 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"task": t, "timeline": timeline})
+}
+
+// patchTask — изменение лимита попыток задачи участником проекта
+// (api-contract add-policy-presets): меньше 1 и меньше израсходованных
+// попыток отклоняется.
+func (s *Server) patchTask(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTaskMember(w, r, r.PathValue("id")) {
+		return
+	}
+	var in struct {
+		AttemptLimit *int `json:"attempt_limit"`
+	}
+	if err := decode(r, &in); err != nil || in.AttemptLimit == nil {
+		unprocessable(w, "нужен attempt_limit")
+		return
+	}
+	t, err := s.St.SetTaskAttemptLimit(r.Context(), r.PathValue("id"), *in.AttemptLimit)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
 }
 
 func (s *Server) taskAnswer(w http.ResponseWriter, r *http.Request) {

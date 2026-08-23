@@ -5,9 +5,11 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 
 	"github.com/PavluninVladimir/rivet/internal/blob"
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/secretbox"
@@ -51,17 +54,25 @@ type Engine struct {
 	// публикации: лог и владелец (runner); фаза отката — durable в БД
 	deployLogs  map[string][]byte
 	deployOwner map[string]string
+	// budgetNotified — по каким проектам и за какие сутки (UTC, YYYY-MM-DD)
+	// уже написано policy.budget_exceeded: событие пишется раз в сутки на
+	// проект; после рестарта возможен повтор — допустимо (design).
+	budgetNotified map[string]string
+	// Now — источник времени для бюджета (подменяется в тестах).
+	Now func() time.Time
 }
 
 func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, heartbeat time.Duration) *Engine {
 	return &Engine{
 		St: st, SCM: adapter, Adapters: &scm.Factory{Fallback: adapter}, Blob: bl, Out: send,
 		HeartbeatTimeout: heartbeat, BaseBranch: "main",
-		stageContext: map[string]string{},
-		transcripts:  map[string][]byte{},
-		sessions:     map[string]string{},
-		deployLogs:   map[string][]byte{},
-		deployOwner:  map[string]string{},
+		stageContext:   map[string]string{},
+		transcripts:    map[string][]byte{},
+		sessions:       map[string]string{},
+		deployLogs:     map[string][]byte{},
+		deployOwner:    map[string]string{},
+		budgetNotified: map[string]string{},
+		Now:            time.Now,
 	}
 }
 
@@ -107,9 +118,16 @@ func (e *Engine) Tick(ctx context.Context) error {
 			return fmt.Errorf("recompute %s: %w", id, err)
 		}
 	}
+	// Дневной бюджет токенов (спека orchestration): проекты, исчерпавшие
+	// бюджет, исключаются из назначений до следующих суток. Выполняющиеся
+	// стадии не трогаются — граница стадии, как у паузы Epic.
+	excluded, err := e.budgetExclusions(ctx)
+	if err != nil {
+		return fmt.Errorf("budget: %w", err)
+	}
 	// Назначения: кодирование, исправления, review — до исчерпания кандидатов.
 	for {
-		a, ok, err := e.St.AssignNext(ctx)
+		a, ok, err := e.St.AssignNext(ctx, excluded)
 		if err != nil {
 			return err
 		}
@@ -119,7 +137,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		e.dispatch(ctx, a, pb.StageResult_CODING, "")
 	}
 	for {
-		a, ok, err := e.St.AssignFixing(ctx)
+		a, ok, err := e.St.AssignFixing(ctx, excluded)
 		if err != nil {
 			return err
 		}
@@ -129,7 +147,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		e.dispatch(ctx, a, pb.StageResult_FIXING, e.takeStageContext(a.Task.ID))
 	}
 	for {
-		a, ok, err := e.St.AssignTesting(ctx)
+		a, ok, err := e.St.AssignTesting(ctx, excluded)
 		if err != nil {
 			return err
 		}
@@ -139,7 +157,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		e.dispatch(ctx, a, pb.StageResult_TESTING, "")
 	}
 	for {
-		a, ok, err := e.St.AssignReview(ctx)
+		a, ok, err := e.St.AssignReview(ctx, excluded)
 		if err != nil {
 			return err
 		}
@@ -149,7 +167,12 @@ func (e *Engine) Tick(ctx context.Context) error {
 		// Контекст ревьюера: diff PR + отчёт автопроверок.
 		extra := e.takeStageContext(a.Task.ID)
 		if a.Task.PRURL != "" {
-			if d, err := e.diffForTask(ctx, a.Task); err != nil {
+			d, err := e.diffForTask(ctx, a.Task)
+			if errors.Is(err, scm.ErrDiffTruncated) {
+				// Ревьюеру начало diff'а полезнее, чем ничего.
+				d, err = d+"\n…[diff обрезан: превышен лимит чтения]\n", nil
+			}
+			if err != nil {
 				slog.Error("diff for review", "task", a.Task.ID, "err", err)
 			} else if extra != "" {
 				extra = d + "\n\n" + extra
@@ -160,6 +183,68 @@ func (e *Engine) Tick(ctx context.Context) error {
 		e.dispatch(ctx, a, pb.StageResult_REVIEW, extra)
 	}
 	return e.tickDeployments(ctx)
+}
+
+// budgetExclusions считает токены за текущие сутки по UTC и возвращает
+// проекты, которым в этот проход ничего не назначается: превысившие свой
+// бюджет и все проекты при превышении бюджета установки. Событие
+// policy.budget_exceeded пишется раз в сутки на проект.
+func (e *Engine) budgetExclusions(ctx context.Context) ([]string, error) {
+	projects, err := e.St.ProjectsWithRunningEpics(ctx)
+	if err != nil || len(projects) == 0 {
+		return nil, err
+	}
+	now := e.Now()
+	dayStart := store.DayStartUTC(now)
+	day := dayStart.Format("2006-01-02")
+	pausedUntil := dayStart.Add(24 * time.Hour)
+	inst, _, err := e.St.InstallationPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byProject, total, err := e.St.DailyTokenUsage(ctx, dayStart)
+	if err != nil {
+		return nil, err
+	}
+	var excluded []string
+	for _, pid := range projects {
+		eff, err := e.St.EffectivePolicy(ctx, pid)
+		if err != nil {
+			return nil, err
+		}
+		scope := ""
+		var used, limit int64
+		switch {
+		case inst.DailyTokenBudget != nil && total >= *inst.DailyTokenBudget:
+			scope, used, limit = "installation", total, *inst.DailyTokenBudget
+		case eff.Presets.DailyTokenBudget != nil && byProject[pid] >= *eff.Presets.DailyTokenBudget:
+			scope, used, limit = "project", byProject[pid], *eff.Presets.DailyTokenBudget
+		default:
+			continue
+		}
+		excluded = append(excluded, pid)
+		e.mu.Lock()
+		notified := e.budgetNotified[pid] == day
+		if !notified {
+			e.budgetNotified[pid] = day
+		}
+		e.mu.Unlock()
+		if notified {
+			continue
+		}
+		payload := eff.Ref()
+		payload["scope"], payload["used"], payload["limit"] = scope, used, limit
+		payload["paused_until"] = pausedUntil.Format(time.RFC3339)
+		if _, err := e.St.AppendEvent(ctx, store.EventInput{
+			ActorKind: domain.ActorSystem, Type: "policy.budget_exceeded", ProjectID: pid,
+			Text: fmt.Sprintf("планирование приостановлено: дневной бюджет токенов исчерпан (%d из %d), до %s",
+				used, limit, pausedUntil.Format(time.RFC3339)),
+			Payload: payload,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return excluded, nil
 }
 
 func (e *Engine) takeStageContext(taskID string) string {
@@ -414,7 +499,7 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 			e.stageContext[task.ID] = "Вывод проверок:\n" + sr.Detail
 			e.mu.Unlock()
 			paused := e.epicPaused(ctx, task)
-			failed, err := e.St.ConsumeAttempt(ctx, task.ID, domain.AttTestFailed, sr.Detail, !paused)
+			failed, err := e.St.ConsumeAttempt(ctx, task.ID, domain.AttTestFailed, sr.Detail, !paused, 0)
 			if err != nil || failed {
 				e.takeStageContext(task.ID)
 				return err
@@ -460,25 +545,40 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 		return e.St.TransitionWithRunnerRelease(ctx, task.ID, domain.TaskReview, ev)
 
 	case pb.StageResult_REVIEW:
+		p, _, err := e.projectOf(ctx, task)
+		if err != nil {
+			return err
+		}
+		eff, err := e.St.EffectivePolicy(ctx, p.ID)
+		if err != nil {
+			return fmt.Errorf("policy: %w", err)
+		}
 		if sr.Ok {
 			// Освобождаем runner-ревьюера, но reviewer_id на задаче сохраняем:
 			// он же признак «review выполнен» — иначе планировщик назначит review заново.
 			if err := e.St.FreeReviewerRunner(ctx, task.ID); err != nil {
 				return err
 			}
-			_, err := e.St.AppendEvent(ctx, store.EventInput{
+			if _, err := e.St.AppendEvent(ctx, store.EventInput{
 				ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "task.review_passed",
-				ProjectID: mustProject(ctx, e, task), EpicID: task.EpicID, TaskID: task.ID,
+				ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
 				Text: "review пройден — ожидание подтверждения merge",
-			})
-			return err
+			}); err != nil {
+				return err
+			}
+			// Авто-merge — гейт политики (спека task-pipeline «Merge после
+			// успешной проверки»); выключен — ждём человека, как прежде.
+			if !eff.Presets.AutoMerge {
+				return nil
+			}
+			return e.autoMerge(ctx, task, p, eff)
 		}
 		// Ревьюера освобождает ConsumeAttempt в той же транзакции, что и
 		// переход в fixing: без окна, где Tick назначил бы review повторно.
 		e.mu.Lock()
 		e.stageContext[task.ID] = "Замечания review:\n" + sr.Detail
 		e.mu.Unlock()
-		_, err := e.St.ConsumeAttempt(ctx, task.ID, domain.AttReviewLimit, sr.Detail, false)
+		_, err = e.St.ConsumeAttempt(ctx, task.ID, domain.AttReviewLimit, sr.Detail, false, eff.Presets.ReviewLimit)
 		return err
 
 	default:
@@ -495,14 +595,6 @@ func (e *Engine) epicPaused(ctx context.Context, task domain.Task) bool {
 		return false
 	}
 	return epic.Status != domain.EpicRunning
-}
-
-func mustProject(ctx context.Context, e *Engine, task domain.Task) string {
-	epic, err := e.St.GetEpic(ctx, task.EpicID)
-	if err != nil {
-		return ""
-	}
-	return epic.ProjectID
 }
 
 // failTask — невосстановимая ошибка: failed + эскалация TEST_FAILED.
@@ -547,18 +639,108 @@ func (e *Engine) OnBlocked(ctx context.Context, runnerID string, b *pb.BlockedQu
 }
 
 // MergeTask — подтверждение человека: merge PR → done → пересчёт DAG.
+// Доступно при любой политике, в том числе когда авто-merge отложен.
 func (e *Engine) MergeTask(ctx context.Context, taskID, userID string) error {
 	task, err := e.St.GetTask(ctx, taskID)
 	if err != nil {
 		return err
 	}
-	if task.Status != domain.TaskReview {
-		return domain.ErrBadTransition{Entity: "task", From: string(task.Status), To: string(domain.TaskDone)}
-	}
 	p, _, err := e.projectOf(ctx, task)
 	if err != nil {
 		return err
 	}
+	return e.mergeTask(ctx, task, p, store.EventInput{
+		ActorKind: domain.ActorUser, ActorID: userID, Type: "task.status",
+		Text: "PR смержен — задача выполнена", Payload: map[string]any{"status": "done"},
+	})
+}
+
+// autoMerge — решение точки принуждения после одобренного review при
+// включённом пресете: пути PR из diff адаптера, метаправило про файлы
+// политики (.rivet/) с эскалацией POLICY_CHANGE, защищённые пути с
+// отложенным merge, fail-closed без списка путей; иначе merge от системного
+// актора с версией политики в payload.
+func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Project, eff store.EffectivePolicy) error {
+	deferMerge := func(reason, text string, paths []string) error {
+		payload := eff.Ref()
+		payload["reason"] = reason
+		payload["paths"] = paths
+		_, err := e.St.AppendEvent(ctx, store.EventInput{
+			ActorKind: domain.ActorSystem, Type: "task.merge_deferred",
+			ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
+			Text: text + " — merge отложен политикой " + shortHash(eff.Hash), Payload: payload,
+		})
+		return err
+	}
+	var paths []string
+	if task.PRURL != "" {
+		diff, err := e.diffForTask(ctx, task)
+		if err != nil {
+			slog.Error("auto-merge: diff", "task", task.ID, "err", err)
+			return deferMerge("files_unknown", "список изменённых файлов PR получить не удалось", nil)
+		}
+		paths = policy.PathsFromDiff(diff)
+		if len(paths) == 0 && strings.TrimSpace(diff) != "" {
+			return deferMerge("files_unknown", "список изменённых файлов PR получить не удалось", nil)
+		}
+	}
+	var policyFiles, protected []string
+	for _, path := range paths {
+		switch {
+		case policy.IsPolicyPath(path):
+			policyFiles = append(policyFiles, path)
+		case policy.MatchAny(eff.Presets.HumanReviewPaths, path):
+			protected = append(protected, path)
+		}
+	}
+	if len(policyFiles) > 0 {
+		// Метаправило в коде: PR с файлами политики никогда не мержится
+		// автоматически, нужен человек (спека access-policy «Защита от самоослабления»).
+		if err := deferMerge("policy_file", "PR изменяет файлы политики ("+strings.Join(policyFiles, ", ")+")", policyFiles); err != nil {
+			return err
+		}
+		return e.St.Escalate(ctx, p.ID, task.ID, domain.AttPolicyChange,
+			"изменение политики требует человека: PR меняет "+strings.Join(policyFiles, ", "))
+	}
+	if len(protected) > 0 {
+		return deferMerge("human_review_path", "PR меняет пути, требующие человека ("+strings.Join(protected, ", ")+")", protected)
+	}
+	payload := eff.Ref()
+	payload["status"], payload["auto_merge"] = "done", true
+	err := e.mergeTask(ctx, task, p, store.EventInput{
+		ActorKind: domain.ActorSystem, Type: "task.status",
+		Text: "PR смержен автоматически по политике " + shortHash(eff.Hash) + " — задача выполнена", Payload: payload,
+	})
+	if err == nil {
+		return nil
+	}
+	// Хостинг отказал (конфликт, защита ветки): как при ручном merge задача
+	// остаётся в review, а причина видна человеку — событием, не только логом.
+	slog.Error("auto-merge", "task", task.ID, "err", err)
+	failPayload := eff.Ref()
+	failPayload["error"] = err.Error()
+	_, evErr := e.St.AppendEvent(ctx, store.EventInput{
+		ActorKind: domain.ActorSystem, Type: "task.merge_failed",
+		ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
+		Text: "авто-merge не выполнен: " + err.Error() + " — ожидание подтверждения человеком", Payload: failPayload,
+	})
+	return evErr
+}
+
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
+// mergeTask — merge PR → done → пересчёт DAG → автопубликации; ev — событие
+// перехода (человек или система).
+func (e *Engine) mergeTask(ctx context.Context, task domain.Task, p domain.Project, ev store.EventInput) error {
+	if task.Status != domain.TaskReview {
+		return domain.ErrBadTransition{Entity: "task", From: string(task.Status), To: string(domain.TaskDone)}
+	}
+	taskID := task.ID
 	mergeSHA := ""
 	if task.PRURL != "" {
 		num, err := prNumber(task.PRURL)
@@ -573,9 +755,7 @@ func (e *Engine) MergeTask(ctx context.Context, taskID, userID string) error {
 			return fmt.Errorf("merge PR: %w", err)
 		}
 	}
-	if err := e.St.TransitionWithRunnerRelease(ctx, taskID, domain.TaskDone,
-		store.EventInput{ActorKind: domain.ActorUser, ActorID: userID, Type: "task.status",
-			Text: "PR смержен — задача выполнена", Payload: map[string]any{"status": "done"}}); err != nil {
+	if err := e.St.CompleteTask(ctx, taskID, ev); err != nil {
 		return err
 	}
 	if err := e.St.RecomputeEpic(ctx, task.EpicID); err != nil {
@@ -587,14 +767,43 @@ func (e *Engine) MergeTask(ctx context.Context, taskID, userID string) error {
 
 // enqueueAutoDeploys ставит автопубликации проекта после merge (спека
 // deployment «Режимы запуска»); ошибка не валит merge — публикация догонит
-// со следующим merge, а проблему видно в логе.
+// со следующим merge, а проблему видно в логе. Политика проекта может
+// запретить автопубликацию: тогда пишется deploy.deferred и ничего не
+// ставится (спека task-pipeline «Автопубликация запрещена политикой»).
 func (e *Engine) enqueueAutoDeploys(ctx context.Context, projectID, version string) {
 	if version == "" {
 		return
 	}
-	if err := e.St.EnqueueAutoDeployments(ctx, projectID, version); err != nil {
+	if err := EnqueueAutoDeploys(ctx, e.St, projectID, version); err != nil {
 		slog.Error("enqueue auto deployments", "project", projectID, "err", err)
 	}
+}
+
+// EnqueueAutoDeploys — автопубликации после merge с проверкой пресета
+// auto_publish; общий путь для merge в Rivet и внешнего merge по webhook.
+func EnqueueAutoDeploys(ctx context.Context, st *store.Store, projectID, version string) error {
+	eff, err := st.EffectivePolicy(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if eff.Presets.AutoPublish {
+		return st.EnqueueAutoDeployments(ctx, projectID, version)
+	}
+	envs, err := st.AutoEnvironmentNames(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if len(envs) == 0 {
+		return nil
+	}
+	payload := eff.Ref()
+	payload["environments"] = envs
+	_, err = st.AppendEvent(ctx, store.EventInput{
+		ActorKind: domain.ActorSystem, Type: "deploy.deferred", ProjectID: projectID,
+		Text:    "публикация отложена политикой " + shortHash(eff.Hash) + ": автопубликация запрещена (" + strings.Join(envs, ", ") + ")",
+		Payload: payload,
+	})
+	return err
 }
 
 func (e *Engine) diffForTask(ctx context.Context, task domain.Task) (string, error) {

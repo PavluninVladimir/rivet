@@ -119,12 +119,23 @@ type NewTask struct {
 	AttemptLimit int
 }
 
+// CreateTask создаёт задачу. Лимит попыток, если не задан явно, берётся из
+// действующей политики проекта на момент создания (спека orchestration
+// «Лимит из политики проекта»); изменение политики созданные задачи не трогает.
 func (s *Store) CreateTask(ctx context.Context, epicID string, in NewTask) (domain.Task, error) {
 	if in.Estimate <= 0 {
 		in.Estimate = 1
 	}
 	if in.AttemptLimit <= 0 {
-		in.AttemptLimit = 3
+		epic, err := s.GetEpic(ctx, epicID)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		eff, err := s.EffectivePolicy(ctx, epic.ProjectID)
+		if err != nil {
+			return domain.Task{}, err
+		}
+		in.AttemptLimit = eff.Presets.AttemptLimit
 	}
 	if len(in.Capabilities) == 0 {
 		in.Capabilities = []string{"coding"}
@@ -159,7 +170,7 @@ func (s *Store) CreateTask(ctx context.Context, epicID string, in NewTask) (doma
 }
 
 const taskCols = `t.id, t.epic_id, t.num, t.title, t.description, t.status, t.estimate,
-	t.capabilities, t.criteria, t.attempt_used, t.attempt_limit,
+	t.capabilities, t.criteria, t.attempt_used, t.attempt_limit, t.review_rejections,
 	COALESCE(t.runner_id,''), COALESCE(t.branch,''), COALESCE(t.pr_url,''), COALESCE(t.block_reason,''),
 	COALESCE(t.blocked_by::text,''), t.created_at, t.updated_at`
 
@@ -167,7 +178,7 @@ func scanTask(row pgx.Row) (domain.Task, error) {
 	var t domain.Task
 	var crit []byte
 	err := row.Scan(&t.ID, &t.EpicID, &t.Num, &t.Title, &t.Description, &t.Status, &t.Estimate,
-		&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit,
+		&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit, &t.ReviewRejections,
 		&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy, &t.Created, &t.Updated)
 	if err != nil {
 		return t, err

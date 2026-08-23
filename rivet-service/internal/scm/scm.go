@@ -56,6 +56,14 @@ type RepoInfo struct {
 // ErrRepoExists — репозиторий с таким именем у владельца уже есть.
 var ErrRepoExists = errors.New("репозиторий с таким именем уже существует")
 
+// ErrDiffTruncated — diff PR не поместился в лимит чтения ответа хостинга:
+// Diff возвращает начало вместе с этой ошибкой. Для контекста ревьюера
+// начало годится, для решений политики по путям — нет (fail-closed).
+var ErrDiffTruncated = errors.New("diff PR обрезан: превышен лимит чтения")
+
+// MaxResponseBytes — лимит чтения тела ответа хостинга.
+const MaxResponseBytes = 4 << 20
+
 type Adapter interface {
 	// CreatePR создаёт pull request из ветки задачи в базовую ветку.
 	CreatePR(ctx context.Context, repo, branch, base, title, body string) (PR, error)

@@ -13,11 +13,12 @@ import (
 
 // AssignFixing назначает исполнителя задаче в fixing, оставшейся без runner'а
 // (исполнитель был освобождён на время review). ok=false — нечего назначать.
-func (s *Store) AssignFixing(ctx context.Context) (Assignment, bool, error) {
-	return s.assignStage(ctx, `
+func (s *Store) AssignFixing(ctx context.Context, excludedProjects []string) (Assignment, bool, error) {
+	return s.assignStage(ctx, excludedProjects, `
 		SELECT t.id, t.num, t.epic_id, e.project_id, r.id
 		FROM tasks t
 		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+			AND e.project_id <> ALL($1::uuid[])
 		JOIN LATERAL (
 			SELECT r.id FROM runners r
 			WHERE r.status = 'idle' AND NOT r.draining AND r.capabilities @> t.capabilities
@@ -38,11 +39,12 @@ func (s *Store) AssignFixing(ctx context.Context) (Assignment, bool, error) {
 // AssignTesting назначает исполнителя задаче в testing, оставшейся без
 // runner'а (пауза Epic остановила конвейер на границе coding → testing).
 // Ветка задачи содержит всю работу, поэтому проверки может гнать и другой runner.
-func (s *Store) AssignTesting(ctx context.Context) (Assignment, bool, error) {
-	return s.assignStage(ctx, `
+func (s *Store) AssignTesting(ctx context.Context, excludedProjects []string) (Assignment, bool, error) {
+	return s.assignStage(ctx, excludedProjects, `
 		SELECT t.id, t.num, t.epic_id, e.project_id, r.id
 		FROM tasks t
 		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+			AND e.project_id <> ALL($1::uuid[])
 		JOIN LATERAL (
 			SELECT r.id FROM runners r
 			WHERE r.status = 'idle' AND NOT r.draining AND r.capabilities @> t.capabilities
@@ -62,11 +64,12 @@ func (s *Store) AssignTesting(ctx context.Context) (Assignment, bool, error) {
 
 // AssignReview назначает ревьюера (runner с capability review, отличный от
 // исполнителя) задаче в review без ревьюера.
-func (s *Store) AssignReview(ctx context.Context) (Assignment, bool, error) {
-	return s.assignStage(ctx, `
+func (s *Store) AssignReview(ctx context.Context, excludedProjects []string) (Assignment, bool, error) {
+	return s.assignStage(ctx, excludedProjects, `
 		SELECT t.id, t.num, t.epic_id, e.project_id, r.id
 		FROM tasks t
 		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+			AND e.project_id <> ALL($1::uuid[])
 		JOIN LATERAL (
 			SELECT r.id FROM runners r
 			WHERE r.status = 'idle' AND NOT r.draining
@@ -85,13 +88,18 @@ func (s *Store) AssignReview(ctx context.Context) (Assignment, bool, error) {
 		"назначен ревьюер: ")
 }
 
-func (s *Store) assignStage(ctx context.Context, selectSQL, taskSQL, runnerSQL, eventText string) (Assignment, bool, error) {
+// assignStage — общий примитив назначений; excludedProjects — проекты на
+// паузе по бюджету (пустой список — без исключений).
+func (s *Store) assignStage(ctx context.Context, excludedProjects []string, selectSQL, taskSQL, runnerSQL, eventText string) (Assignment, bool, error) {
 	var a Assignment
 	assigned := false
+	if excludedProjects == nil {
+		excludedProjects = []string{}
+	}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var taskID, epicID, projectID, runnerID string
 		var num int64
-		err := tx.QueryRow(ctx, selectSQL).Scan(&taskID, &num, &epicID, &projectID, &runnerID)
+		err := tx.QueryRow(ctx, selectSQL, excludedProjects).Scan(&taskID, &num, &epicID, &projectID, &runnerID)
 		if err != nil {
 			if err == pgx.ErrNoRows {
 				return nil

@@ -124,7 +124,7 @@ func TestSchedulerFlow(t *testing.T) {
 	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
-	asg, ok, err := s.AssignNext(ctx)
+	asg, ok, err := s.AssignNext(ctx, nil)
 	if err != nil || !ok {
 		t.Fatalf("ожидали назначение A: ok=%v err=%v", ok, err)
 	}
@@ -135,7 +135,7 @@ func TestSchedulerFlow(t *testing.T) {
 		t.Fatal("ветка agent/task-N не проставлена")
 	}
 	// Второго назначения нет: runner занят, других ready-задач нет.
-	if _, ok, _ := s.AssignNext(ctx); ok {
+	if _, ok, _ := s.AssignNext(ctx, nil); ok {
 		t.Fatal("второе назначение не должно случиться")
 	}
 
@@ -170,7 +170,7 @@ func TestSchedulerFlow(t *testing.T) {
 	}
 
 	// B: назначение → попытки review до лимита → failed + эскалация REVIEW_LIMIT.
-	asg, ok, err = s.AssignNext(ctx)
+	asg, ok, err = s.AssignNext(ctx, nil)
 	if err != nil || !ok || asg.Task.ID != b.ID {
 		t.Fatalf("ожидали назначение B: %+v ok=%v err=%v", asg.Task.Title, ok, err)
 	}
@@ -181,7 +181,7 @@ func TestSchedulerFlow(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		failed, err := s.ConsumeAttempt(ctx, b.ID, domain.AttReviewLimit, "issues found", false)
+		failed, err := s.ConsumeAttempt(ctx, b.ID, domain.AttReviewLimit, "issues found", false, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -342,7 +342,7 @@ func TestCancelRunningTaskFreesRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "wrap", Capabilities: []string{"coding"}})
-	if _, ok, err := s.AssignNext(ctx); !ok || err != nil {
+	if _, ok, err := s.AssignNext(ctx, nil); !ok || err != nil {
 		t.Fatalf("назначение: ok=%v err=%v", ok, err)
 	}
 	if err := s.ResolveTask(ctx, a.ID, "", "vladimir", true); err != nil {
@@ -438,7 +438,7 @@ func TestStaleRunnerConsumesAttempt(t *testing.T) {
 	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := s.AssignNext(ctx); !ok || err != nil {
+	if _, ok, err := s.AssignNext(ctx, nil); !ok || err != nil {
 		t.Fatalf("назначение: ok=%v err=%v", ok, err)
 	}
 	// «Тишина»: сдвигаем last_seen в прошлое и помечаем протухших.
@@ -464,7 +464,7 @@ func TestStaleRunnerConsumesAttempt(t *testing.T) {
 	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, err := s.AssignNext(ctx); !ok || err != nil {
+	if _, ok, err := s.AssignNext(ctx, nil); !ok || err != nil {
 		t.Fatalf("повторное назначение: ok=%v err=%v", ok, err)
 	}
 	if _, err := s.Pool.Exec(ctx, `UPDATE runners SET last_seen = now() - interval '10 minutes'`); err != nil {

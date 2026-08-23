@@ -53,7 +53,7 @@ func (g *GitLab) do(ctx context.Context, method, path string, body any) ([]byte,
 		return nil, 0, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
 	return raw, resp.StatusCode, err
 }
 
@@ -94,6 +94,8 @@ func (g *GitLab) Diff(ctx context.Context, repo string, number int) (string, err
 			NewPath string `json:"new_path"`
 			Diff    string `json:"diff"`
 		} `json:"changes"`
+		// Overflow — GitLab упёрся в diff limits и отдал часть изменений.
+		Overflow bool `json:"overflow"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return "", err
@@ -101,6 +103,9 @@ func (g *GitLab) Diff(ctx context.Context, repo string, number int) (string, err
 	var b strings.Builder
 	for _, c := range out.Changes {
 		fmt.Fprintf(&b, "diff --git a/%s b/%s\n%s\n", c.OldPath, c.NewPath, c.Diff)
+	}
+	if out.Overflow {
+		return b.String(), ErrDiffTruncated
 	}
 	return b.String(), nil
 }

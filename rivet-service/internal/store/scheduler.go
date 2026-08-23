@@ -249,15 +249,22 @@ type Assignment struct {
 // AssignNext атомарно назначает одну ready-задачу подходящему свободному
 // runner'у: FOR UPDATE SKIP LOCKED с обеих сторон, один runner — одна задача.
 // ok=false — назначать нечего (нет ready-задач или подходящих runner'ов).
-func (s *Store) AssignNext(ctx context.Context) (Assignment, bool, error) {
+// excludedProjects — проекты, исключённые из назначений на этот проход
+// (дневной бюджет токенов исчерпан, спека orchestration); пустой список —
+// без исключений.
+func (s *Store) AssignNext(ctx context.Context, excludedProjects []string) (Assignment, bool, error) {
 	var a Assignment
 	assigned := false
+	if excludedProjects == nil {
+		excludedProjects = []string{}
+	}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		// Кандидат: ready-задача работающего Epic + свободный runner со всеми capabilities.
 		row := tx.QueryRow(ctx, `
 			SELECT t.id, t.num, t.epic_id, e.project_id, r.id
 			FROM tasks t
 			JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+				AND e.project_id <> ALL($1::uuid[])
 			JOIN LATERAL (
 				SELECT r.id FROM runners r
 				WHERE r.status = 'idle' AND NOT r.draining AND r.capabilities @> t.capabilities
@@ -269,7 +276,7 @@ func (s *Store) AssignNext(ctx context.Context) (Assignment, bool, error) {
 			WHERE t.status = 'ready'
 			ORDER BY t.num
 			FOR UPDATE OF t SKIP LOCKED
-			LIMIT 1`)
+			LIMIT 1`, excludedProjects)
 		var taskID, epicID, projectID, runnerID string
 		var num int64
 		if err := row.Scan(&taskID, &num, &epicID, &projectID, &runnerID); err != nil {
@@ -327,8 +334,13 @@ func freeRunner(ctx context.Context, tx pgx.Tx, taskID string) error {
 // keepRunner оставляет задачу за текущим runner'ом (исправление после провала
 // тестов в том же worktree); иначе исполнитель освобождается и задачу в fixing
 // назначит AssignFixing.
+// reviewLimit — лимит отказов review из действующей политики (спека
+// orchestration «Лимит попыток»): отказ review увеличивает отдельный
+// счётчик review_rejections, и при его достижении задача проваливается с
+// причиной review, даже если общий лимит попыток не исчерпан. 0 — лимит
+// отказов не применяется.
 func (s *Store) ConsumeAttempt(ctx context.Context, taskID string,
-	reason domain.AttentionReason, detail string, keepRunner bool) (failed bool, err error) {
+	reason domain.AttentionReason, detail string, keepRunner bool, reviewLimit int) (failed bool, err error) {
 
 	limitMsg, fixMsg := "Цикл исправления неуспешен %d раз — лимит попыток исчерпан.", "исправление (попытка %d/%d)"
 	switch reason {
@@ -340,14 +352,23 @@ func (s *Store) ConsumeAttempt(ctx context.Context, taskID string,
 			"проверки упали — исправление (попытка %d/%d)"
 	}
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		var used, limit int
+		var used, limit, rejections int
 		var from domain.TaskStatus
 		var epicID, projectID string
 		if err := tx.QueryRow(ctx, `
-			SELECT t.attempt_used, t.attempt_limit, t.status, t.epic_id, e.project_id
+			SELECT t.attempt_used, t.attempt_limit, t.review_rejections, t.status, t.epic_id, e.project_id
 			FROM tasks t JOIN epics e ON e.id=t.epic_id WHERE t.id=$1 FOR UPDATE OF t`, taskID).
-			Scan(&used, &limit, &from, &epicID, &projectID); err != nil {
+			Scan(&used, &limit, &rejections, &from, &epicID, &projectID); err != nil {
 			return err
+		}
+		reviewExhausted := false
+		if reason == domain.AttReviewLimit {
+			rejections++
+			if _, err := tx.Exec(ctx,
+				`UPDATE tasks SET review_rejections=$2 WHERE id=$1`, taskID, rejections); err != nil {
+				return err
+			}
+			reviewExhausted = reviewLimit > 0 && rejections >= reviewLimit
 		}
 		// Ревьюер (если был) освобождается здесь же: отдельная транзакция
 		// оставляла окно, в котором Tick назначал review повторно.
@@ -360,12 +381,15 @@ func (s *Store) ConsumeAttempt(ctx context.Context, taskID string,
 			return err
 		}
 		used++
-		if used >= limit {
+		if used >= limit || reviewExhausted {
 			if !from.CanTransition(domain.TaskFailed) {
 				return domain.ErrBadTransition{Entity: "task", From: string(from), To: string(domain.TaskFailed)}
 			}
 			failed = true
 			msg := fmt.Sprintf(limitMsg, used)
+			if reviewExhausted && used < limit {
+				msg = fmt.Sprintf("Review отклонил результат %d раз — лимит отказов review исчерпан.", rejections)
+			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE tasks SET status='failed', attempt_used=$2, runner_id=NULL,
 					updated_at=now() WHERE id=$1`,
@@ -502,8 +526,8 @@ func (s *Store) ResolveTask(ctx context.Context, taskID, answer, userID string, 
 			}
 		} else {
 			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET status='queued', attempt_used=0, block_reason=NULL, blocked_by=NULL,
-					runner_id=NULL, reviewer_id=NULL,
+				UPDATE tasks SET status='queued', attempt_used=0, review_rejections=0,
+					block_reason=NULL, blocked_by=NULL, runner_id=NULL, reviewer_id=NULL,
 					description = description || CASE WHEN $2 <> '' THEN E'\n\nУточнение человека: ' || $2 ELSE '' END,
 					updated_at=now()
 				WHERE id=$1`, taskID, answer); err != nil {
