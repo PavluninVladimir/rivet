@@ -155,11 +155,14 @@ type Session struct {
 	// подключения, пустой список — полная глубина без файлов.
 	Files []string
 	// Prompt — запрос сессии (для scheduler — снимок названия и описания
-	// задачи); Outcome — итог (результат стадии или вопрос blocked);
-	// LastStep — текст последнего шага (спека team-visibility).
+	// задачи, для user — промпт человека); Outcome — итог (результат стадии
+	// или вопрос blocked); LastStep — текст последнего шага (team-visibility).
 	Prompt   string
 	Outcome  string
 	LastStep string
+	// Private — содержимое сессии видно только автору (DriverID); команда
+	// видит факт (спека team-visibility «Видимость по умолчанию и приватность»).
+	Private bool
 	// Tokens — итог токенов сессии; nil = источник не сообщил (не ноль),
 	// колонка nullable с миграции 0004 (спека observability «Учёт usage»).
 	Tokens  *int64

@@ -524,7 +524,7 @@ func TestSessionPromptAndOutcome(t *testing.T) {
 	if err := driveToReviewPassed(t, f); err != nil {
 		t.Fatal(err)
 	}
-	sessions, err := f.st.ListTaskSessions(ctx, f.task.ID)
+	sessions, err := f.st.ListTaskSessions(ctx, f.task.ID, "")
 	if err != nil || len(sessions) < 3 {
 		t.Fatalf("%v: %d сессий", err, len(sessions))
 	}
@@ -550,7 +550,7 @@ func TestSessionPromptAndOutcome(t *testing.T) {
 		SessionId: f2.out.lastAssign(t).SessionId, Question: "какой формат ответа?"}); err != nil {
 		t.Fatal(err)
 	}
-	ss, _ := f2.st.ListTaskSessions(ctx, f2.task.ID)
+	ss, _ := f2.st.ListTaskSessions(ctx, f2.task.ID, "")
 	if len(ss) != 1 || !strings.Contains(ss[0].Outcome, "какой формат ответа?") {
 		t.Fatalf("outcome blocked-сессии: %+v", ss)
 	}

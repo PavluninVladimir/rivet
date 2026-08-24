@@ -158,6 +158,10 @@ message Assignment {
   string repo_url = 12;
   string git_token = 13;
   string base_branch = 14; // базовая ветка проекта
+  // Промпт пользователя (сессия доработки, add-user-sessions): при
+  // непустом значении runner использует его как промпт агента вместо
+  // сгенерированного промпта стадии.
+  string user_prompt = 15;
 }
 
 message Check {

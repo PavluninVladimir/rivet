@@ -46,7 +46,7 @@ func TestSessionFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sessions, err := s.ListTaskSessions(ctx, task.ID)
+	sessions, err := s.ListTaskSessions(ctx, task.ID, "")
 	if err != nil || len(sessions) != 2 {
 		t.Fatalf("%v %d", err, len(sessions))
 	}
@@ -68,7 +68,7 @@ func TestSessionFiles(t *testing.T) {
 	if err := s.AppendSessionFiles(ctx, full, many); err != nil {
 		t.Fatal(err)
 	}
-	sessions, _ = s.ListTaskSessions(ctx, task.ID)
+	sessions, _ = s.ListTaskSessions(ctx, task.ID, "")
 	for _, v := range sessions {
 		if v.ID == full && len(v.Files) != sessionFilesCap {
 			t.Fatalf("кап файлов: %d", len(v.Files))

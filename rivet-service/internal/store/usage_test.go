@@ -276,7 +276,7 @@ func TestListTaskSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := s.ListTaskSessions(ctx, task.ID)
+	got, err := s.ListTaskSessions(ctx, task.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

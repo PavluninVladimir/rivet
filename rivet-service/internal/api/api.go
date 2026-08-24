@@ -114,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
 	mux.HandleFunc("PATCH /api/v1/tasks/{id}", s.patchTask)
 	mux.HandleFunc("GET /api/v1/tasks/{id}/sessions", s.listTaskSessions)
+	mux.HandleFunc("POST /api/v1/tasks/{id}/sessions", s.startTaskSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/transcript", s.sessionTranscript)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/answer", s.taskAnswer)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/retry", s.taskRetry)
@@ -149,6 +150,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		status, code = http.StatusNotFound, "not_found"
 	case errors.As(err, &bad):
 		status, code = http.StatusConflict, "bad_transition"
+	case errors.Is(err, store.ErrNoRunner):
+		status, code = http.StatusConflict, "no_runner"
 	case errors.Is(err, store.ErrConflict),
 		errors.Is(err, store.ErrLastAdmin),
 		errors.Is(err, store.ErrLastMember),

@@ -47,13 +47,19 @@ func TestRealClaudeAdapter(t *testing.T) {
 	if run.Usage.TokensIn == nil || run.Usage.CostUSD == nil {
 		t.Fatal("нет usage из result")
 	}
+	// Модель вольна выбрать инструмент (Write или Bash) — принимаем шаг с
+	// файлом в files либо упоминание файла в detail Bash-команды.
 	var wroteFile bool
 	for _, s := range col.steps {
-		if s.Kind == "tool" && len(s.Files) > 0 && strings.Contains(s.Files[0], "hello.txt") {
+		if s.Kind != "tool" {
+			continue
+		}
+		if (len(s.Files) > 0 && strings.Contains(s.Files[0], "hello.txt")) ||
+			strings.Contains(s.Detail, "hello.txt") {
 			wroteFile = true
 		}
 	}
 	if !wroteFile {
-		t.Fatalf("нет шага с файлом hello.txt: %+v", col.steps)
+		t.Fatalf("нет шага про hello.txt: %+v", col.steps)
 	}
 }
