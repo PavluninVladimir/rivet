@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 
+	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
@@ -90,7 +92,8 @@ func TestRunnerRegistrationRequiresToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := dialAuthServer(t, st)
-	req := &pb.RegisterRequest{RunnerId: "r1", Agent: "fake", Host: "h", Capabilities: []string{"coding"}, ProtocolVersion: protocolVersion}
+	req := &pb.RegisterRequest{RunnerId: "r1", Agent: "fake", Host: "h", Capabilities: []string{"coding"},
+		ProtocolVersion: protocolVersion, Adapter: "wrap", Depth: "minimal"}
 
 	mustUnauth := func(what string, err error) {
 		t.Helper()
@@ -148,4 +151,50 @@ func TestRunnerRegistrationRequiresToken(t *testing.T) {
 	}
 	_, err = client.Register(metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+expired), req)
 	mustUnauth("просроченный токен", err)
+}
+
+// Runner прежней версии протокола получает понятный отказ, а не разрыв
+// (api-contract add-claude-code-adapter: v6).
+func TestRegisterRejectsOldProtocol(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	admin, err := st.CreateUser(ctx, "root", "", "pw-root-secret", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secret, err := st.CreateRunnerToken(ctx, "fleet", nil, admin.ID, admin.Login)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := dialAuthServer(t, st)
+	authed := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+secret)
+	resp, err := client.Register(authed, &pb.RegisterRequest{
+		RunnerId: "old", Agent: "fake", ProtocolVersion: "5",
+	})
+	if err != nil || resp.Accepted {
+		t.Fatalf("v5 должен отклоняться: %v %+v", err, resp)
+	}
+	if !strings.Contains(resp.Message, protocolVersion) {
+		t.Fatalf("сообщение должно называть нужную версию: %q", resp.Message)
+	}
+	// Актуальная версия с адаптером и глубиной регистрируется.
+	// Неизвестная глубина — несовместимый runner, а не молчаливый minimal.
+	resp, err = client.Register(authed, &pb.RegisterRequest{
+		RunnerId: "odd", Agent: "x", Capabilities: []string{"coding"},
+		ProtocolVersion: protocolVersion, Adapter: "sdk", Depth: "superdeep",
+	})
+	if err != nil || resp.Accepted || !strings.Contains(resp.Message, "глубина") {
+		t.Fatalf("неизвестная глубина должна отклоняться: %v %+v", err, resp)
+	}
+	resp, err = client.Register(authed, &pb.RegisterRequest{
+		RunnerId: "fresh", Agent: "claude-code", Capabilities: []string{"coding"},
+		ProtocolVersion: protocolVersion, Adapter: "claude-code", Depth: "full",
+	})
+	if err != nil || !resp.Accepted {
+		t.Fatalf("v6 должен регистрироваться: %v %+v", err, resp)
+	}
+	runners, err := st.ListRunners(ctx)
+	if err != nil || len(runners) != 1 || runners[0].Adapter != "claude-code" || runners[0].Depth != domain.DepthFull {
+		t.Fatalf("адаптер и глубина в списке: %v %+v", err, runners)
+	}
 }

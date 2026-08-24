@@ -22,10 +22,11 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 5: токен регистрации в метаданных Register и Channel
-// (add-operations-management); v4 — репозиторий проекта в Assignment, v3 —
-// деплой-джобы, v2 — session_id. Runner'ы младших версий отклоняются при Register.
-const protocolVersion = "5"
+// Версия 6: адаптер и глубина данных в Register, структурированные шаги
+// в AgentEvent (add-claude-code-adapter); v5 — токены регистрации, v4 —
+// репозиторий проекта в Assignment, v3 — деплой-джобы, v2 — session_id.
+// Runner'ы младших версий отклоняются при Register.
+const protocolVersion = "6"
 
 type Config struct {
 	PlaneAddr string
@@ -45,12 +46,20 @@ type Config struct {
 	Workdir      string
 	// GitBase — префикс URL клонирования; file://-префикс используют e2e-стенды.
 	GitBase string
+	// Adapter — способ подключения агента: claude-code (нативный, полная
+	// глубина) или wrap (универсальная PTY-обёртка, минимальная).
+	Adapter string
+	// ClaudeBin — бинарник Claude Code для нативного адаптера (подмена в
+	// тестах и на стендах); пусто — «claude» из PATH.
+	ClaudeBin string
 }
 
 func Run(ctx context.Context, cfg Config) error {
 	if err := os.MkdirAll(cfg.Workdir, 0o755); err != nil {
 		return err
 	}
+	// Остатки хуков прошлых запусков (сокеты, настройки) не нужны никому.
+	_ = os.RemoveAll(cfg.Workdir + "/hooks")
 	outbox, err := newOutbox(cfg.Workdir + "/outbox")
 	if err != nil {
 		return err
@@ -76,7 +85,7 @@ func Run(ctx context.Context, cfg Config) error {
 	defer conn.Close()
 	client := pb.NewRunnerServiceClient(conn)
 
-	r := &agent{cfg: cfg, client: client, outbox: outbox}
+	r := &agent{cfg: cfg, client: client, outbox: outbox, adapter: newAdapter(cfg)}
 	r.ctxPct.Store(ctxUnknown)
 	// Переподключение с бэкоффом: соединение всегда исходящее от runner'а.
 	for {
@@ -98,9 +107,10 @@ func Run(ctx context.Context, cfg Config) error {
 const ctxUnknown = -1
 
 type agent struct {
-	cfg    Config
-	client pb.RunnerServiceClient
-	outbox *outbox
+	cfg     Config
+	client  pb.RunnerServiceClient
+	outbox  *outbox
+	adapter adapter
 
 	// Последний ctx_pct из USAGE:-отчёта агента; ctxUnknown до первого отчёта
 	// и после нового Assignment (design add-usage-metering, решение 5).
@@ -116,6 +126,7 @@ func (a *agent) session(ctx context.Context) error {
 	reg, err := a.client.Register(ctx, &pb.RegisterRequest{
 		RunnerId: a.cfg.ID, Agent: a.cfg.Agent, Model: a.cfg.Model,
 		Host: hostname(), Capabilities: a.cfg.Capabilities, ProtocolVersion: protocolVersion,
+		Adapter: a.cfg.Adapter, Depth: depthOf(a.cfg.Adapter),
 	})
 	if err != nil {
 		return err

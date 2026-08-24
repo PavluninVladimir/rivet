@@ -244,15 +244,31 @@ func (s *Store) ListEpicTasks(ctx context.Context, epicID string) ([]domain.Task
 // занятость целиком, и задачу, и публикацию (активную публикацию перед этим
 // проваливает вызывающий — Register). $6 — токен регистрации (RegisterRunner).
 const upsertRunnerSQL = `
-		INSERT INTO runners (id, agent, model, host, capabilities, status, last_seen, token_id)
-		VALUES ($1,$2,$3,$4,$5,'idle',now(),$6)
+		INSERT INTO runners (id, agent, model, host, capabilities, adapter, depth, status, last_seen, token_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,'idle',now(),$8)
 		ON CONFLICT (id) DO UPDATE SET agent=$2, model=$3, host=$4, capabilities=$5,
+			adapter=$6, depth=$7,
 			status='idle', task_id=NULL, deployment_id=NULL, ctx_pct=NULL, last_seen=now()`
+
+// normalizeAdapter — значения адаптера и глубины по умолчанию для
+// внутренних потребителей и старых вызовов (обёртка, минимальная глубина).
+func normalizeAdapter(r domain.Runner) domain.Runner {
+	if r.Adapter == "" {
+		r.Adapter = "wrap"
+	}
+	switch r.Depth {
+	case domain.DepthFull, domain.DepthPartial, domain.DepthMinimal:
+	default:
+		r.Depth = domain.DepthMinimal
+	}
+	return r
+}
 
 // UpsertRunner — регистрация без токена (внутренние потребители и тесты);
 // протокол использует RegisterRunner.
 func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
-	_, err := s.Pool.Exec(ctx, upsertRunnerSQL, r.ID, r.Agent, r.Model, r.Host, r.Capabilities, nil)
+	r = normalizeAdapter(r)
+	_, err := s.Pool.Exec(ctx, upsertRunnerSQL, r.ID, r.Agent, r.Model, r.Host, r.Capabilities, r.Adapter, r.Depth, nil)
 	return err
 }
 
@@ -265,7 +281,7 @@ func (s *Store) TouchRunner(ctx context.Context, id string, ctxPct *int) error {
 
 func (s *Store) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, agent, model, host, capabilities, status, COALESCE(task_id::text,''), ctx_pct, draining, last_seen
+		SELECT id, agent, model, host, capabilities, status, COALESCE(task_id::text,''), ctx_pct, draining, last_seen, adapter, depth
 		FROM runners ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -275,7 +291,7 @@ func (s *Store) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	for rows.Next() {
 		var r domain.Runner
 		if err := rows.Scan(&r.ID, &r.Agent, &r.Model, &r.Host, &r.Capabilities,
-			&r.Status, &r.TaskID, &r.CtxPct, &r.Draining, &r.LastSeen); err != nil {
+			&r.Status, &r.TaskID, &r.CtxPct, &r.Draining, &r.LastSeen, &r.Adapter, &r.Depth); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -338,12 +354,18 @@ func (s *Store) ClaimAttention(ctx context.Context, id, login, userID string) er
 // ─── sessions ────────────────────────────────────────────────────────────
 
 func (s *Store) CreateSession(ctx context.Context, in domain.Session) (string, error) {
+	// files: NULL — недоступно для способа подключения; при полной глубине
+	// список начинается пустым («недоступно ≠ пусто», спека agent-integration).
+	var files []string
+	if in.Depth == domain.DepthFull {
+		files = []string{}
+	}
 	var id string
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO sessions (task_id, attempt, driver_kind, driver_id, agent, model, depth, scope)
-		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''))
+		INSERT INTO sessions (task_id, attempt, driver_kind, driver_id, agent, model, depth, scope, files)
+		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9)
 		RETURNING id`,
-		in.TaskID, in.Attempt, in.DriverKind, in.DriverID, in.Agent, in.Model, in.Depth, in.Scope).Scan(&id)
+		in.TaskID, in.Attempt, in.DriverKind, in.DriverID, in.Agent, in.Model, in.Depth, in.Scope, files).Scan(&id)
 	return id, err
 }
 
@@ -354,7 +376,7 @@ func (s *Store) ListTaskSessions(ctx context.Context, taskID string) ([]domain.S
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id::text, COALESCE(task_id::text,''), attempt, driver_kind, driver_id,
 		       agent, model, depth, COALESCE(scope,''), COALESCE(transcript_ref,''),
-		       tokens, started_at, ended_at
+		       tokens, started_at, ended_at, files
 		FROM sessions WHERE task_id=$1 ORDER BY started_at`, taskID)
 	if err != nil {
 		return nil, err
@@ -365,7 +387,7 @@ func (s *Store) ListTaskSessions(ctx context.Context, taskID string) ([]domain.S
 		var v domain.Session
 		if err := rows.Scan(&v.ID, &v.TaskID, &v.Attempt, &v.DriverKind, &v.DriverID,
 			&v.Agent, &v.Model, &v.Depth, &v.Scope, &v.TranscriptRef,
-			&v.Tokens, &v.Started, &v.Ended); err != nil {
+			&v.Tokens, &v.Started, &v.Ended, &v.Files); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -400,6 +422,37 @@ func (s *Store) OpenSession(ctx context.Context, taskID string) (string, error) 
 		return "", nil
 	}
 	return id, err
+}
+
+// RunnerDepth — глубина данных адаптера runner'а (для создания сессии).
+func (s *Store) RunnerDepth(ctx context.Context, runnerID string) (domain.SessionDepth, error) {
+	var d domain.SessionDepth
+	err := s.Pool.QueryRow(ctx, `SELECT depth FROM runners WHERE id=$1`, runnerID).Scan(&d)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.DepthMinimal, nil
+	}
+	return d, err
+}
+
+// sessionFilesCap — предел накопленных путей на сессию: защита event log и
+// DTO от разгона (спека «Шаги сессии»: список уникальных путей).
+const sessionFilesCap = 500
+
+// AppendSessionFiles добавляет затронутые файлы к сессии полной глубины:
+// уникальные, в порядке первого появления, не больше sessionFilesCap.
+// Сессии с files IS NULL (минимальная глубина) не трогаются.
+func (s *Store) AppendSessionFiles(ctx context.Context, sessionID string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE sessions SET files = (
+			SELECT array_agg(p ORDER BY ord) FROM (
+				SELECT p, min(ord) AS ord FROM unnest(files || $2::text[]) WITH ORDINALITY AS u(p, ord)
+				GROUP BY p ORDER BY ord LIMIT $3
+			) q)
+		WHERE id=$1 AND files IS NOT NULL`, sessionID, paths, sessionFilesCap)
+	return err
 }
 
 // EndSession закрывает сессию и подводит итог токенов по usage-записям её

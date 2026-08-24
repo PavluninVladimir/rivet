@@ -39,18 +39,31 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Transcript{
 			Transcript: &pb.TranscriptChunk{TaskId: as.TaskId, SessionId: as.SessionId, Data: data}}})
 	}
-	// report — USAGE:-отчёт запуска агента этой стадии; нулевые указатели =
-	// данных нет (спека agent-integration «Отчёт usage через универсальную обёртку»).
+	// sink — потоки запуска агента: транскрипт и структурированные шаги
+	// адаптера полной глубины (спека agent-integration «Шаги сессии»).
+	sink := runSink{
+		transcript: transcript,
+		step: func(ev *pb.AgentEvent) {
+			ev.TaskId, ev.SessionId = as.TaskId, as.SessionId
+			emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Event{Event: ev}})
+		},
+	}
+	// report — расход запуска агента этой стадии (USAGE: у обёртки, итог
+	// запуска у нативного адаптера); нулевые указатели = данных нет.
 	var report usageReport
-	noteUsage := func(out string) {
-		report = parseUsage(out)
+	model := a.cfg.Model
+	noteUsage := func(run agentRun) {
+		report = run.Usage
+		if run.Model != "" {
+			model = run.Model
+		}
 		if report.CtxPct != nil {
 			a.ctxPct.Store(*report.CtxPct)
 		}
 	}
 	emitUsage := func() {
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Usage{
-			Usage: &pb.Usage{TaskId: as.TaskId, SessionId: as.SessionId, Model: a.cfg.Model,
+			Usage: &pb.Usage{TaskId: as.TaskId, SessionId: as.SessionId, Model: model,
 				DurationS: int32(time.Since(started).Seconds()),
 				TokensIn:  report.TokensIn, TokensOut: report.TokensOut,
 				CostUsd: report.CostUSD, CtxPct: report.CtxPct}}})
@@ -71,9 +84,12 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	switch as.Stage {
 	case pb.StageResult_CODING, pb.StageResult_FIXING:
 		step("агент приступил к реализации")
-		out, err := a.runAgent(sctx, ws, codingPrompt(as), transcript)
-		noteUsage(out)
-		if q, blocked := parseBlocked(out); blocked {
+		run, err := a.adapter.Run(sctx, ws, codingPrompt(as), sink)
+		noteUsage(run)
+		out := run.FinalText
+		// Блокировка распознаётся только у успешного запуска: агент,
+		// упавший с ошибкой, не эскалируется как «вопрос человеку».
+		if q, blocked := parseBlocked(out); blocked && err == nil {
 			// Расход заблокировавшегося запуска тоже учитывается: стадия
 			// завершится позже, а токены уже потрачены.
 			emitUsage()
@@ -122,13 +138,13 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 
 	case pb.StageResult_REVIEW:
 		step("независимое review изменений")
-		out, err := a.runAgent(sctx, ws, reviewPrompt(as), transcript)
-		noteUsage(out)
+		run, err := a.adapter.Run(sctx, ws, reviewPrompt(as), sink)
+		noteUsage(run)
 		if err != nil {
 			result(false, fmt.Sprintf("ревьюер завершился с ошибкой: %v", err))
 			return
 		}
-		approved, verdict := parseVerdict(out)
+		approved, verdict := parseVerdict(run.FinalText)
 		result(approved, verdict)
 
 	default:
@@ -278,21 +294,6 @@ func (a *agent) gitCredentials(as *pb.Assignment) ([]string, func(), error) {
 		"RIVET_GIT_USER=rivet",
 		"RIVET_GIT_TOKEN=" + as.GitToken,
 	}, cleanup, nil
-}
-
-// runAgent запускает CLI-агента в PTY; промпт кладётся во временный файл,
-// путь передаётся команде через RIVET_PROMPT_FILE.
-func (a *agent) runAgent(ctx context.Context, dir, prompt string, transcript func([]byte)) (string, error) {
-	pf, err := os.CreateTemp(a.cfg.Workdir, "prompt-*.md")
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(pf.Name())
-	if _, err := pf.WriteString(prompt); err != nil {
-		return "", err
-	}
-	_ = pf.Close()
-	return runPTY(ctx, dir, a.cfg.AgentCmd, []string{"RIVET_PROMPT_FILE=" + pf.Name()}, transcript)
 }
 
 func gitCommitPush(ctx context.Context, dir, branch string, env []string, message string) error {

@@ -111,6 +111,11 @@ type Runner struct {
 	CtxPct       *int // nil — заполненность контекста неизвестна
 	Draining     bool
 	LastSeen     time.Time
+	// Adapter — способ подключения агента (claude-code, wrap); Depth —
+	// глубина данных адаптера, сессии runner'а создаются с ней
+	// (спека agent-integration «Уровни глубины данных»).
+	Adapter string
+	Depth   SessionDepth
 }
 
 // HasCapabilities — подбор по требованиям задачи (спека orchestration).
@@ -146,6 +151,9 @@ type Session struct {
 	Depth         SessionDepth
 	Scope         string
 	TranscriptRef string
+	// Files — затронутые сессией файлы: nil — недоступно для способа
+	// подключения, пустой список — полная глубина без файлов.
+	Files []string
 	// Tokens — итог токенов сессии; nil = источник не сообщил (не ноль),
 	// колонка nullable с миграции 0004 (спека observability «Учёт usage»).
 	Tokens  *int64

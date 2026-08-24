@@ -13,12 +13,17 @@ import (
 // sessionView — DTO Session контракта: stage нормализована, tokens nullable
 // (null = источник не сообщил), длительность клиент считает сам.
 type sessionView struct {
-	ID            string     `json:"id"`
-	Attempt       int        `json:"attempt"`
-	Stage         string     `json:"stage"`
-	Agent         string     `json:"agent"`
-	Model         string     `json:"model"`
-	DriverKind    string     `json:"driver_kind"`
+	ID         string `json:"id"`
+	Attempt    int    `json:"attempt"`
+	Stage      string `json:"stage"`
+	Agent      string `json:"agent"`
+	Model      string `json:"model"`
+	DriverKind string `json:"driver_kind"`
+	// Depth — глубина данных подключения; Files — затронутые файлы:
+	// null = недоступно для этого способа подключения, [] = полная
+	// глубина без файлов (api-contract add-claude-code-adapter).
+	Depth         string     `json:"depth"`
+	Files         []string   `json:"files"`
 	Tokens        *int64     `json:"tokens"`
 	StartedAt     time.Time  `json:"started_at"`
 	EndedAt       *time.Time `json:"ended_at"`
@@ -58,6 +63,7 @@ func (s *Server) listTaskSessions(w http.ResponseWriter, r *http.Request) {
 		out = append(out, sessionView{
 			ID: v.ID, Attempt: v.Attempt, Stage: stageName(v.Scope),
 			Agent: v.Agent, Model: v.Model, DriverKind: v.DriverKind,
+			Depth: string(v.Depth), Files: v.Files,
 			Tokens: v.Tokens, StartedAt: v.Started, EndedAt: v.Ended,
 			HasTranscript: v.TranscriptRef != "",
 		})

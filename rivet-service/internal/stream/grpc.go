@@ -6,6 +6,7 @@ import (
 	"math"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
@@ -14,10 +15,11 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 5: токен регистрации в метаданных Register и Channel
-// (add-operations-management); v4 — репозиторий проекта в Assignment, v3 —
-// деплой-джобы, v2 — session_id. Runner'ы младших версий отклоняются при Register.
-const protocolVersion = "5"
+// Версия 6: адаптер и глубина данных в Register, структурированные шаги в
+// AgentEvent (add-claude-code-adapter); v5 — токены регистрации, v4 —
+// репозиторий проекта в Assignment, v3 — деплой-джобы, v2 — session_id.
+// Runner'ы младших версий отклоняются при Register.
+const protocolVersion = "6"
 
 // ProtocolVersion — версия протокола для состояния установки.
 const ProtocolVersion = protocolVersion
@@ -141,12 +143,21 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 			return nil, err
 		}
 	}
+	// Глубина данных — часть контракта v6: неизвестное значение — это
+	// несовместимый runner, а не повод молча записать minimal.
+	switch domain.SessionDepth(req.Depth) {
+	case domain.DepthFull, domain.DepthPartial, domain.DepthMinimal:
+	default:
+		return &pb.RegisterResponse{Accepted: false,
+			Message: "неизвестная глубина данных " + req.Depth + ": ожидается full, partial или minimal"}, nil
+	}
 	// Регистрация фиксирует токен и пишет событие установки (спека runners
 	// «Регистрация фиксируется»).
 	token := tokenFromContext(ctx)
 	err := s.St.RegisterRunner(ctx, domain.Runner{
 		ID: req.RunnerId, Agent: req.Agent, Model: req.Model,
 		Host: req.Host, Capabilities: req.Capabilities,
+		Adapter: req.Adapter, Depth: domain.SessionDepth(req.Depth),
 	}, token)
 	if err != nil {
 		return nil, err
@@ -229,6 +240,55 @@ func nonNegative[T int64 | float64](v *T) *T {
 	return v
 }
 
+// stepPayload — структурированные поля session.step из AgentEvent: строки
+// маскируются, размеры ограничиваются. Пустой kind — простой текстовый шаг
+// (обёртка), payload несёт только session_id.
+func stepPayload(ev *pb.AgentEvent) map[string]any {
+	payload := map[string]any{"session_id": ev.SessionId}
+	if ev.Kind == "" {
+		return payload
+	}
+	payload["kind"] = ev.Kind
+	payload["ok"] = ev.Ok
+	if ev.Tool != "" {
+		payload["tool"] = redact.String(clip(ev.Tool, 100))
+	}
+	if ev.Detail != "" {
+		payload["detail"] = redact.String(clip(ev.Detail, 500))
+	}
+	if files := maskedFiles(ev.Files, 50); len(files) > 0 {
+		payload["files"] = files
+	}
+	return payload
+}
+
+// maskedFiles — пути файлов шага для payload и сессии: маскирование,
+// обрезка длины, не больше limit штук.
+func maskedFiles(files []string, limit int) []string {
+	if len(files) == 0 {
+		return nil
+	}
+	if len(files) > limit {
+		files = files[:limit]
+	}
+	masked := make([]string, 0, len(files))
+	for _, f := range files {
+		masked = append(masked, redact.String(clip(f, 300)))
+	}
+	return masked
+}
+
+// clip обрезает строку до n байт по границе руны.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
+}
+
 func (s *Server) ack(sendCh chan *pb.PlaneMsg, msgID string) {
 	select {
 	case sendCh <- &pb.PlaneMsg{Kind: &pb.PlaneMsg_Ack{Ack: &pb.Ack{AckedMsgId: msgID}}}:
@@ -249,11 +309,22 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		if err != nil {
 			return err
 		}
-		// Текст шага — runner-controlled, виден участникам в event log.
+		// Текст и структура шага — runner-controlled: всё маскируется и
+		// ограничивается (api-contract: detail ≤500, files ≤50 в payload).
+		payload := stepPayload(k.Event)
+		// Затронутые файлы сессии копятся из полного списка события, а не из
+		// урезанного payload: кап сессии — 500 путей (AppendSessionFiles);
+		// files IS NULL у минимальной глубины — запрос её не тронет.
+		if files := maskedFiles(k.Event.Files, len(k.Event.Files)); len(files) > 0 {
+			if err := s.St.AppendSessionFiles(ctx, k.Event.SessionId, files); err != nil {
+				return err
+			}
+		}
 		_, err = s.St.AppendEvent(ctx, store.EventInput{
 			ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "session.step",
 			ProjectID: projectID, EpicID: epicID, TaskID: k.Event.TaskId,
-			Text: redact.String(k.Event.Text),
+			Text:    redact.String(k.Event.Text),
+			Payload: payload,
 		})
 		return err
 
