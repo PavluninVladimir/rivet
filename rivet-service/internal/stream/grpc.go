@@ -17,11 +17,12 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 6: адаптер и глубина данных в Register, структурированные шаги в
-// AgentEvent (add-claude-code-adapter); v5 — токены регистрации, v4 —
-// репозиторий проекта в Assignment, v3 — деплой-джобы, v2 — session_id.
-// Runner'ы младших версий отклоняются при Register.
-const protocolVersion = "6"
+// Версия 7: промпт пользователя в Assignment — сессия доработки
+// (add-user-sessions); v6 — адаптер и глубина данных, структурированные
+// шаги; v5 — токены регистрации, v4 — репозиторий проекта, v3 —
+// деплой-джобы, v2 — session_id. Runner'ы младших версий отклоняются
+// при Register.
+const protocolVersion = "7"
 
 // ProtocolVersion — версия протокола для состояния установки.
 const ProtocolVersion = protocolVersion
@@ -46,6 +47,33 @@ type Server struct {
 	// информационное, повтор после рестарта допустим.
 	overlapMu   sync.Mutex
 	overlapSeen map[string]bool
+
+	// Кэш приватности сессий (шаги и live-вывод приватной не публикуются,
+	// спека team-visibility): приватность неизменна после создания.
+	privMu    sync.Mutex
+	privCache map[string]bool
+}
+
+// sessionPrivate — приватность сессии с кэшем; при ошибке чтения считается
+// приватной (fail-closed: лучше не показать, чем раскрыть).
+func (s *Server) sessionPrivate(ctx context.Context, sessionID string) bool {
+	s.privMu.Lock()
+	if v, ok := s.privCache[sessionID]; ok {
+		s.privMu.Unlock()
+		return v
+	}
+	s.privMu.Unlock()
+	private, _, err := s.St.SessionPrivacy(ctx, sessionID)
+	if err != nil {
+		return true
+	}
+	s.privMu.Lock()
+	if s.privCache == nil {
+		s.privCache = map[string]bool{}
+	}
+	s.privCache[sessionID] = private
+	s.privMu.Unlock()
+	return private
 }
 
 // taskRedactor — состояние редактора текущей сессии задачи; смена сессии
@@ -80,7 +108,12 @@ func (s *Server) emitTranscript(ctx context.Context, taskID, sessionID string, d
 	if len(data) == 0 {
 		return
 	}
+	// Буфер транскрипта копится всегда (автор получит сохранённый
+	// транскрипт), live-трансляция приватной сессии не публикуется.
 	s.Engine.OnTranscript(taskID, sessionID, data)
+	if s.sessionPrivate(ctx, sessionID) {
+		return
+	}
 	if projectID, _, err := s.St.TaskRefs(ctx, taskID); err == nil {
 		s.Hub.Publish(LogChunk{ProjectID: projectID, TaskID: taskID, Data: data})
 	}
@@ -388,6 +421,7 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		if err != nil {
 			return err
 		}
+		private := s.sessionPrivate(ctx, k.Event.SessionId)
 		// Текст и структура шага — runner-controlled: всё маскируется и
 		// ограничивается (api-contract: detail ≤500, files ≤50 в payload).
 		payload := stepPayload(k.Event)
@@ -399,18 +433,26 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 				return err
 			}
 			// Для поиска пересечений хватает первых путей шага: гигантский
-			// шаг не должен тормозить обработку канала runner'а.
+			// шаг не должен тормозить обработку канала runner'а. Приватная
+			// сессия в пересечениях не участвует (design add-user-sessions).
 			if len(files) > 100 {
 				files = files[:100]
 			}
-			if err := s.emitOverlaps(ctx, k.Event.SessionId, projectID, epicID, files); err != nil {
-				return err
+			if !private {
+				if err := s.emitOverlaps(ctx, k.Event.SessionId, projectID, epicID, files); err != nil {
+					return err
+				}
 			}
 		}
 		// Последний шаг — в реестр активных сессий (спека team-visibility).
 		text := redact.String(k.Event.Text)
 		if err := s.St.SetSessionLastStep(ctx, k.Event.SessionId, clip(text, 300)); err != nil {
 			return err
+		}
+		// Шаги приватной сессии не публикуются в event log и SSE: команде —
+		// факт сессии, содержимое — автору (спека team-visibility).
+		if private {
+			return nil
 		}
 		_, err = s.St.AppendEvent(ctx, store.EventInput{
 			ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "session.step",

@@ -27,8 +27,8 @@ var taskTransitions = map[TaskStatus][]TaskStatus{
 	TaskTesting:   {TaskReview, TaskFixing, TaskFailed, TaskReady},
 	TaskReview:    {TaskDone, TaskFixing, TaskFailed, TaskReady},
 	TaskFixing:    {TaskTesting, TaskBlocked, TaskFailed, TaskReady},
-	TaskBlocked:   {TaskQueued, TaskReady, TaskCancelled},
-	TaskFailed:    {TaskQueued, TaskReady, TaskCancelled},
+	TaskBlocked:   {TaskQueued, TaskReady, TaskFixing, TaskCancelled},
+	TaskFailed:    {TaskQueued, TaskReady, TaskFixing, TaskCancelled},
 	TaskDone:      {},
 	TaskCancelled: {},
 }

@@ -275,12 +275,29 @@ func (e *Engine) projectOf(ctx context.Context, task domain.Task) (domain.Projec
 	return p, epic, err
 }
 
+// sessionSpec — переопределение сессии стадии: сессия доработки
+// (водитель-пользователь, его промпт, приватность). nil — обычная
+// scheduler-сессия со снимком задачи.
+type sessionSpec struct {
+	driverKind string
+	driverID   string
+	prompt     string
+	userPrompt string
+	private    bool
+}
+
 // dispatch отправляет Assignment runner'у и открывает сессию стадии.
 func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.StageResult_Stage, extra string) {
+	_, _ = e.dispatchWith(ctx, a, stage, extra, nil)
+}
+
+// dispatchWith возвращает id созданной сессии (пусто, если стадию не
+// удалось запустить) и признак доставки Assignment runner'у.
+func (e *Engine) dispatchWith(ctx context.Context, a store.Assignment, stage pb.StageResult_Stage, extra string, spec *sessionSpec) (string, bool) {
 	p, _, err := e.projectOf(ctx, a.Task)
 	if err != nil {
 		slog.Error("dispatch: project", "task", a.Task.ID, "err", err)
-		return
+		return "", false
 	}
 	criteria := make([]string, 0, len(a.Task.Criteria))
 	for _, c := range a.Task.Criteria {
@@ -302,20 +319,24 @@ func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.Stag
 	// во всех сообщениях стадии, сообщения без него отбрасываются (design,
 	// решение 4). Без сессии стадию не запускаем — задачу вернёт
 	// heartbeat-таймаут, как при недоступном runner'е.
-	// Запрос сессии — снимок задачи на момент запуска (история и поиск,
-	// спека team-visibility): описание задачи меняется ответами человека.
-	prompt := a.Task.Title
-	if a.Task.Description != "" {
-		prompt += "\n" + a.Task.Description
+	if spec == nil {
+		// Запрос сессии — снимок задачи на момент запуска (история и поиск,
+		// спека team-visibility): описание задачи меняется ответами человека.
+		prompt := a.Task.Title
+		if a.Task.Description != "" {
+			prompt += "\n" + a.Task.Description
+		}
+		spec = &sessionSpec{driverKind: "scheduler", prompt: prompt}
 	}
 	sessionID, err := e.St.CreateSession(ctx, domain.Session{
 		TaskID: a.Task.ID, Attempt: a.Task.AttemptUsed + 1,
-		DriverKind: "scheduler", Agent: a.Runner.Agent, Model: a.Runner.Model,
-		Depth: depth, Scope: stage.String(), Prompt: prompt,
+		DriverKind: spec.driverKind, DriverID: spec.driverID,
+		Agent: a.Runner.Agent, Model: a.Runner.Model,
+		Depth: depth, Scope: stage.String(), Prompt: spec.prompt, Private: spec.private,
 	})
 	if err != nil {
 		slog.Error("dispatch: session", "task", a.Task.ID, "err", err)
-		return
+		return "", false
 	}
 	e.mu.Lock()
 	e.sessions[a.Task.ID] = sessionID
@@ -326,7 +347,13 @@ func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.Stag
 	gitToken, err := e.St.ProjectToken(ctx, p.ID, e.Box)
 	if err != nil {
 		slog.Error("dispatch: учётные данные проекта", "project", p.ID, "err", err)
-		return
+		// Сессия уже создана — закрывается, иначе осталась бы «идущей»
+		// навсегда (ghost) и держала бы кеш.
+		if _, cerr := e.St.EndSession(ctx, sessionID, "", "стадия не запущена: учётные данные проекта недоступны"); cerr != nil {
+			slog.Error("dispatch: end ghost session", "session", sessionID, "err", cerr)
+		}
+		e.DropSession(a.Task.ID)
+		return "", false
 	}
 	// У fake-провайдера (e2e-стенд) настоящего адреса нет: клонирование
 	// идёт по RIVET_GIT_BASE, как до этого изменения.
@@ -342,12 +369,15 @@ func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.Stag
 			Criteria: criteria, Repo: p.Repo(), Branch: a.Task.Branch,
 			Checks: checks, ExtraContext: extra, SessionId: sessionID,
 			RepoUrl: repoURL, GitToken: gitToken, BaseBranch: p.DefaultBranch,
+			UserPrompt: spec.userPrompt,
 		}},
 	}
 	if !e.Out.Send(runnerID, msg) {
 		slog.Warn("dispatch: runner недоступен, задачу вернёт heartbeat-таймаут",
 			"runner", runnerID, "task", a.Task.ID)
+		return sessionID, false
 	}
+	return sessionID, true
 }
 
 // transcriptCap — жёсткий предел буфера транскрипта стадии: после append
@@ -444,7 +474,10 @@ func (e *Engine) flushTranscript(ctx context.Context, task domain.Task, stage, s
 	e.mu.Unlock()
 	ref := ""
 	if len(buf) > 0 && e.Blob != nil {
-		key := fmt.Sprintf("tasks/%d/attempt-%d-%s.log", task.Num, task.AttemptUsed+1, stage)
+		// Ключ уникален по сессии: user-сессии не расходуют попытку, и ключ
+		// без session_id перезаписывал бы объект прежней сессии (а старая
+		// ссылка открыла бы чужой — в т.ч. приватный — транскрипт).
+		key := fmt.Sprintf("tasks/%d/attempt-%d-%s-%s.log", task.Num, task.AttemptUsed+1, stage, shortID(sessionID))
 		var err error
 		if ref, err = e.Blob.Put(ctx, key, redact.Bytes(buf)); err != nil {
 			slog.Error("transcript flush", "task", task.ID, "err", err)
@@ -490,7 +523,13 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 	switch sr.Stage {
 	case pb.StageResult_CODING, pb.StageResult_FIXING:
 		if !sr.Ok {
-			return e.failTask(ctx, task, "Невосстановимая ошибка этапа: "+sr.Detail, runnerID)
+			// Текст ошибки приватной сессии не раскрывается в публичных
+			// событии и эскалации; полный текст — в итоге сессии (автору).
+			detail := sr.Detail
+			if private, _, perr := e.St.SessionPrivacy(ctx, sr.SessionId); perr == nil && private {
+				detail = "ошибка приватной сессии — подробности доступны её автору в итоге сессии"
+			}
+			return e.failTask(ctx, task, "Невосстановимая ошибка этапа: "+detail, runnerID)
 		}
 		ev.Text = "реализация готова — запуск проверок"
 		ev.Payload = map[string]any{"status": "testing"}
@@ -652,8 +691,50 @@ func (e *Engine) OnBlocked(ctx context.Context, runnerID string, b *pb.BlockedQu
 		slog.Warn("blocked закрытой сессии отброшен", "task", b.TaskId, "session", b.SessionId)
 		return nil
 	}
-	return e.St.BlockTask(ctx, b.TaskId, b.Question,
+	// Вопрос приватной сессии — её содержимое: в публичные block_reason,
+	// событие и эскалацию идёт заглушка, полный вопрос остаётся в итоге
+	// сессии (виден автору). Спека team-visibility «Видимость и приватность».
+	question := b.Question
+	if private, _, err := e.St.SessionPrivacy(ctx, b.SessionId); err == nil && private {
+		question = "вопрос приватной сессии — содержимое доступно её автору в итоге сессии"
+	}
+	return e.St.BlockTask(ctx, b.TaskId, question,
 		store.EventInput{ActorKind: domain.ActorRunner, ActorID: runnerID})
+}
+
+// StartUserSession — сессия доработки задачи по промпту участника (спека
+// agent-integration «Сессия из интерфейса Rivet»): задача blocked/failed/
+// review переводится в fixing на свободном runner'е, агент получает промпт
+// человека, результат идёт обычным конвейером. Попытка не расходуется.
+func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login string, private bool) (string, error) {
+	a, err := e.St.StartUserSession(ctx, taskID, login, private)
+	if err != nil {
+		return "", err
+	}
+	// Кеш сессий обязан забыть прежнюю: StartUserSession закрыл её в БД
+	// (иначе поздний StageResult прежней стадии прошёл бы по памяти).
+	e.DropSession(taskID)
+	sessionID, delivered := e.dispatchWith(ctx, a, pb.StageResult_FIXING, "", &sessionSpec{
+		driverKind: "user", driverID: login, prompt: prompt,
+		userPrompt: prompt, private: private,
+	})
+	if sessionID == "" || !delivered {
+		// Стадию не удалось запустить или Assignment не доставлен: сессия
+		// закрывается, runner освобождается, задача остаётся в fixing без
+		// runner'а — её подхватит AssignFixing обычным промптом.
+		// Пользователь видит отказ, а не 200 без запуска.
+		if sessionID != "" {
+			if _, cerr := e.St.EndSession(ctx, sessionID, "", "сессия не запущена: runner недоступен"); cerr != nil {
+				slog.Error("user session: end undelivered session", "session", sessionID, "err", cerr)
+			}
+			e.DropSession(taskID)
+		}
+		if rerr := e.St.ReleaseTaskRunner(ctx, taskID); rerr != nil {
+			slog.Error("user session: release after dispatch failure", "task", taskID, "err", rerr)
+		}
+		return "", fmt.Errorf("сессию не удалось запустить: runner недоступен или стадия не собралась, подробности в логе rivetd")
+	}
+	return sessionID, nil
 }
 
 // MergeTask — подтверждение человека: merge PR → done → пересчёт DAG.
@@ -743,6 +824,14 @@ func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Proje
 		Text: "авто-merge не выполнен: " + err.Error() + " — ожидание подтверждения человеком", Payload: failPayload,
 	})
 	return evErr
+}
+
+// shortID — первые 8 символов id для ключей и текстов.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
 }
 
 func shortHash(h string) string {

@@ -25,6 +25,8 @@ type sessionView struct {
 	// глубина без файлов (api-contract add-claude-code-adapter).
 	Depth         string     `json:"depth"`
 	Files         []string   `json:"files"`
+	DriverID      string     `json:"driver_id"`
+	Private       bool       `json:"private"`
 	Prompt        string     `json:"prompt"`
 	Outcome       string     `json:"outcome"`
 	LastStep      string     `json:"last_step"`
@@ -57,7 +59,7 @@ func (s *Server) listTaskSessions(w http.ResponseWriter, r *http.Request) {
 	if !s.requireTaskMember(w, r, r.PathValue("id")) {
 		return
 	}
-	sessions, err := s.St.ListTaskSessions(r.Context(), r.PathValue("id"))
+	sessions, err := s.St.ListTaskSessions(r.Context(), r.PathValue("id"), user(r))
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -68,6 +70,7 @@ func (s *Server) listTaskSessions(w http.ResponseWriter, r *http.Request) {
 			ID: v.ID, Attempt: v.Attempt, Stage: stageName(v.Scope),
 			Agent: v.Agent, Model: v.Model, DriverKind: v.DriverKind,
 			Depth: string(v.Depth), Files: v.Files,
+			DriverID: v.DriverID, Private: v.Private,
 			Prompt: v.Prompt, Outcome: v.Outcome, LastStep: v.LastStep,
 			Tokens: v.Tokens, StartedAt: v.Started, EndedAt: v.Ended,
 			HasTranscript: v.TranscriptRef != "",
@@ -92,9 +95,9 @@ func (s *Server) projectSessions(w http.ResponseWriter, r *http.Request) {
 		err error
 	)
 	if q == "" {
-		out, err = s.St.ActiveProjectSessions(r.Context(), r.PathValue("id"))
+		out, err = s.St.ActiveProjectSessions(r.Context(), r.PathValue("id"), user(r))
 	} else {
-		out, err = s.St.SearchProjectSessions(r.Context(), r.PathValue("id"), q, limit)
+		out, err = s.St.SearchProjectSessions(r.Context(), r.PathValue("id"), q, user(r), limit)
 	}
 	if err != nil {
 		writeErr(w, err)
@@ -104,6 +107,29 @@ func (s *Server) projectSessions(w http.ResponseWriter, r *http.Request) {
 		out[i].Stage = stageName(out[i].Stage)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// POST /api/v1/tasks/{id}/sessions — сессия доработки с промптом участника
+// (api-contract add-user-sessions): blocked/failed/review → fixing на
+// свободном runner'е, попытка не расходуется.
+func (s *Server) startTaskSession(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTaskMember(w, r, r.PathValue("id")) {
+		return
+	}
+	var in struct {
+		Prompt  string `json:"prompt"`
+		Private bool   `json:"private"`
+	}
+	if err := decode(r, &in); err != nil || strings.TrimSpace(in.Prompt) == "" {
+		unprocessable(w, "нужен prompt сессии")
+		return
+	}
+	sessionID, err := s.Engine.StartUserSession(r.Context(), r.PathValue("id"), strings.TrimSpace(in.Prompt), user(r), in.Private)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "fixing", "session_id": sessionID})
 }
 
 // GET /api/v1/sessions/{id}/transcript — сохранённый транскрипт сессии.

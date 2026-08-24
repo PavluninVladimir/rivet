@@ -1214,9 +1214,13 @@ type Assignment struct {
 	// Репозиторий проекта: адрес клонирования без секрета и токен доступа.
 	// Токен уезжает в git через askpass-хелпер, а не аргументом команды.
 	// Пустой repo_url — старое поведение по RIVET_GIT_BASE (e2e-стенд).
-	RepoUrl       string `protobuf:"bytes,12,opt,name=repo_url,json=repoUrl,proto3" json:"repo_url,omitempty"`
-	GitToken      string `protobuf:"bytes,13,opt,name=git_token,json=gitToken,proto3" json:"git_token,omitempty"`
-	BaseBranch    string `protobuf:"bytes,14,opt,name=base_branch,json=baseBranch,proto3" json:"base_branch,omitempty"` // базовая ветка проекта
+	RepoUrl    string `protobuf:"bytes,12,opt,name=repo_url,json=repoUrl,proto3" json:"repo_url,omitempty"`
+	GitToken   string `protobuf:"bytes,13,opt,name=git_token,json=gitToken,proto3" json:"git_token,omitempty"`
+	BaseBranch string `protobuf:"bytes,14,opt,name=base_branch,json=baseBranch,proto3" json:"base_branch,omitempty"` // базовая ветка проекта
+	// Промпт пользователя (сессия доработки, add-user-sessions): при
+	// непустом значении runner использует его как промпт агента вместо
+	// сгенерированного промпта стадии.
+	UserPrompt    string `protobuf:"bytes,15,opt,name=user_prompt,json=userPrompt,proto3" json:"user_prompt,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1345,6 +1349,13 @@ func (x *Assignment) GetGitToken() string {
 func (x *Assignment) GetBaseBranch() string {
 	if x != nil {
 		return x.BaseBranch
+	}
+	return ""
+}
+
+func (x *Assignment) GetUserPrompt() string {
+	if x != nil {
+		return x.UserPrompt
 	}
 	return ""
 }
@@ -1854,7 +1865,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x04kind\"'\n" +
 	"\x03Ack\x12 \n" +
 	"\facked_msg_id\x18\x01 \x01(\tR\n" +
-	"ackedMsgId\"\xb9\x03\n" +
+	"ackedMsgId\"\xda\x03\n" +
 	"\n" +
 	"Assignment\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
@@ -1873,7 +1884,9 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\brepo_url\x18\f \x01(\tR\arepoUrl\x12\x1b\n" +
 	"\tgit_token\x18\r \x01(\tR\bgitToken\x12\x1f\n" +
 	"\vbase_branch\x18\x0e \x01(\tR\n" +
-	"baseBranch\"-\n" +
+	"baseBranch\x12\x1f\n" +
+	"\vuser_prompt\x18\x0f \x01(\tR\n" +
+	"userPrompt\"-\n" +
 	"\x05Check\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03cmd\x18\x02 \x01(\tR\x03cmd\"5\n" +

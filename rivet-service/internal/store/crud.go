@@ -388,10 +388,10 @@ func (s *Store) CreateSession(ctx context.Context, in domain.Session) (string, e
 	}
 	var id string
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO sessions (task_id, attempt, driver_kind, driver_id, agent, model, depth, scope, files, prompt)
-		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10)
+		INSERT INTO sessions (task_id, attempt, driver_kind, driver_id, agent, model, depth, scope, files, prompt, private)
+		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10,$11)
 		RETURNING id`,
-		in.TaskID, in.Attempt, in.DriverKind, in.DriverID, in.Agent, in.Model, in.Depth, in.Scope, files, in.Prompt).Scan(&id)
+		in.TaskID, in.Attempt, in.DriverKind, in.DriverID, in.Agent, in.Model, in.Depth, in.Scope, files, in.Prompt, in.Private).Scan(&id)
 	return id, err
 }
 
@@ -405,11 +405,13 @@ func (s *Store) SetSessionLastStep(ctx context.Context, sessionID, text string) 
 // ListTaskSessions — история сессий задачи по возрастанию started_at
 // (дельта observability «Просмотр сохранённых транскриптов»). Стадия
 // лежит в Scope, tokens nullable: nil = источник не сообщил.
-func (s *Store) ListTaskSessions(ctx context.Context, taskID string) ([]domain.Session, error) {
+// viewerLogin — для маскировки чужих приватных сессий: команде остаётся
+// факт, содержимое видит только автор (спека team-visibility).
+func (s *Store) ListTaskSessions(ctx context.Context, taskID, viewerLogin string) ([]domain.Session, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id::text, COALESCE(task_id::text,''), attempt, driver_kind, driver_id,
 		       agent, model, depth, COALESCE(scope,''), COALESCE(transcript_ref,''),
-		       tokens, started_at, ended_at, files, prompt, outcome, last_step
+		       tokens, started_at, ended_at, files, prompt, outcome, last_step, private
 		FROM sessions WHERE task_id=$1 ORDER BY started_at`, taskID)
 	if err != nil {
 		return nil, err
@@ -420,8 +422,12 @@ func (s *Store) ListTaskSessions(ctx context.Context, taskID string) ([]domain.S
 		var v domain.Session
 		if err := rows.Scan(&v.ID, &v.TaskID, &v.Attempt, &v.DriverKind, &v.DriverID,
 			&v.Agent, &v.Model, &v.Depth, &v.Scope, &v.TranscriptRef,
-			&v.Tokens, &v.Started, &v.Ended, &v.Files, &v.Prompt, &v.Outcome, &v.LastStep); err != nil {
+			&v.Tokens, &v.Started, &v.Ended, &v.Files, &v.Prompt, &v.Outcome, &v.LastStep, &v.Private); err != nil {
 			return nil, err
+		}
+		if v.Private && v.DriverID != viewerLogin {
+			v.Prompt, v.Outcome, v.LastStep, v.TranscriptRef = "", "", "", ""
+			v.Files = nil
 		}
 		out = append(out, v)
 	}
@@ -438,7 +444,9 @@ func (s *Store) SessionTranscriptForViewer(ctx context.Context, sessionID, viewe
 		JOIN tasks t ON t.id = ss.task_id
 		JOIN epics e ON e.id = t.epic_id
 		JOIN project_members m ON m.project_id = e.project_id AND m.user_id = $2
-		WHERE ss.id = $1`, sessionID, viewerID).Scan(&ref)
+		WHERE ss.id = $1
+		  AND (NOT ss.private OR ss.driver_id = (SELECT login FROM users WHERE id = $2))`,
+		sessionID, viewerID).Scan(&ref)
 	return ref, nf(err)
 }
 

@@ -46,7 +46,7 @@ func TestTeamSessions(t *testing.T) {
 
 	// Реестр активных: три сессии, у полных глубин пересечение по go.mod,
 	// у минимальной Overlaps == nil (недоступно ≠ пусто).
-	reg, err := s.ActiveProjectSessions(ctx, p.ID)
+	reg, err := s.ActiveProjectSessions(ctx, p.ID, "owner-team")
 	if err != nil || len(reg) != 3 {
 		t.Fatalf("реестр: %v %d", err, len(reg))
 	}
@@ -82,7 +82,7 @@ func TestTeamSessions(t *testing.T) {
 		t.Fatal(err)
 	}
 	// По слову из запроса (FTS, словоформа отличается).
-	found, err := s.SearchProjectSessions(ctx, p.ID, "кэш", 0)
+	found, err := s.SearchProjectSessions(ctx, p.ID, "кэш", "owner-team", 0)
 	if err != nil || len(found) == 0 {
 		t.Fatalf("поиск по запросу: %v %d", err, len(found))
 	}
@@ -92,17 +92,17 @@ func TestTeamSessions(t *testing.T) {
 		}
 	}
 	// По названию задачи (ILIKE-канал).
-	found, err = s.SearchProjectSessions(ctx, p.ID, "Индекс", 0)
+	found, err = s.SearchProjectSessions(ctx, p.ID, "Индекс", "owner-team", 0)
 	if err != nil || len(found) < 2 { // sesB и sesMin — обе задачи B
 		t.Fatalf("поиск по названию задачи: %v %d", err, len(found))
 	}
 	// По итогу.
-	found, err = s.SearchProjectSessions(ctx, p.ID, "замечания", 0)
+	found, err = s.SearchProjectSessions(ctx, p.ID, "замечания", "owner-team", 0)
 	if err != nil || len(found) != 1 || found[0].ID != sesB || found[0].Outcome != "review вернул замечания" {
 		t.Fatalf("поиск по итогу: %v %+v", err, found)
 	}
 	// Активных больше двух нет: реестр после закрытия.
-	reg, _ = s.ActiveProjectSessions(ctx, p.ID)
+	reg, _ = s.ActiveProjectSessions(ctx, p.ID, "owner-team")
 	if len(reg) != 1 || reg[0].ID != sesMin {
 		t.Fatalf("реестр после закрытия: %+v", reg)
 	}

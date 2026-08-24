@@ -84,7 +84,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	switch as.Stage {
 	case pb.StageResult_CODING, pb.StageResult_FIXING:
 		step("агент приступил к реализации")
-		run, err := a.adapter.Run(sctx, ws, codingPrompt(as), sink)
+		run, err := a.adapter.Run(sctx, ws, stagePrompt(as), sink)
 		noteUsage(run)
 		out := run.FinalText
 		// Блокировка распознаётся только у успешного запуска: агент,
@@ -192,9 +192,13 @@ func (a *agent) workspace(ctx context.Context, as *pb.Assignment, step func(stri
 	switch as.Stage {
 	case pb.StageResult_CODING:
 		script = fmt.Sprintf("git fetch origin && git checkout -B %s origin/%s", br, bs)
-	default: // FIXING, TESTING, REVIEW — ветка уже существует (локально или на origin)
-		script = fmt.Sprintf("git fetch origin && (git checkout %s || git checkout -b %s origin/%s) && (git pull --ff-only origin %s || true)",
-			br, br, br, br)
+	default:
+		// FIXING, TESTING, REVIEW — ветка обычно уже существует (локально
+		// или на origin). Сессия доработки из blocked/failed может прийти
+		// на другой runner до первого push ветки — тогда она создаётся от
+		// базовой (add-user-sessions).
+		script = fmt.Sprintf("git fetch origin && (git checkout %s || git checkout -b %s origin/%s || git checkout -B %s origin/%s) && (git pull --ff-only origin %s || true)",
+			br, br, br, br, bs, br)
 	}
 	if out, err := runShellEnv(ctx, dir, script, env, nil); err != nil {
 		return "", fmt.Errorf("checkout: %v: %s", err, out)
@@ -327,6 +331,22 @@ func runShellEnv(ctx context.Context, dir, script string, env []string, transcri
 		transcript(out)
 	}
 	return string(out), err
+}
+
+// stagePrompt — промпт стадии реализации: промпт пользователя (сессия
+// доработки, спека agent-integration «Сессия из интерфейса Rivet») с
+// системным хвостом либо сгенерированный промпт задачи.
+func stagePrompt(as *pb.Assignment) string {
+	if as.UserPrompt == "" {
+		return codingPrompt(as)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Ты работаешь над задачей task-%d в ветке %s (сессия доработки по запросу человека).\n\n", as.TaskNum, as.Branch)
+	b.WriteString(as.UserPrompt)
+	b.WriteString("\n\nРаботай в текущем каталоге. Не коммить и не пушь — это сделает оркестратор. " +
+		"Если не можешь однозначно понять ожидаемое поведение — не гадай: выведи строку " +
+		"«BLOCKED: <конкретный вопрос>» и остановись.\n")
+	return b.String()
 }
 
 func codingPrompt(as *pb.Assignment) string {

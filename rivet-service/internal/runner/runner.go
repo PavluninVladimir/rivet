@@ -22,11 +22,12 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 6: адаптер и глубина данных в Register, структурированные шаги
-// в AgentEvent (add-claude-code-adapter); v5 — токены регистрации, v4 —
-// репозиторий проекта в Assignment, v3 — деплой-джобы, v2 — session_id.
-// Runner'ы младших версий отклоняются при Register.
-const protocolVersion = "6"
+// Версия 7: промпт пользователя в Assignment — сессия доработки
+// (add-user-sessions); v6 — адаптер и глубина данных, структурированные
+// шаги; v5 — токены регистрации, v4 — репозиторий проекта, v3 —
+// деплой-джобы, v2 — session_id. Runner'ы младших версий отклоняются
+// при Register.
+const protocolVersion = "7"
 
 type Config struct {
 	PlaneAddr string
