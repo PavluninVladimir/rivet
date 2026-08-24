@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
 	"time"
@@ -88,7 +89,7 @@ func seedSessions(t *testing.T) sessionsFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.EndSession(ctx, f.withRef, ref); err != nil {
+	if _, err := st.EndSession(ctx, f.withRef, ref, "итог сессии"); err != nil {
 		t.Fatal(err)
 	}
 	f.noRef, err = st.CreateSession(ctx, domain.Session{
@@ -201,4 +202,46 @@ func TestSessionTranscriptAPI(t *testing.T) {
 	// Без аутентификации.
 	resp, _ = call(t, "GET", f.srv.URL+"/api/v1/sessions/"+f.withRef+"/transcript", "", "", nil)
 	mustStatus(t, resp, http.StatusUnauthorized, "транскрипт без входа")
+}
+
+// GET /projects/{id}/sessions (api-contract add-team-visibility): реестр
+// активных и поиск по истории; не-участник получает 404.
+func TestProjectSessionsAPI(t *testing.T) {
+	f := seedSessions(t)
+	sess := loginSession(t, f.srv, f.owner, "pw-testpass")
+	ctx := context.Background()
+	projectID, _, err := f.st.TaskRefs(ctx, f.task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Активные: открытая TESTING-сессия фикстуры (withRef закрыта).
+	resp, body := call(t, "GET", f.srv.URL+"/api/v1/projects/"+projectID+"/sessions", sess, "", nil)
+	mustStatus(t, resp, http.StatusOK, "реестр")
+	var reg []store.SessionEntry
+	if err := json.Unmarshal(body, &reg); err != nil {
+		t.Fatalf("%v: %s", err, body)
+	}
+	if len(reg) != 1 || reg[0].ID != f.noRef || reg[0].Stage != "testing" || reg[0].EndedAt != nil {
+		t.Fatalf("активные: %s", body)
+	}
+	if reg[0].TaskTitle == "" || reg[0].TaskNum == 0 {
+		t.Fatalf("реестр без задачи: %s", body)
+	}
+
+	// Поиск по итогу закрытой сессии.
+	resp, body = call(t, "GET", f.srv.URL+"/api/v1/projects/"+projectID+"/sessions?q="+url.QueryEscape("итог сессии"), sess, "", nil)
+	mustStatus(t, resp, http.StatusOK, "поиск")
+	var found []store.SessionEntry
+	_ = json.Unmarshal(body, &found)
+	if len(found) != 1 || found[0].ID != f.withRef || found[0].Outcome != "итог сессии" {
+		t.Fatalf("поиск: %s", body)
+	}
+
+	// Не участник — 404, как и сам проект.
+	mal := loginSession(t, f.srv, f.outsider, "pw-testpass")
+	resp, _ = call(t, "GET", f.srv.URL+"/api/v1/projects/"+projectID+"/sessions", mal, "", nil)
+	mustStatus(t, resp, http.StatusNotFound, "чужой проект")
+	resp, _ = call(t, "GET", f.srv.URL+"/api/v1/projects/"+projectID+"/sessions?q=x", mal, "", nil)
+	mustStatus(t, resp, http.StatusNotFound, "поиск в чужом проекте")
 }

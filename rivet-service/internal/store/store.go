@@ -62,6 +62,19 @@ func appendEvent(ctx context.Context, tx pgx.Tx, e EventInput) (int64, error) {
 	return id, err
 }
 
+// AppendEvents — несколько событий одной транзакцией (обе стороны
+// пересечения работ: либо оба события, либо ни одного).
+func (s *Store) AppendEvents(ctx context.Context, evs []EventInput) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		for _, e := range evs {
+			if _, err := appendEvent(ctx, tx, e); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // AppendEvent — событие вне перехода статуса (одиночная запись).
 func (s *Store) AppendEvent(ctx context.Context, e EventInput) (int64, error) {
 	var id int64

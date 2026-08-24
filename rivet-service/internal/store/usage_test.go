@@ -175,7 +175,7 @@ func TestEndSessionTokens(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.EndSession(ctx, sessionID, "ref"); err != nil {
+	if _, err := s.EndSession(ctx, sessionID, "ref", "итог"); err != nil {
 		t.Fatal(err)
 	}
 	var tokens *int64
@@ -194,7 +194,7 @@ func TestEndSessionTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.EndSession(ctx, empty, ""); err != nil {
+	if _, err := s.EndSession(ctx, empty, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Записи задачи были до старта этой сессии... они попали бы в интервал
@@ -257,7 +257,7 @@ func TestListTaskSessions(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.EndSession(ctx, first, "s3://rivet/tasks/1/attempt-1-CODING.log"); err != nil {
+	if _, err := s.EndSession(ctx, first, "s3://rivet/tasks/1/attempt-1-CODING.log", "итог"); err != nil {
 		t.Fatal(err)
 	}
 	// Вторая сессия: без usage и без транскрипта, ещё открыта.
@@ -301,7 +301,7 @@ func TestListTaskSessions(t *testing.T) {
 	if err != nil || open != second {
 		t.Fatalf("OpenSession: %q, %v (ожидалась %q)", open, err, second)
 	}
-	if _, err := s.EndSession(ctx, second, ""); err != nil {
+	if _, err := s.EndSession(ctx, second, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if open, err := s.OpenSession(ctx, task.ID); err != nil || open != "" {

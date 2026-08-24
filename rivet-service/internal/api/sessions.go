@@ -2,6 +2,7 @@
 package api
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -24,6 +25,9 @@ type sessionView struct {
 	// глубина без файлов (api-contract add-claude-code-adapter).
 	Depth         string     `json:"depth"`
 	Files         []string   `json:"files"`
+	Prompt        string     `json:"prompt"`
+	Outcome       string     `json:"outcome"`
+	LastStep      string     `json:"last_step"`
 	Tokens        *int64     `json:"tokens"`
 	StartedAt     time.Time  `json:"started_at"`
 	EndedAt       *time.Time `json:"ended_at"`
@@ -64,9 +68,40 @@ func (s *Server) listTaskSessions(w http.ResponseWriter, r *http.Request) {
 			ID: v.ID, Attempt: v.Attempt, Stage: stageName(v.Scope),
 			Agent: v.Agent, Model: v.Model, DriverKind: v.DriverKind,
 			Depth: string(v.Depth), Files: v.Files,
+			Prompt: v.Prompt, Outcome: v.Outcome, LastStep: v.LastStep,
 			Tokens: v.Tokens, StartedAt: v.Started, EndedAt: v.Ended,
 			HasTranscript: v.TranscriptRef != "",
 		})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// GET /api/v1/projects/{id}/sessions — реестр активных сессий проекта и
+// поиск по истории (api-contract add-team-visibility): без q — активные с
+// пересечениями, с q — история по ключевым словам. Стадия нормализуется
+// как в sessionView.
+func (s *Server) projectSessions(w http.ResponseWriter, r *http.Request) {
+	if !s.requireMember(w, r, r.PathValue("id")) {
+		return
+	}
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	var limit int
+	_, _ = fmt.Sscanf(r.URL.Query().Get("limit"), "%d", &limit)
+	var (
+		out []store.SessionEntry
+		err error
+	)
+	if q == "" {
+		out, err = s.St.ActiveProjectSessions(r.Context(), r.PathValue("id"))
+	} else {
+		out, err = s.St.SearchProjectSessions(r.Context(), r.PathValue("id"), q, limit)
+	}
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	for i := range out {
+		out[i].Stage = stageName(out[i].Stage)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

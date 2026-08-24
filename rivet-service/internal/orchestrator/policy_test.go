@@ -515,3 +515,43 @@ func TestAutoPublishDeniedByPolicy(t *testing.T) {
 		t.Fatalf("после разрешения публикация должна встать: %+v", deps)
 	}
 }
+
+// Запрос и итог сессии (спека team-visibility «История сессий»): prompt —
+// снимок задачи при запуске, outcome — результат стадии или вопрос blocked.
+func TestSessionPromptAndOutcome(t *testing.T) {
+	ctx := context.Background()
+	f := newPolicyFixture(t, "diff --git a/src/x.go b/src/x.go\n")
+	if err := driveToReviewPassed(t, f); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := f.st.ListTaskSessions(ctx, f.task.ID)
+	if err != nil || len(sessions) < 3 {
+		t.Fatalf("%v: %d сессий", err, len(sessions))
+	}
+	coding := sessions[0]
+	if !strings.Contains(coding.Prompt, "A") || coding.Scope != "CODING" {
+		t.Fatalf("prompt coding-сессии: %+v", coding)
+	}
+	// Тестовый StageResult без Detail: итог — заглушка успеха.
+	if coding.Outcome != "стадия завершена успешно" {
+		t.Fatalf("outcome coding-сессии: %q", coding.Outcome)
+	}
+	review := sessions[len(sessions)-1]
+	if review.Scope != "REVIEW" || review.Outcome == "" {
+		t.Fatalf("outcome review-сессии: %+v", review)
+	}
+	// Blocked: вопрос агента становится итогом сессии.
+	f2 := newPolicyFixture(t, "")
+	if err := f2.e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	worker := mustTaskRunner(t, f2.st, f2.task.ID)
+	if err := f2.e.OnBlocked(ctx, worker, &pb.BlockedQuestion{TaskId: f2.task.ID,
+		SessionId: f2.out.lastAssign(t).SessionId, Question: "какой формат ответа?"}); err != nil {
+		t.Fatal(err)
+	}
+	ss, _ := f2.st.ListTaskSessions(ctx, f2.task.ID)
+	if len(ss) != 1 || !strings.Contains(ss[0].Outcome, "какой формат ответа?") {
+		t.Fatalf("outcome blocked-сессии: %+v", ss)
+	}
+}

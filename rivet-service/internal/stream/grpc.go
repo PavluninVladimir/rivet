@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"math"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -38,6 +40,12 @@ type Server struct {
 	// только замаскированный текст (спека team-visibility, design решение 3).
 	redMu sync.Mutex
 	reds  map[string]*taskRedactor
+
+	// Пары сессий, о пересечении которых уже написано (спека
+	// team-visibility «Предупреждение о пересечениях работ»): событие
+	// информационное, повтор после рестарта допустим.
+	overlapMu   sync.Mutex
+	overlapSeen map[string]bool
 }
 
 // taskRedactor — состояние редактора текущей сессии задачи; смена сессии
@@ -289,6 +297,77 @@ func clip(s string, n int) string {
 	return s[:n] + "…"
 }
 
+// emitOverlaps — пересечения работ: общие затронутые файлы у активных
+// сессий разных задач проекта дают событие session.overlap в timeline
+// обеих задач; работа не блокируется (спека team-visibility).
+func (s *Server) emitOverlaps(ctx context.Context, sessionID, projectID, epicID string, files []string) error {
+	self, hits, err := s.St.OverlappingSessions(ctx, sessionID, files)
+	if err != nil || len(hits) == 0 {
+		return err
+	}
+	for _, h := range hits {
+		key := self.SessionID + "|" + h.SessionID
+		if h.SessionID < self.SessionID {
+			key = h.SessionID + "|" + self.SessionID
+		}
+		// Пара помечается «в работе» атомарно с проверкой: параллельные
+		// шаги одной пары не запишут дубль; при ошибке отметка снимается,
+		// и следующий шаг повторит запись.
+		s.overlapMu.Lock()
+		if s.overlapSeen == nil {
+			s.overlapSeen = map[string]bool{}
+		}
+		if s.overlapSeen[key] {
+			s.overlapMu.Unlock()
+			continue
+		}
+		s.overlapSeen[key] = true
+		s.overlapMu.Unlock()
+		release := func() {
+			s.overlapMu.Lock()
+			delete(s.overlapSeen, key)
+			s.overlapMu.Unlock()
+		}
+		otherProject, otherEpic, otherTask, err := s.St.SessionProjectEpic(ctx, h.SessionID)
+		if err != nil {
+			release()
+			return err
+		}
+		text := func(other int64, files []string) string {
+			return "пересечение работ с task-" + strconv.FormatInt(other, 10) + ": общие файлы " + strings.Join(files, ", ")
+		}
+		pairs := []struct {
+			project, epic, task string
+			payload             map[string]any
+			text                string
+		}{
+			{projectID, epicID, self.TaskID, map[string]any{
+				"session_id": self.SessionID, "other_task_id": h.TaskID,
+				"other_task_num": h.TaskNum, "other_session_id": h.SessionID, "files": h.Files,
+			}, text(h.TaskNum, h.Files)},
+			{otherProject, otherEpic, otherTask, map[string]any{
+				"session_id": h.SessionID, "other_task_id": self.TaskID,
+				"other_task_num": self.TaskNum, "other_session_id": self.SessionID, "files": h.Files,
+			}, text(self.TaskNum, h.Files)},
+		}
+		evs := make([]store.EventInput, 0, len(pairs))
+		for _, p := range pairs {
+			evs = append(evs, store.EventInput{
+				ActorKind: domain.ActorSystem, Type: "session.overlap",
+				ProjectID: p.project, EpicID: p.epic, TaskID: p.task,
+				Text: p.text, Payload: p.payload,
+			})
+		}
+		// Обе стороны одной транзакцией; при ошибке отметка пары снимается,
+		// чтобы следующий шаг повторил запись.
+		if err := s.St.AppendEvents(ctx, evs); err != nil {
+			release()
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Server) ack(sendCh chan *pb.PlaneMsg, msgID string) {
 	select {
 	case sendCh <- &pb.PlaneMsg{Kind: &pb.PlaneMsg_Ack{Ack: &pb.Ack{AckedMsgId: msgID}}}:
@@ -319,11 +398,24 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 			if err := s.St.AppendSessionFiles(ctx, k.Event.SessionId, files); err != nil {
 				return err
 			}
+			// Для поиска пересечений хватает первых путей шага: гигантский
+			// шаг не должен тормозить обработку канала runner'а.
+			if len(files) > 100 {
+				files = files[:100]
+			}
+			if err := s.emitOverlaps(ctx, k.Event.SessionId, projectID, epicID, files); err != nil {
+				return err
+			}
+		}
+		// Последний шаг — в реестр активных сессий (спека team-visibility).
+		text := redact.String(k.Event.Text)
+		if err := s.St.SetSessionLastStep(ctx, k.Event.SessionId, clip(text, 300)); err != nil {
+			return err
 		}
 		_, err = s.St.AppendEvent(ctx, store.EventInput{
 			ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "session.step",
 			ProjectID: projectID, EpicID: epicID, TaskID: k.Event.TaskId,
-			Text:    redact.String(k.Event.Text),
+			Text:    text,
 			Payload: payload,
 		})
 		return err

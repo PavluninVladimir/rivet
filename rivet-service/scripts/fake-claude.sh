@@ -44,5 +44,11 @@ emit '{"type":"assistant","message":{"model":"claude-fake-1","usage":{"input_tok
 printf 'work %s\n' "$(date +%s)" >> e2e-result.txt
 hook "{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"fake-claude-1\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$PWD/e2e-result.txt\"}}"
 
+# [e2e-slow]: подержать сессию открытой после шага с файлом — e2e смотрит
+# реестр активных сессий и пересечения работ (add-team-visibility).
+case "$PROMPT" in
+*"[e2e-slow]"*) sleep 6 ;;
+esac
+
 hook '{"hook_event_name":"Stop","session_id":"fake-claude-1"}'
 emit '{"type":"result","subtype":"success","result":"Готово: результат записан в e2e-result.txt.","total_cost_usd":0.042,"usage":{"input_tokens":2600,"cache_read_input_tokens":100000,"output_tokens":300},"modelUsage":{"claude-fake-1":{"contextWindow":200000}}}'
