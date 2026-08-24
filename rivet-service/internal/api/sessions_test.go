@@ -117,11 +117,13 @@ func TestTaskSessionsAPI(t *testing.T) {
 	resp, body := call(t, "GET", f.srv.URL+"/api/v1/tasks/"+f.task.ID+"/sessions", sess, "", nil)
 	mustStatus(t, resp, http.StatusOK, "сессии задачи")
 	var got []struct {
-		ID            string  `json:"id"`
-		Stage         string  `json:"stage"`
-		Tokens        *int64  `json:"tokens"`
-		EndedAt       *string `json:"ended_at"`
-		HasTranscript bool    `json:"has_transcript"`
+		ID            string    `json:"id"`
+		Stage         string    `json:"stage"`
+		Depth         string    `json:"depth"`
+		Files         *[]string `json:"files"`
+		Tokens        *int64    `json:"tokens"`
+		EndedAt       *string   `json:"ended_at"`
+		HasTranscript bool      `json:"has_transcript"`
 	}
 	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("%v: %s", err, body)
@@ -140,6 +142,11 @@ func TestTaskSessionsAPI(t *testing.T) {
 	}
 	if got[0].HasTranscript != f.blobUp || got[1].HasTranscript {
 		t.Fatalf("has_transcript: %s", body)
+	}
+	// Глубина и файлы (api-contract add-claude-code-adapter): у минимальной
+	// глубины files = null — «недоступно для этого подключения».
+	if got[0].Depth != "minimal" || got[0].Files != nil {
+		t.Fatalf("depth/files минимальной глубины: %s", body)
 	}
 
 	// Пустая история — [], не null.

@@ -62,9 +62,11 @@ AGENT_CMD="sh $SERVICE_DIR/scripts/fake-agent.sh"
   || { echo "e2e-stand: не удалось выпустить токены" >&2; exit 1; }
   RUNNER_TOKEN=$(cat "$STAND_DIR/runner-token")
   # Runner'ы: fake-агент, клонирование из локального bare.
+  # Worker — нативный адаптер Claude Code с fake-claude: e2e видит полную
+  # глубину (шаги с файлами); ревьюер остаётся на обёртке (минимальная).
   RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
-    "$STAND_DIR/rivet-runner" -id e2e-worker -agent fake -caps coding \
-    -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-worker" &
+    "$STAND_DIR/rivet-runner" -id e2e-worker -agent claude-code -caps coding \
+    -adapter claude-code -claude-bin "$SERVICE_DIR/scripts/fake-claude.sh" -workdir "$STAND_DIR/rw-worker" &
   RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
     "$STAND_DIR/rivet-runner" -id e2e-reviewer -agent fake -caps coding,review \
     -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-reviewer" &

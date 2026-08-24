@@ -23,9 +23,12 @@ func run(args []string) error {
 	fs.StringVar(&cfg.ID, "id", envDef("RIVET_RUNNER_ID", hostDefault()), "идентификатор runner'а")
 	fs.StringVar(&cfg.Agent, "agent", envDef("RIVET_AGENT", "claude-code"), "название агента")
 	fs.StringVar(&cfg.Model, "model", os.Getenv("RIVET_MODEL"), "модель агента")
-	fs.StringVar(&cfg.AgentCmd, "cmd", envDef("RIVET_AGENT_CMD",
-		`claude -p "$(cat "$RIVET_PROMPT_FILE")" --dangerously-skip-permissions`),
-		"команда агента; путь к промпту приходит в $RIVET_PROMPT_FILE")
+	fs.StringVar(&cfg.AgentCmd, "cmd", envDef("RIVET_AGENT_CMD", runner.DefaultAgentCmd),
+		"команда агента для обёртки; путь к промпту приходит в $RIVET_PROMPT_FILE")
+	fs.StringVar(&cfg.Adapter, "adapter", os.Getenv("RIVET_ADAPTER"),
+		"адаптер агента: claude-code (нативный, полная глубина) или wrap (обёртка); пусто — по агенту")
+	fs.StringVar(&cfg.ClaudeBin, "claude-bin", envDef("RIVET_CLAUDE_BIN", "claude"),
+		"бинарник Claude Code для нативного адаптера")
 	caps := fs.String("caps", envDef("RIVET_CAPS", "coding"), "capabilities через запятую")
 	fs.StringVar(&cfg.Workdir, "workdir", envDef("RIVET_WORKDIR", os.ExpandEnv("$HOME/.rivet-runner")), "рабочий каталог")
 	fs.StringVar(&cfg.GitBase, "git-base", envDef("RIVET_GIT_BASE", "https://github.com/"), "префикс URL клонирования репозиториев")
@@ -33,6 +36,13 @@ func run(args []string) error {
 		return err
 	}
 	cfg.Capabilities = strings.Split(*caps, ",")
+	switch cfg.Adapter {
+	case "":
+		cfg.Adapter = runner.DefaultAdapter(cfg.Agent, cfg.AgentCmd)
+	case runner.AdapterWrap, runner.AdapterClaudeCode:
+	default:
+		return fmt.Errorf("неизвестный адаптер %q: ожидается %s или %s", cfg.Adapter, runner.AdapterClaudeCode, runner.AdapterWrap)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

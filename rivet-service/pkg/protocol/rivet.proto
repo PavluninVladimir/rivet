@@ -23,6 +23,11 @@ message RegisterRequest {
   string host = 4;
   repeated string capabilities = 5;
   string protocol_version = 6;
+  // Адаптер подключения агента (claude-code, wrap) и глубина данных,
+  // которую он даёт: full | partial | minimal (спека agent-integration
+  // «Уровни глубины данных»). Сессии runner'а создаются с этой глубиной.
+  string adapter = 7;
+  string depth = 8;
 }
 
 message RegisterResponse {
@@ -56,10 +61,18 @@ message Heartbeat {
 }
 
 // AgentEvent — шаг агента для live-наблюдения (session.step).
+// text — обязательное читаемое представление; структурированные поля
+// заполняет адаптер полной глубины (спека agent-integration «Шаги сессии
+// и затронутые файлы»).
 message AgentEvent {
   string task_id = 1;
   string text = 2;
   string session_id = 3; // сессия стадии из Assignment
+  string kind = 4;           // tool | stop | note; пусто — простой текстовый шаг
+  string tool = 5;           // имя инструмента агента (kind=tool)
+  string detail = 6;         // краткий аргумент: команда, путь, шаблон
+  repeated string files = 7; // затронутые файлы шага (пути от корня рабочей копии)
+  bool ok = 8;               // false — шаг завершился ошибкой
 }
 
 message TranscriptChunk {

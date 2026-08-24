@@ -291,6 +291,13 @@ func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.Stag
 		checks = append(checks, &pb.Check{Name: c.Name, Cmd: c.Cmd})
 	}
 	runnerID := a.Runner.ID
+	// Глубина сессии — глубина адаптера runner'а (спека agent-integration
+	// «Глубина объявлена runner'ом»).
+	depth, err := e.St.RunnerDepth(ctx, runnerID)
+	if err != nil {
+		slog.Error("dispatch: runner depth", "runner", runnerID, "err", err)
+		depth = domain.DepthMinimal
+	}
 	// Сессия создаётся до отправки Assignment: runner повторяет session_id
 	// во всех сообщениях стадии, сообщения без него отбрасываются (design,
 	// решение 4). Без сессии стадию не запускаем — задачу вернёт
@@ -298,7 +305,7 @@ func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.Stag
 	sessionID, err := e.St.CreateSession(ctx, domain.Session{
 		TaskID: a.Task.ID, Attempt: a.Task.AttemptUsed + 1,
 		DriverKind: "scheduler", Agent: a.Runner.Agent, Model: a.Runner.Model,
-		Depth: domain.DepthMinimal, Scope: stage.String(),
+		Depth: depth, Scope: stage.String(),
 	})
 	if err != nil {
 		slog.Error("dispatch: session", "task", a.Task.ID, "err", err)

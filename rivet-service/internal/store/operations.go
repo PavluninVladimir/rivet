@@ -139,8 +139,9 @@ func (s *Store) RevokeRunnerToken(ctx context.Context, id, actorLogin string) er
 // фиксируется»).
 func (s *Store) RegisterRunner(ctx context.Context, r domain.Runner, token domain.RunnerToken) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, upsertRunnerSQL+`, token_id=$6`,
-			r.ID, r.Agent, r.Model, r.Host, r.Capabilities, tokenID(token)); err != nil {
+		r = normalizeAdapter(r)
+		if _, err := tx.Exec(ctx, upsertRunnerSQL+`, token_id=$8`,
+			r.ID, r.Agent, r.Model, r.Host, r.Capabilities, r.Adapter, r.Depth, tokenID(token)); err != nil {
 			return err
 		}
 		_, err := appendEvent(ctx, tx, EventInput{
