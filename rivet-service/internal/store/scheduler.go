@@ -481,7 +481,7 @@ func (s *Store) BlockTask(ctx context.Context, taskID, question string, actor Ev
 // поднять её как актуальную.
 func endOpenSessions(ctx context.Context, tx pgx.Tx, taskID string) error {
 	_, err := tx.Exec(ctx, `
-		UPDATE sessions s SET ended_at=now(),
+		UPDATE sessions s SET ended_at=now(), outcome='прервана: отмена задачи или потеря runner''а',
 			tokens=(SELECT SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0))
 			        FROM usage_records u
 			        WHERE u.task_id = s.task_id AND u.ts >= s.started_at

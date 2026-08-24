@@ -302,10 +302,16 @@ func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.Stag
 	// во всех сообщениях стадии, сообщения без него отбрасываются (design,
 	// решение 4). Без сессии стадию не запускаем — задачу вернёт
 	// heartbeat-таймаут, как при недоступном runner'е.
+	// Запрос сессии — снимок задачи на момент запуска (история и поиск,
+	// спека team-visibility): описание задачи меняется ответами человека.
+	prompt := a.Task.Title
+	if a.Task.Description != "" {
+		prompt += "\n" + a.Task.Description
+	}
 	sessionID, err := e.St.CreateSession(ctx, domain.Session{
 		TaskID: a.Task.ID, Attempt: a.Task.AttemptUsed + 1,
 		DriverKind: "scheduler", Agent: a.Runner.Agent, Model: a.Runner.Model,
-		Depth: depth, Scope: stage.String(),
+		Depth: depth, Scope: stage.String(), Prompt: prompt,
 	})
 	if err != nil {
 		slog.Error("dispatch: session", "task", a.Task.ID, "err", err)
@@ -426,7 +432,7 @@ func (e *Engine) OnTranscript(taskID, sessionID string, data []byte) {
 // вызывающий обязан отбросить сообщение стадии без реакций конвейера.
 // Объект, записанный в blob до неудавшегося захвата, остаётся без ссылки —
 // это безвредный мусор.
-func (e *Engine) flushTranscript(ctx context.Context, task domain.Task, stage, sessionID string) bool {
+func (e *Engine) flushTranscript(ctx context.Context, task domain.Task, stage, sessionID, outcome string) bool {
 	e.mu.Lock()
 	if sessionID == "" || e.sessions[task.ID] != sessionID {
 		e.mu.Unlock()
@@ -445,7 +451,7 @@ func (e *Engine) flushTranscript(ctx context.Context, task domain.Task, stage, s
 			ref = ""
 		}
 	}
-	claimed, err := e.St.EndSession(ctx, sessionID, ref)
+	claimed, err := e.St.EndSession(ctx, sessionID, ref, outcome)
 	if err != nil {
 		slog.Error("end session", "session", sessionID, "err", err)
 		return false
@@ -468,7 +474,12 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 	if err != nil {
 		return err
 	}
-	if !e.flushTranscript(ctx, task, sr.Stage.String(), sr.SessionId) {
+	// Итог сессии для истории: текст результата стадии (уже маскирован).
+	outcome := sr.Detail
+	if sr.Ok && outcome == "" {
+		outcome = "стадия завершена успешно"
+	}
+	if !e.flushTranscript(ctx, task, sr.Stage.String(), sr.SessionId, outcome) {
 		// Сессию уже закрыл другой путь (отмена, потеря runner'а):
 		// результат стадии опоздал, реакции конвейера не выполняются.
 		slog.Warn("stage result закрытой сессии отброшен", "task", sr.TaskId, "session", sr.SessionId)
@@ -637,7 +648,7 @@ func (e *Engine) OnBlocked(ctx context.Context, runnerID string, b *pb.BlockedQu
 	if err != nil {
 		return err
 	}
-	if !e.flushTranscript(ctx, task, "blocked", b.SessionId) {
+	if !e.flushTranscript(ctx, task, "blocked", b.SessionId, "заблокирована вопросом: "+b.Question) {
 		slog.Warn("blocked закрытой сессии отброшен", "task", b.TaskId, "session", b.SessionId)
 		return nil
 	}

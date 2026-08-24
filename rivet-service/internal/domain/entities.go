@@ -154,6 +154,12 @@ type Session struct {
 	// Files — затронутые сессией файлы: nil — недоступно для способа
 	// подключения, пустой список — полная глубина без файлов.
 	Files []string
+	// Prompt — запрос сессии (для scheduler — снимок названия и описания
+	// задачи); Outcome — итог (результат стадии или вопрос blocked);
+	// LastStep — текст последнего шага (спека team-visibility).
+	Prompt   string
+	Outcome  string
+	LastStep string
 	// Tokens — итог токенов сессии; nil = источник не сообщил (не ноль),
 	// колонка nullable с миграции 0004 (спека observability «Учёт usage»).
 	Tokens  *int64

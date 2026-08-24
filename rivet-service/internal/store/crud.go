@@ -337,23 +337,49 @@ func (s *Store) ListAttention(ctx context.Context, userID string) ([]domain.Atte
 }
 
 // ClaimAttention берёт эскалацию в работу; эскалации чужих проектов
-// неотличимы от несуществующих (404-семантика).
+// неотличимы от несуществующих (404-семантика). Событие attention.claimed
+// уходит в SSE проекта: остальные участники видят, кто разбирает, без
+// перезагрузки (спека team-visibility «Взятие эскалации в работу»).
 func (s *Store) ClaimAttention(ctx context.Context, id, login, userID string) error {
-	tag, err := s.Pool.Exec(ctx, `
-		UPDATE attention SET status='claimed', claimed_by=$2 WHERE id=$1 AND status='open'
-		AND project_id IN (SELECT project_id FROM project_members WHERE user_id=$3)`, id, login, userID)
-	if err != nil {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var projectID, taskID string
+		err := tx.QueryRow(ctx, `
+			UPDATE attention SET status='claimed', claimed_by=$2 WHERE id=$1 AND status='open'
+			AND project_id IN (SELECT project_id FROM project_members WHERE user_id=$3)
+			RETURNING project_id::text, COALESCE(task_id::text,'')`, id, login, userID).
+			Scan(&projectID, &taskID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		_, err = appendEvent(ctx, tx, EventInput{
+			ActorKind: domain.ActorUser, ActorID: login, Type: "attention.claimed",
+			ProjectID: projectID, TaskID: taskID,
+			Text:    "эскалацию разбирает " + login,
+			Payload: map[string]any{"attention_id": id, "claimed_by": login},
+		})
 		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	})
 }
 
 // ─── sessions ────────────────────────────────────────────────────────────
 
+// sessionTextCap — предел prompt/outcome сессии: поля индексируются FTS,
+// не место для мегабайтных текстов (обрезка по рунам).
+const sessionTextCap = 2000
+
+func clipRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 func (s *Store) CreateSession(ctx context.Context, in domain.Session) (string, error) {
+	in.Prompt = clipRunes(in.Prompt, sessionTextCap)
 	// files: NULL — недоступно для способа подключения; при полной глубине
 	// список начинается пустым («недоступно ≠ пусто», спека agent-integration).
 	var files []string
@@ -362,11 +388,18 @@ func (s *Store) CreateSession(ctx context.Context, in domain.Session) (string, e
 	}
 	var id string
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO sessions (task_id, attempt, driver_kind, driver_id, agent, model, depth, scope, files)
-		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9)
+		INSERT INTO sessions (task_id, attempt, driver_kind, driver_id, agent, model, depth, scope, files, prompt)
+		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10)
 		RETURNING id`,
-		in.TaskID, in.Attempt, in.DriverKind, in.DriverID, in.Agent, in.Model, in.Depth, in.Scope, files).Scan(&id)
+		in.TaskID, in.Attempt, in.DriverKind, in.DriverID, in.Agent, in.Model, in.Depth, in.Scope, files, in.Prompt).Scan(&id)
 	return id, err
+}
+
+// SetSessionLastStep — текст последнего шага сессии (реестр активных
+// сессий, спека team-visibility «Последний шаг в реестре»).
+func (s *Store) SetSessionLastStep(ctx context.Context, sessionID, text string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE sessions SET last_step=$2 WHERE id=$1`, sessionID, text)
+	return err
 }
 
 // ListTaskSessions — история сессий задачи по возрастанию started_at
@@ -376,7 +409,7 @@ func (s *Store) ListTaskSessions(ctx context.Context, taskID string) ([]domain.S
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id::text, COALESCE(task_id::text,''), attempt, driver_kind, driver_id,
 		       agent, model, depth, COALESCE(scope,''), COALESCE(transcript_ref,''),
-		       tokens, started_at, ended_at, files
+		       tokens, started_at, ended_at, files, prompt, outcome, last_step
 		FROM sessions WHERE task_id=$1 ORDER BY started_at`, taskID)
 	if err != nil {
 		return nil, err
@@ -387,7 +420,7 @@ func (s *Store) ListTaskSessions(ctx context.Context, taskID string) ([]domain.S
 		var v domain.Session
 		if err := rows.Scan(&v.ID, &v.TaskID, &v.Attempt, &v.DriverKind, &v.DriverID,
 			&v.Agent, &v.Model, &v.Depth, &v.Scope, &v.TranscriptRef,
-			&v.Tokens, &v.Started, &v.Ended, &v.Files); err != nil {
+			&v.Tokens, &v.Started, &v.Ended, &v.Files, &v.Prompt, &v.Outcome, &v.LastStep); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -462,15 +495,18 @@ func (s *Store) AppendSessionFiles(ctx context.Context, sessionID string, paths 
 // путь (отмена, потеря runner'а), и вызывающий обязан отбросить сообщение
 // стадии, а не продолжать реакции конвейера (design add-session-visibility,
 // решение 4).
-func (s *Store) EndSession(ctx context.Context, id, transcriptRef string) (bool, error) {
+// outcome — итог сессии для истории (текст результата стадии или вопрос
+// blocked, спека team-visibility «История сессий и запросов с поиском»).
+func (s *Store) EndSession(ctx context.Context, id, transcriptRef, outcome string) (bool, error) {
+	outcome = clipRunes(outcome, sessionTextCap)
 	tag, err := s.Pool.Exec(ctx, `
-		UPDATE sessions s SET ended_at=now(), transcript_ref=NULLIF($2,''),
+		UPDATE sessions s SET ended_at=now(), transcript_ref=NULLIF($2,''), outcome=$3,
 			tokens=(SELECT SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0))
 			        FROM usage_records u
 			        WHERE u.task_id = s.task_id AND u.ts >= s.started_at
 			          AND (u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL))
 		WHERE s.id=$1 AND s.ended_at IS NULL`,
-		id, transcriptRef)
+		id, transcriptRef, outcome)
 	if err != nil {
 		return false, err
 	}

@@ -93,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/scm/probe", s.scmProbe)
 	mux.HandleFunc("GET /api/v1/projects/{id}/repository", s.getRepository)
 	mux.HandleFunc("PUT /api/v1/projects/{id}/credentials", s.putCredentials)
+	mux.HandleFunc("GET /api/v1/projects/{id}/sessions", s.projectSessions)
 	mux.HandleFunc("GET /api/v1/projects/{id}/epics", s.listEpics)
 	mux.HandleFunc("POST /api/v1/projects/{id}/epics", s.createEpic)
 	mux.HandleFunc("GET /api/v1/epics/{id}", s.getEpic)
