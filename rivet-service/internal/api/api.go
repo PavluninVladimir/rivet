@@ -113,6 +113,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/deployments/{id}/log", s.deploymentLog)
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
 	mux.HandleFunc("PATCH /api/v1/tasks/{id}", s.patchTask)
+	mux.HandleFunc("DELETE /api/v1/tasks/{id}", s.deleteTask)
 	mux.HandleFunc("GET /api/v1/tasks/{id}/sessions", s.listTaskSessions)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/sessions", s.startTaskSession)
 	mux.HandleFunc("GET /api/v1/sessions/{id}/transcript", s.sessionTranscript)
@@ -522,6 +523,15 @@ func (s *Server) addTask(w http.ResponseWriter, r *http.Request) {
 	if !s.requireEpicMember(w, r, epicID) {
 		return
 	}
+	// Терминальный Epic неизменяем (add-plan-editing): задачи добавляются
+	// только в planned/running/paused.
+	if epic, err := s.St.GetEpic(r.Context(), epicID); err != nil {
+		writeErr(w, err)
+		return
+	} else if epic.Status == domain.EpicDone || epic.Status == domain.EpicArchived {
+		writeErr(w, fmt.Errorf("%w: Epic в статусе %s не редактируется", store.ErrConflict, epic.Status))
+		return
+	}
 	var in struct {
 		Title        string   `json:"title"`
 		Description  string   `json:"description"`
@@ -599,26 +609,61 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"task": t, "timeline": timeline})
 }
 
-// patchTask — изменение лимита попыток задачи участником проекта
-// (api-contract add-policy-presets): меньше 1 и меньше израсходованных
-// попыток отклоняется.
+// patchTask — правка задачи участником проекта: лимит попыток
+// (add-policy-presets) и поля плана — название, описание, критерии,
+// зависимости — для не начатых задач (api-contract add-plan-editing).
 func (s *Server) patchTask(w http.ResponseWriter, r *http.Request) {
-	if !s.requireTaskMember(w, r, r.PathValue("id")) {
+	taskID := r.PathValue("id")
+	if !s.requireTaskMember(w, r, taskID) {
 		return
 	}
 	var in struct {
-		AttemptLimit *int `json:"attempt_limit"`
+		AttemptLimit *int      `json:"attempt_limit"`
+		Title        *string   `json:"title"`
+		Description  *string   `json:"description"`
+		Criteria     *[]string `json:"criteria"`
+		Deps         *[]string `json:"deps"`
 	}
-	if err := decode(r, &in); err != nil || in.AttemptLimit == nil {
-		unprocessable(w, "нужен attempt_limit")
+	if err := decode(r, &in); err != nil {
+		unprocessable(w, "невалидный JSON")
 		return
 	}
-	t, err := s.St.SetTaskAttemptLimit(r.Context(), r.PathValue("id"), *in.AttemptLimit)
+	// Вся правка — одна store-транзакция: частично применённый PATCH
+	// (лимит прошёл, план отклонён) недопустим.
+	edit := store.PlanEdit{Title: in.Title, Description: in.Description,
+		Criteria: in.Criteria, Deps: in.Deps, AttemptLimit: in.AttemptLimit}
+	epicID, err := s.St.UpdateTaskPlan(r.Context(), taskID, edit, user(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	// Готовность зависит от рёбер: пересчёт для работающего Epic
+	// (в planned RecomputeEpic ничего не двигает).
+	if in.Deps != nil {
+		if err := s.St.RecomputeEpic(r.Context(), epicID); err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
+	t, err := s.St.GetTask(r.Context(), taskID)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, t)
+}
+
+// deleteTask — удаление чистой задачи чернового плана (api-contract
+// add-plan-editing); задачи с историей и запущенных Epic — через отмену.
+func (s *Server) deleteTask(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTaskMember(w, r, r.PathValue("id")) {
+		return
+	}
+	if err := s.St.DeletePlannedTask(r.Context(), r.PathValue("id"), user(r)); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 func (s *Server) taskAnswer(w http.ResponseWriter, r *http.Request) {
