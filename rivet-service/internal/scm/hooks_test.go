@@ -88,8 +88,17 @@ func TestUpdateWebhookSubscribesAllEvents(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("обновление хука: %v %v", ok, err)
 	}
-	if len(patched) != len(hookEvents) {
-		t.Fatalf("обновление должно переподписать на все события: %v", patched)
+	// Сравниваем состав, а не длину: четыре чужих события прошли бы
+	// проверку по количеству.
+	want := map[string]bool{}
+	for _, ev := range hookEvents {
+		want[ev] = true
+	}
+	for _, ev := range patched {
+		delete(want, ev)
+	}
+	if len(want) != 0 || len(patched) != len(hookEvents) {
+		t.Fatalf("обновление должно переподписать ровно на %v, получили %v", hookEvents, patched)
 	}
 
 	var glPut map[string]any
