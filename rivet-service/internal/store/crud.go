@@ -338,6 +338,17 @@ func (s *Store) ListAttention(ctx context.Context, userID string) ([]domain.Atte
 	return out, rows.Err()
 }
 
+// HasOpenAttention — есть ли у задачи незакрытая эскалация с такой
+// причиной: повторное внешнее событие не должно плодить одинаковые
+// карточки в очереди «needs attention».
+func (s *Store) HasOpenAttention(ctx context.Context, taskID string, reason domain.AttentionReason) (bool, error) {
+	var exists bool
+	err := s.Pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM attention
+		WHERE task_id=$1 AND reason=$2 AND status <> 'resolved')`, taskID, string(reason)).Scan(&exists)
+	return exists, err
+}
+
 // ClaimAttention берёт эскалацию в работу; эскалации чужих проектов
 // неотличимы от несуществующих (404-семантика). Событие attention.claimed
 // уходит в SSE проекта: остальные участники видят, кто разбирает, без
