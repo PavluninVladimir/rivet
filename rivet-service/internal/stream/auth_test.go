@@ -154,7 +154,7 @@ func TestRunnerRegistrationRequiresToken(t *testing.T) {
 }
 
 // Runner прежней версии протокола получает понятный отказ, а не разрыв
-// (api-contract add-context-channel: v8).
+// (api-contract add-policy-delivery: v9).
 func TestRegisterRejectsOldProtocol(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
@@ -169,10 +169,10 @@ func TestRegisterRejectsOldProtocol(t *testing.T) {
 	client := dialAuthServer(t, st)
 	authed := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+secret)
 	resp, err := client.Register(authed, &pb.RegisterRequest{
-		RunnerId: "old", Agent: "fake", ProtocolVersion: "7",
+		RunnerId: "old", Agent: "fake", ProtocolVersion: "8",
 	})
 	if err != nil || resp.Accepted {
-		t.Fatalf("v7 должен отклоняться: %v %+v", err, resp)
+		t.Fatalf("v8 должен отклоняться: %v %+v", err, resp)
 	}
 	if !strings.Contains(resp.Message, protocolVersion) {
 		t.Fatalf("сообщение должно называть нужную версию: %q", resp.Message)

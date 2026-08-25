@@ -109,6 +109,7 @@ message StageResult {
   string detail = 4;   // вывод тестов, вердикт review, url PR
   string pr_url = 5;   // для stage=CODING при создании PR
   string session_id = 6; // сессия стадии из Assignment
+  string policy_hash = 7; // эхо Assignment.policy.hash: итог стадии привязан к версии
 
   enum Stage {
     STAGE_UNSPECIFIED = 0;
@@ -179,6 +180,21 @@ message Assignment {
   // непустом значении runner использует его как промпт агента вместо
   // сгенерированного промпта стадии.
   string user_prompt = 15;
+  // Действующая политика проекта на момент назначения (спека access-policy
+  // «Доставка политик runner'ам»): runner применяет только её и не читает
+  // политику из рабочей копии. Поле пустое, только если политику не удалось
+  // прочитать: у проекта без своих версий действуют значения установки, и
+  // хэш у них тоже есть.
+  Policy policy = 16;
+}
+
+// Policy — часть политики, которая что-то значит для агента стадии.
+// Лимиты, бюджеты и авто-merge применяются на control plane и сюда не
+// едут: обещать принуждение, которого у runner'а нет, не нужно.
+message Policy {
+  string hash = 1;                     // хэш версии действующей политики
+  repeated string human_review_paths = 2; // пути, правки в которых требуют человека
+  string policy_dir = 3;               // каталог файлов политики (менять запрещено)
 }
 
 message Check {

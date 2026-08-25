@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
@@ -74,7 +75,10 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		emitUsage()
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_StageResult{
 			StageResult: &pb.StageResult{TaskId: as.TaskId, SessionId: as.SessionId,
-				Stage: as.Stage, Ok: ok, Detail: tail(detail, 8000)}}})
+				Stage: as.Stage, Ok: ok, Detail: tail(detail, 8000),
+				// Эхо доставленной версии: итог стадии привязан к политике,
+				// по которой работал агент (спека access-policy).
+				PolicyHash: as.GetPolicy().GetHash()}}})
 	}
 
 	ws, err := a.workspace(sctx, as, step)
@@ -338,6 +342,62 @@ func runShellEnv(ctx context.Context, dir, script string, env []string, transcri
 // stagePrompt — промпт стадии реализации: промпт пользователя (сессия
 // доработки, спека agent-integration «Сессия из интерфейса Rivet») с
 // системным хвостом либо сгенерированный промпт задачи.
+// policyPrompt — блок политики проекта для промпта стадии: единственный
+// источник политики у runner'а — назначение, из рабочей копии он её не
+// читает (спека access-policy «Доставка политик runner'ам»). Пустая
+// политика блока не даёт: промпт остаётся прежним.
+func policyPrompt(p *pb.Policy) string {
+	if p == nil || p.Hash == "" {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Политика проекта (версия %s)\n", shortHash(p.Hash))
+	if dir := p.PolicyDir; dir != "" {
+		fmt.Fprintf(&b, "- Файлы политики в каталоге %s менять нельзя: это делает человек отдельным решением.\n", dir)
+	}
+	if paths := p.HumanReviewPaths; len(paths) > 0 {
+		shown := paths
+		if len(shown) > policyPathsInPrompt {
+			shown = shown[:policyPathsInPrompt]
+		}
+		fmt.Fprintf(&b, "- Правки в путях %s требуют ревью человека — без необходимости их не трогай.\n",
+			strings.Join(sanitizePaths(shown), ", "))
+		if len(paths) > len(shown) {
+			fmt.Fprintf(&b, "- …и ещё %d защищённых путей.\n", len(paths)-len(shown))
+		}
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+// policyPathsInPrompt — сколько защищённых путей уходит в промпт целиком:
+// длинный список раздул бы контекст стадии.
+const policyPathsInPrompt = 50
+
+// sanitizePaths чистит пути перед вставкой в промпт: управляющие символы
+// в шаблоне превратили бы путь в отдельную инструкцию агенту. Plane такие
+// шаблоны не принимает, но промпт собирает runner — чистим на его границе.
+func sanitizePaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		out = append(out, clipRunes(strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+				return ' '
+			}
+			return r
+		}, p), 300))
+	}
+	return out
+}
+
+// shortHash — короткий хэш версии политики для читаемого промпта.
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
 func stagePrompt(as *pb.Assignment) string {
 	if as.UserPrompt == "" {
 		return codingPrompt(as)
@@ -345,7 +405,11 @@ func stagePrompt(as *pb.Assignment) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Ты работаешь над задачей task-%d в ветке %s (сессия доработки по запросу человека).\n\n", as.TaskNum, as.Branch)
 	b.WriteString(as.UserPrompt)
-	b.WriteString("\n\nРаботай в текущем каталоге. Не коммить и не пушь — это сделает оркестратор. " +
+	b.WriteString("\n\n")
+	// Политика идёт после промпта человека: блок ограничений не должен
+	// теряться выше по тексту (там же, где системные правила стадии).
+	b.WriteString(policyPrompt(as.GetPolicy()))
+	b.WriteString("Работай в текущем каталоге. Не коммить и не пушь — это сделает оркестратор. " +
 		"Если не можешь однозначно понять ожидаемое поведение — не гадай: выведи строку " +
 		"«BLOCKED: <конкретный вопрос>» и остановись.\n")
 	return b.String()
@@ -365,6 +429,7 @@ func codingPrompt(as *pb.Assignment) string {
 	if as.ExtraContext != "" {
 		fmt.Fprintf(&b, "# Дополнительный контекст\n%s\n\n", as.ExtraContext)
 	}
+	b.WriteString(policyPrompt(as.GetPolicy()))
 	b.WriteString("Реализуй задачу в текущем каталоге. Не коммить и не пушь — это сделает оркестратор. " +
 		"Если не можешь однозначно понять ожидаемое поведение — не гадай: выведи строку " +
 		"«BLOCKED: <конкретный вопрос>» и остановись.\n")
@@ -384,6 +449,7 @@ func reviewPrompt(as *pb.Assignment) string {
 	if as.ExtraContext != "" {
 		fmt.Fprintf(&b, "# Diff PR\n```diff\n%s\n```\n\n", as.ExtraContext)
 	}
+	b.WriteString(policyPrompt(as.GetPolicy()))
 	b.WriteString("Проверь изменения в текущем каталоге (ветка " + as.Branch + ") по критериям и качеству кода. " +
 		"Код не меняй. Закончи вывод РОВНО одной строкой: " +
 		"«VERDICT: APPROVED» или «VERDICT: CHANGES: <список замечаний одной строкой>».\n")

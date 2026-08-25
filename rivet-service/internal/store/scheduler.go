@@ -344,7 +344,17 @@ func freeRunner(ctx context.Context, tx pgx.Tx, taskID string) error {
 // причиной review, даже если общий лимит попыток не исчерпан. 0 — лимит
 // отказов не применяется.
 func (s *Store) ConsumeAttempt(ctx context.Context, taskID string,
-	reason domain.AttentionReason, detail string, keepRunner bool, reviewLimit int) (failed bool, err error) {
+	reason domain.AttentionReason, detail string, keepRunner bool, reviewLimit int,
+	policyHash string) (failed bool, err error) {
+
+	// Версия политики, по которой работала стадия: итог отказа тоже должен
+	// быть привязан к ней (спека access-policy «Доставка политик runner'ам»).
+	payload := func(m map[string]any) map[string]any {
+		if policyHash != "" {
+			m["policy_hash"] = policyHash
+		}
+		return m
+	}
 
 	limitMsg, fixMsg := "Цикл исправления неуспешен %d раз — лимит попыток исчерпан.", "исправление (попытка %d/%d)"
 	switch reason {
@@ -411,7 +421,7 @@ func (s *Store) ConsumeAttempt(ctx context.Context, taskID string,
 			_, err := appendEvent(ctx, tx, EventInput{
 				ActorKind: domain.ActorScheduler, Type: "task.status",
 				ProjectID: projectID, EpicID: epicID, TaskID: taskID,
-				Text: msg, Payload: map[string]any{"status": "failed", "attempt": used, "detail": detail},
+				Text: msg, Payload: payload(map[string]any{"status": "failed", "attempt": used, "detail": detail}),
 			})
 			return err
 		}
@@ -436,7 +446,7 @@ func (s *Store) ConsumeAttempt(ctx context.Context, taskID string,
 			ActorKind: domain.ActorScheduler, Type: "task.status",
 			ProjectID: projectID, EpicID: epicID, TaskID: taskID,
 			Text:    fmt.Sprintf(fixMsg, used, limit),
-			Payload: map[string]any{"status": "fixing", "attempt": used, "detail": detail},
+			Payload: payload(map[string]any{"status": "fixing", "attempt": used, "detail": detail}),
 		})
 		return err
 	})

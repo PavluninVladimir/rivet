@@ -390,10 +390,11 @@ func (s *Store) CreateSession(ctx context.Context, in domain.Session) (string, e
 	}
 	var id string
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO sessions (task_id, attempt, driver_kind, driver_id, agent, model, depth, scope, files, prompt, private)
-		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10,$11)
+		INSERT INTO sessions (task_id, attempt, driver_kind, driver_id, agent, model, depth, scope, files, prompt, private, policy_hash)
+		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10,$11,$12)
 		RETURNING id`,
-		in.TaskID, in.Attempt, in.DriverKind, in.DriverID, in.Agent, in.Model, in.Depth, in.Scope, files, in.Prompt, in.Private).Scan(&id)
+		in.TaskID, in.Attempt, in.DriverKind, in.DriverID, in.Agent, in.Model, in.Depth, in.Scope,
+		files, in.Prompt, in.Private, in.PolicyHash).Scan(&id)
 	return id, err
 }
 
@@ -413,7 +414,7 @@ func (s *Store) ListTaskSessions(ctx context.Context, taskID, viewerLogin string
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id::text, COALESCE(task_id::text,''), attempt, driver_kind, driver_id,
 		       agent, model, depth, COALESCE(scope,''), COALESCE(transcript_ref,''),
-		       tokens, started_at, ended_at, files, prompt, outcome, last_step, private
+		       tokens, started_at, ended_at, files, prompt, outcome, last_step, private, policy_hash
 		FROM sessions WHERE task_id=$1 ORDER BY started_at`, taskID)
 	if err != nil {
 		return nil, err
@@ -424,7 +425,8 @@ func (s *Store) ListTaskSessions(ctx context.Context, taskID, viewerLogin string
 		var v domain.Session
 		if err := rows.Scan(&v.ID, &v.TaskID, &v.Attempt, &v.DriverKind, &v.DriverID,
 			&v.Agent, &v.Model, &v.Depth, &v.Scope, &v.TranscriptRef,
-			&v.Tokens, &v.Started, &v.Ended, &v.Files, &v.Prompt, &v.Outcome, &v.LastStep, &v.Private); err != nil {
+			&v.Tokens, &v.Started, &v.Ended, &v.Files, &v.Prompt, &v.Outcome, &v.LastStep,
+			&v.Private, &v.PolicyHash); err != nil {
 			return nil, err
 		}
 		if v.Private && v.DriverID != viewerLogin {

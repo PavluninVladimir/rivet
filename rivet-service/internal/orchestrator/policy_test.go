@@ -739,3 +739,52 @@ func TestAutoMergeOffStaysSilent(t *testing.T) {
 		t.Fatalf("merge не должен был выполниться: %v", f.sc.merged)
 	}
 }
+
+// Политика проекта едет в назначении, а её хэш возвращается в результате
+// стадии и попадает в событие (спека access-policy «Доставка политик
+// runner'ам»).
+func TestPolicyDeliveredWithAssignment(t *testing.T) {
+	ctx := context.Background()
+	f := newPolicyFixture(t, "")
+	eff := enableAutoMerge(t, f.st, f.p.ID, []string{"infra/**"})
+	if err := f.e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	as := f.out.lastAssign(t)
+	if as.GetPolicy().GetHash() != eff.Hash {
+		t.Fatalf("хэш политики в назначении: %+v", as.GetPolicy())
+	}
+	if got := as.GetPolicy().GetHumanReviewPaths(); len(got) != 1 || got[0] != "infra/**" {
+		t.Fatalf("защищённые пути в назначении: %+v", got)
+	}
+	if as.GetPolicy().GetPolicyDir() != policy.PolicyDir {
+		t.Fatalf("каталог политики: %q", as.GetPolicy().GetPolicyDir())
+	}
+
+	// Эхо хэша из результата стадии уходит в payload события.
+	worker := mustTaskRunner(t, f.st, f.task.ID)
+	if err := f.e.OnStageResult(ctx, worker, &pb.StageResult{
+		TaskId: f.task.ID, SessionId: as.SessionId, Stage: pb.StageResult_CODING,
+		Ok: true, PolicyHash: as.GetPolicy().GetHash()}); err != nil {
+		t.Fatal(err)
+	}
+	evs := eventsOfType(t, f.st, f.task.ID, "task.status")
+	var found bool
+	for _, e := range evs {
+		if e.Payload["policy_hash"] == eff.Hash {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("хэш политики должен попасть в событие стадии: %+v", evs)
+	}
+	// Версия записана и на сессии: итог стадии привязан к политике, чем бы
+	// стадия ни закончилась.
+	sessions, err := f.st.ListTaskSessions(ctx, f.task.ID, "owner")
+	if err != nil || len(sessions) == 0 {
+		t.Fatalf("сессии задачи: %v %d", err, len(sessions))
+	}
+	if sessions[0].PolicyHash != eff.Hash {
+		t.Fatalf("версия политики на сессии: %q", sessions[0].PolicyHash)
+	}
+}

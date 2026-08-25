@@ -127,7 +127,7 @@ func (x DeployResult_Stage) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DeployResult_Stage.Descriptor instead.
 func (DeployResult_Stage) EnumDescriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{19, 0}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{20, 0}
 }
 
 type RegisterRequest struct {
@@ -869,9 +869,10 @@ type StageResult struct {
 	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
 	Stage         StageResult_Stage      `protobuf:"varint,2,opt,name=stage,proto3,enum=rivet.v1.StageResult_Stage" json:"stage,omitempty"`
 	Ok            bool                   `protobuf:"varint,3,opt,name=ok,proto3" json:"ok,omitempty"`
-	Detail        string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`                        // вывод тестов, вердикт review, url PR
-	PrUrl         string                 `protobuf:"bytes,5,opt,name=pr_url,json=prUrl,proto3" json:"pr_url,omitempty"`             // для stage=CODING при создании PR
-	SessionId     string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // сессия стадии из Assignment
+	Detail        string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`                           // вывод тестов, вердикт review, url PR
+	PrUrl         string                 `protobuf:"bytes,5,opt,name=pr_url,json=prUrl,proto3" json:"pr_url,omitempty"`                // для stage=CODING при создании PR
+	SessionId     string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`    // сессия стадии из Assignment
+	PolicyHash    string                 `protobuf:"bytes,7,opt,name=policy_hash,json=policyHash,proto3" json:"policy_hash,omitempty"` // эхо Assignment.policy.hash: итог стадии привязан к версии
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -944,6 +945,13 @@ func (x *StageResult) GetPrUrl() string {
 func (x *StageResult) GetSessionId() string {
 	if x != nil {
 		return x.SessionId
+	}
+	return ""
+}
+
+func (x *StageResult) GetPolicyHash() string {
+	if x != nil {
+		return x.PolicyHash
 	}
 	return ""
 }
@@ -1320,7 +1328,13 @@ type Assignment struct {
 	// Промпт пользователя (сессия доработки, add-user-sessions): при
 	// непустом значении runner использует его как промпт агента вместо
 	// сгенерированного промпта стадии.
-	UserPrompt    string `protobuf:"bytes,15,opt,name=user_prompt,json=userPrompt,proto3" json:"user_prompt,omitempty"`
+	UserPrompt string `protobuf:"bytes,15,opt,name=user_prompt,json=userPrompt,proto3" json:"user_prompt,omitempty"`
+	// Действующая политика проекта на момент назначения (спека access-policy
+	// «Доставка политик runner'ам»): runner применяет только её и не читает
+	// политику из рабочей копии. Поле пустое, только если политику не удалось
+	// прочитать: у проекта без своих версий действуют значения установки, и
+	// хэш у них тоже есть.
+	Policy        *Policy `protobuf:"bytes,16,opt,name=policy,proto3" json:"policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1460,6 +1474,76 @@ func (x *Assignment) GetUserPrompt() string {
 	return ""
 }
 
+func (x *Assignment) GetPolicy() *Policy {
+	if x != nil {
+		return x.Policy
+	}
+	return nil
+}
+
+// Policy — часть политики, которая что-то значит для агента стадии.
+// Лимиты, бюджеты и авто-merge применяются на control plane и сюда не
+// едут: обещать принуждение, которого у runner'а нет, не нужно.
+type Policy struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Hash             string                 `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`                                                   // хэш версии действующей политики
+	HumanReviewPaths []string               `protobuf:"bytes,2,rep,name=human_review_paths,json=humanReviewPaths,proto3" json:"human_review_paths,omitempty"` // пути, правки в которых требуют человека
+	PolicyDir        string                 `protobuf:"bytes,3,opt,name=policy_dir,json=policyDir,proto3" json:"policy_dir,omitempty"`                        // каталог файлов политики (менять запрещено)
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *Policy) Reset() {
+	*x = Policy{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Policy) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Policy) ProtoMessage() {}
+
+func (x *Policy) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Policy.ProtoReflect.Descriptor instead.
+func (*Policy) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *Policy) GetHash() string {
+	if x != nil {
+		return x.Hash
+	}
+	return ""
+}
+
+func (x *Policy) GetHumanReviewPaths() []string {
+	if x != nil {
+		return x.HumanReviewPaths
+	}
+	return nil
+}
+
+func (x *Policy) GetPolicyDir() string {
+	if x != nil {
+		return x.PolicyDir
+	}
+	return ""
+}
+
 type Check struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -1470,7 +1554,7 @@ type Check struct {
 
 func (x *Check) Reset() {
 	*x = Check{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1482,7 +1566,7 @@ func (x *Check) String() string {
 func (*Check) ProtoMessage() {}
 
 func (x *Check) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1495,7 +1579,7 @@ func (x *Check) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Check.ProtoReflect.Descriptor instead.
 func (*Check) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{14}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Check) GetName() string {
@@ -1522,7 +1606,7 @@ type Answer struct {
 
 func (x *Answer) Reset() {
 	*x = Answer{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1534,7 +1618,7 @@ func (x *Answer) String() string {
 func (*Answer) ProtoMessage() {}
 
 func (x *Answer) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1547,7 +1631,7 @@ func (x *Answer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Answer.ProtoReflect.Descriptor instead.
 func (*Answer) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{15}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Answer) GetTaskId() string {
@@ -1573,7 +1657,7 @@ type CancelTask struct {
 
 func (x *CancelTask) Reset() {
 	*x = CancelTask{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1585,7 +1669,7 @@ func (x *CancelTask) String() string {
 func (*CancelTask) ProtoMessage() {}
 
 func (x *CancelTask) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1598,7 +1682,7 @@ func (x *CancelTask) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTask.ProtoReflect.Descriptor instead.
 func (*CancelTask) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{16}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *CancelTask) GetTaskId() string {
@@ -1617,7 +1701,7 @@ type PauseRunner struct {
 
 func (x *PauseRunner) Reset() {
 	*x = PauseRunner{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1629,7 +1713,7 @@ func (x *PauseRunner) String() string {
 func (*PauseRunner) ProtoMessage() {}
 
 func (x *PauseRunner) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1642,7 +1726,7 @@ func (x *PauseRunner) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PauseRunner.ProtoReflect.Descriptor instead.
 func (*PauseRunner) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{17}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *PauseRunner) GetDrain() bool {
@@ -1676,7 +1760,7 @@ type DeployJob struct {
 
 func (x *DeployJob) Reset() {
 	*x = DeployJob{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1688,7 +1772,7 @@ func (x *DeployJob) String() string {
 func (*DeployJob) ProtoMessage() {}
 
 func (x *DeployJob) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1701,7 +1785,7 @@ func (x *DeployJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeployJob.ProtoReflect.Descriptor instead.
 func (*DeployJob) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{18}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *DeployJob) GetDeploymentId() string {
@@ -1796,7 +1880,7 @@ type DeployResult struct {
 
 func (x *DeployResult) Reset() {
 	*x = DeployResult{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1808,7 +1892,7 @@ func (x *DeployResult) String() string {
 func (*DeployResult) ProtoMessage() {}
 
 func (x *DeployResult) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1821,7 +1905,7 @@ func (x *DeployResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeployResult.ProtoReflect.Descriptor instead.
 func (*DeployResult) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{19}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *DeployResult) GetDeploymentId() string {
@@ -1932,7 +2016,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\v_tokens_outB\v\n" +
 	"\t_cost_usdB\n" +
 	"\n" +
-	"\b_ctx_pct\"\x88\x02\n" +
+	"\b_ctx_pct\"\xa9\x02\n" +
 	"\vStageResult\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x121\n" +
 	"\x05stage\x18\x02 \x01(\x0e2\x1b.rivet.v1.StageResult.StageR\x05stage\x12\x0e\n" +
@@ -1940,7 +2024,9 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x06detail\x18\x04 \x01(\tR\x06detail\x12\x15\n" +
 	"\x06pr_url\x18\x05 \x01(\tR\x05prUrl\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x06 \x01(\tR\tsessionId\"O\n" +
+	"session_id\x18\x06 \x01(\tR\tsessionId\x12\x1f\n" +
+	"\vpolicy_hash\x18\a \x01(\tR\n" +
+	"policyHash\"O\n" +
 	"\x05Stage\x12\x15\n" +
 	"\x11STAGE_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -1973,7 +2059,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x04text\x18\x04 \x01(\tR\x04text\"'\n" +
 	"\x03Ack\x12 \n" +
 	"\facked_msg_id\x18\x01 \x01(\tR\n" +
-	"ackedMsgId\"\xda\x03\n" +
+	"ackedMsgId\"\x84\x04\n" +
 	"\n" +
 	"Assignment\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
@@ -1994,7 +2080,13 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\vbase_branch\x18\x0e \x01(\tR\n" +
 	"baseBranch\x12\x1f\n" +
 	"\vuser_prompt\x18\x0f \x01(\tR\n" +
-	"userPrompt\"-\n" +
+	"userPrompt\x12(\n" +
+	"\x06policy\x18\x10 \x01(\v2\x10.rivet.v1.PolicyR\x06policy\"i\n" +
+	"\x06Policy\x12\x12\n" +
+	"\x04hash\x18\x01 \x01(\tR\x04hash\x12,\n" +
+	"\x12human_review_paths\x18\x02 \x03(\tR\x10humanReviewPaths\x12\x1d\n" +
+	"\n" +
+	"policy_dir\x18\x03 \x01(\tR\tpolicyDir\"-\n" +
 	"\x05Check\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x10\n" +
 	"\x03cmd\x18\x02 \x01(\tR\x03cmd\"5\n" +
@@ -2051,7 +2143,7 @@ func file_pkg_protocol_rivet_proto_rawDescGZIP() []byte {
 }
 
 var file_pkg_protocol_rivet_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(StageResult_Stage)(0),   // 0: rivet.v1.StageResult.Stage
 	(DeployResult_Stage)(0),  // 1: rivet.v1.DeployResult.Stage
@@ -2069,12 +2161,13 @@ var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(*Context)(nil),          // 13: rivet.v1.Context
 	(*Ack)(nil),              // 14: rivet.v1.Ack
 	(*Assignment)(nil),       // 15: rivet.v1.Assignment
-	(*Check)(nil),            // 16: rivet.v1.Check
-	(*Answer)(nil),           // 17: rivet.v1.Answer
-	(*CancelTask)(nil),       // 18: rivet.v1.CancelTask
-	(*PauseRunner)(nil),      // 19: rivet.v1.PauseRunner
-	(*DeployJob)(nil),        // 20: rivet.v1.DeployJob
-	(*DeployResult)(nil),     // 21: rivet.v1.DeployResult
+	(*Policy)(nil),           // 16: rivet.v1.Policy
+	(*Check)(nil),            // 17: rivet.v1.Check
+	(*Answer)(nil),           // 18: rivet.v1.Answer
+	(*CancelTask)(nil),       // 19: rivet.v1.CancelTask
+	(*PauseRunner)(nil),      // 20: rivet.v1.PauseRunner
+	(*DeployJob)(nil),        // 21: rivet.v1.DeployJob
+	(*DeployResult)(nil),     // 22: rivet.v1.DeployResult
 }
 var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	5,  // 0: rivet.v1.RunnerMsg.hello:type_name -> rivet.v1.Hello
@@ -2084,27 +2177,28 @@ var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	9,  // 4: rivet.v1.RunnerMsg.usage:type_name -> rivet.v1.Usage
 	10, // 5: rivet.v1.RunnerMsg.stage_result:type_name -> rivet.v1.StageResult
 	11, // 6: rivet.v1.RunnerMsg.blocked:type_name -> rivet.v1.BlockedQuestion
-	21, // 7: rivet.v1.RunnerMsg.deploy_result:type_name -> rivet.v1.DeployResult
+	22, // 7: rivet.v1.RunnerMsg.deploy_result:type_name -> rivet.v1.DeployResult
 	0,  // 8: rivet.v1.StageResult.stage:type_name -> rivet.v1.StageResult.Stage
 	14, // 9: rivet.v1.PlaneMsg.ack:type_name -> rivet.v1.Ack
 	15, // 10: rivet.v1.PlaneMsg.assign:type_name -> rivet.v1.Assignment
-	17, // 11: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
-	18, // 12: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
-	19, // 13: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
-	20, // 14: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
+	18, // 11: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
+	19, // 12: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
+	20, // 13: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
+	21, // 14: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
 	13, // 15: rivet.v1.PlaneMsg.context:type_name -> rivet.v1.Context
 	0,  // 16: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
-	16, // 17: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
-	1,  // 18: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
-	2,  // 19: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
-	4,  // 20: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
-	3,  // 21: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
-	12, // 22: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
-	21, // [21:23] is the sub-list for method output_type
-	19, // [19:21] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	17, // 17: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
+	16, // 18: rivet.v1.Assignment.policy:type_name -> rivet.v1.Policy
+	1,  // 19: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
+	2,  // 20: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
+	4,  // 21: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
+	3,  // 22: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
+	12, // 23: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
+	22, // [22:24] is the sub-list for method output_type
+	20, // [20:22] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_pkg_protocol_rivet_proto_init() }
@@ -2139,7 +2233,7 @@ func file_pkg_protocol_rivet_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_protocol_rivet_proto_rawDesc), len(file_pkg_protocol_rivet_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   20,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

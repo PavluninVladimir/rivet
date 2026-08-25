@@ -19,11 +19,23 @@ hook() { # $1 - JSON события хука
   # сообщение системы, fake печатает его текстом ассистента.
   ctx=$(printf '%s' "$1" | sh -c "$RIVET_HOOK_CMD" 2>&1 >/dev/null || true)
   [ -n "$ctx" ] || return 0
-  ctx=$(printf '%s' "$ctx" | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g')
+  ctx=$(json_escape "$ctx")
   emit "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fake-1\",\"content\":[{\"type\":\"text\",\"text\":\"$ctx\"}]}}"
 }
 
+json_escape() { printf '%s' "$1" | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
 emit '{"type":"system","subtype":"init","session_id":"fake-claude-1","model":"claude-fake-1"}'
+
+# Политика проекта приезжает в назначении и попадает в промпт стадии
+# (add-policy-delivery): fake повторяет её строку в поток, чтобы доставка
+# была видна в транскрипте, как у настоящего агента в рассуждениях.
+case "$PROMPT" in
+*"# Политика проекта"*)
+  POLICY_LINE=$(printf '%s\n' "$PROMPT" | grep -m1 -A2 '^# Политика проекта' | tr '\n' ' ')
+  emit "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fake-1\",\"content\":[{\"type\":\"text\",\"text\":\"Учитываю политику: $(json_escape "$POLICY_LINE")\"}]}}"
+  ;;
+esac
 hook '{"hook_event_name":"SessionStart","session_id":"fake-claude-1"}'
 
 case "$PROMPT" in
