@@ -120,11 +120,11 @@ func anyMention(body, name string) bool {
 // BuildManifest — манифест из привязанных change'ей и PR-сирот. Задачи
 // получают PR репозитория своей секции; Epic завершён датой последнего
 // merge, иначе датой архивации. Сирота становится Epic'ом с одной задачей.
-func BuildManifest(links []Link, orphans []PullRequest) Manifest {
+func BuildManifest(links []Link, orphans []PullRequest, mainRepo string) Manifest {
 	m := Manifest{Source: "openspec"}
 	for _, l := range links {
 		c := l.Change
-		e := Epic{Key: c.Key, Title: c.Title, Goal: c.Goal, CreatedAt: c.Date, DoneAt: c.Date}
+		e := Epic{Key: c.Key, Title: epicTitle(c, l.PRs, mainRepo), Goal: c.Goal, CreatedAt: c.Date, DoneAt: c.Date}
 		for _, pr := range l.PRs {
 			if pr.MergedAt.After(e.DoneAt) {
 				e.DoneAt = pr.MergedAt
@@ -148,4 +148,27 @@ func BuildManifest(links []Link, orphans []PullRequest) Manifest {
 		})
 	}
 	return m
+}
+
+// epicTitle — заголовок Epic'а: из proposal.md, а если там только имя
+// change'а (нет H1), то заголовок PR основного репозитория или любого
+// другого, он человекочитаемее.
+func epicTitle(c Change, prs map[string]PullRequest, mainRepo string) string {
+	if c.Title != "" && c.Title != c.Name {
+		return c.Title
+	}
+	if pr, ok := prs[mainRepo]; ok && pr.Title != "" {
+		return pr.Title
+	}
+	repos := make([]string, 0, len(prs))
+	for r := range prs {
+		repos = append(repos, r)
+	}
+	sort.Strings(repos)
+	for _, r := range repos {
+		if prs[r].Title != "" {
+			return prs[r].Title
+		}
+	}
+	return c.Name
 }

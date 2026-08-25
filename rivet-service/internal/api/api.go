@@ -935,6 +935,9 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	out, err := s.St.Events(r.Context(), store.EventFilter{
 		ProjectID: q.Get("project"), EpicID: q.Get("epic"),
 		TaskID: q.Get("task"), Type: q.Get("type"), AfterID: after, Limit: limit,
+		// latest=1 — последние события, а не первые по id (лента консоли);
+		// с курсором игнорируется, контракт постраничного обхода не меняется.
+		Latest:   q.Get("latest") == "1",
 		ViewerID: currentUser(r).ID, Installation: installation,
 	})
 	if err != nil {

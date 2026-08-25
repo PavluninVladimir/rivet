@@ -103,7 +103,7 @@ func TestLinkChangesAndBuildManifest(t *testing.T) {
 		t.Fatalf("сироты: %+v", rep.OrphanPRs)
 	}
 
-	m := BuildManifest(links, rep.OrphanPRs)
+	m := BuildManifest(links, rep.OrphanPRs, "rivet")
 	if len(m.Epics) != 5 {
 		t.Fatalf("Epic'ов: %d", len(m.Epics))
 	}

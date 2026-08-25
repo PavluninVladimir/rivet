@@ -48,6 +48,17 @@ func TestHistoryImportAPI(t *testing.T) {
 	if !jsonContains(body, `"SourceKey":"2026-08-12-harden-core"`) || !jsonContains(body, `"Status":"done"`) {
 		t.Fatalf("Epic истории в списке: %s", body)
 	}
+	// Лента: latest=1 отдаёт последние события, без него — первые по id.
+	resp, body = call(t, "GET", srv.URL+"/api/v1/events?project="+project.ID+"&limit=1&latest=1", alice, "", nil)
+	mustStatus(t, resp, http.StatusOK, "последние события")
+	if !jsonContains(body, `"Type":"history.imported"`) {
+		t.Fatalf("latest=1 должен отдать последнее событие: %s", body)
+	}
+	resp, body = call(t, "GET", srv.URL+"/api/v1/events?project="+project.ID+"&limit=1", alice, "", nil)
+	mustStatus(t, resp, http.StatusOK, "первые события")
+	if jsonContains(body, `"Type":"history.imported"`) {
+		t.Fatalf("без latest порядок с начала ленты: %s", body)
+	}
 	// Невалидный манифест: без ключа.
 	bad := map[string]any{"source": "openspec", "epics": []map[string]any{{"title": "без ключа", "created_at": "2026-08-12T00:00:00Z", "done_at": "2026-08-12T00:00:00Z"}}}
 	resp, _ = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/history", alice, "", bad)
