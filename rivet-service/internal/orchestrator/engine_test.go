@@ -32,6 +32,10 @@ type fakeSCM struct {
 	// noRunID — хостинг не возвращает идентификатор прогона при запуске
 	// (поведение GitHub workflow_dispatch).
 	noRunID bool
+	// files и commits — фиктивные файлы репозитория и история записей
+	// (публикация GitOps).
+	files   map[string]string
+	commits []string
 }
 
 func (f *fakeSCM) CreatePR(ctx context.Context, repo, branch, base, title, body string) (scm.PR, error) {
@@ -89,6 +93,32 @@ func (f *fakeSCM) PipelineRun(ctx context.Context, repo, pipeline, ref, runID st
 
 // errTrigger — ошибка запуска пайплайна в тестах.
 var errTrigger = errors.New("хостинг отказал")
+
+// Файлы репозитория: фиктивное хранилище для публикации GitOps.
+func (f *fakeSCM) ReadFile(ctx context.Context, repo, ref, path string) (scm.FileContent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	content, ok := f.files[repo+"@"+ref+":"+path]
+	if !ok {
+		return scm.FileContent{}, scm.ErrFileNotFound
+	}
+	return scm.FileContent{Content: content, FileID: "fake"}, nil
+}
+
+func (f *fakeSCM) WriteFile(ctx context.Context, repo, ref, path, prevID, content, message string) (scm.Commit, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.files == nil {
+		f.files = map[string]string{}
+	}
+	key := repo + "@" + ref + ":" + path
+	if _, exists := f.files[key]; exists != (prevID != "") {
+		return scm.Commit{}, fmt.Errorf("файл изменился с момента чтения")
+	}
+	f.files[key] = content
+	f.commits = append(f.commits, content)
+	return scm.Commit{SHA: fmt.Sprintf("commit-%d", len(f.commits)), URL: "https://scm/commit"}, nil
+}
 
 // pipelineCall — запуск пайплайна, записанный фиктивным адаптером.
 type pipelineCall struct {

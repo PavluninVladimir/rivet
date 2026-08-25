@@ -3,6 +3,7 @@ package scm
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -12,6 +13,9 @@ import (
 // включается только явным флагом окружения.
 type Fake struct {
 	seq atomic.Int64
+	// files — файлы фиктивного репозитория для публикации GitOps.
+	mu    sync.Mutex
+	files map[string]string
 }
 
 func NewFake() *Fake { return &Fake{} }
@@ -85,4 +89,36 @@ func (f *Fake) PipelineRun(ctx context.Context, repo, pipeline, ref, runID strin
 		URL:   fmt.Sprintf("https://fake.local/%s/pipelines/%s", repo, runID),
 		State: PipelineSuccess,
 	}, nil
+}
+
+// ─── файлы репозитория (e2e-стенд) ───────────────────────────────────────
+
+// ReadFile — файл фиктивного репозитория: содержимое живёт в памяти
+// адаптера, чего достаточно для сквозной проверки публикации GitOps.
+func (f *Fake) ReadFile(ctx context.Context, repo, ref, path string) (FileContent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	content, ok := f.files[repo+"@"+ref+":"+path]
+	if !ok {
+		return FileContent{}, ErrFileNotFound
+	}
+	return FileContent{Content: content, FileID: "fake-file"}, nil
+}
+
+// WriteFile — «коммит» в фиктивный репозиторий: как и настоящие хостинги,
+// проверяет идентификатор прочитанной версии файла.
+func (f *Fake) WriteFile(ctx context.Context, repo, ref, path, prevID, content, message string) (Commit, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.files == nil {
+		f.files = map[string]string{}
+	}
+	key := repo + "@" + ref + ":" + path
+	_, exists := f.files[key]
+	if exists != (prevID != "") {
+		return Commit{}, fmt.Errorf("fake: файл изменился с момента чтения")
+	}
+	f.files[key] = content
+	sha := fmt.Sprintf("fake-commit-%04d", f.seq.Add(1))
+	return Commit{SHA: sha, URL: fmt.Sprintf("https://fake.local/%s/commit/%s", repo, sha)}, nil
 }

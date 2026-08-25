@@ -3,6 +3,7 @@ package scm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -418,4 +419,78 @@ func (p gitlabPipeline) pipeline() PipelineRun {
 		out.State = PipelineStarting
 	}
 	return out
+}
+
+// ─── файлы репозитория (спека scm-integration) ───────────────────────────
+
+// ReadFile читает файл через Files API; last_commit_id нужен для
+// атомарной записи (GitLab проверяет его при обновлении).
+func (g *GitLab) ReadFile(ctx context.Context, repo, ref, path string) (FileContent, error) {
+	if ref == "" {
+		ref = "HEAD"
+	}
+	raw, code, err := g.do(ctx, "GET", fmt.Sprintf("/projects/%s/repository/files/%s?ref=%s",
+		projectID(repo), url.PathEscape(path), url.QueryEscape(ref)), nil)
+	if err != nil {
+		return FileContent{}, err
+	}
+	if code == http.StatusNotFound {
+		return FileContent{}, ErrFileNotFound
+	}
+	if code != http.StatusOK {
+		return FileContent{}, fmt.Errorf("gitlab files: %d: %s", code, clip(raw))
+	}
+	var out struct {
+		Content      string `json:"content"`
+		Encoding     string `json:"encoding"`
+		LastCommitID string `json:"last_commit_id"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return FileContent{}, err
+	}
+	content := out.Content
+	if out.Encoding == "base64" {
+		decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(content, "\n", ""))
+		if err != nil {
+			return FileContent{}, fmt.Errorf("gitlab files: %w", err)
+		}
+		content = string(decoded)
+	}
+	return FileContent{Content: content, FileID: out.LastCommitID}, nil
+}
+
+// WriteFile сохраняет файл коммитом через Commits API: он возвращает
+// идентификатор созданного коммита, поэтому вершину ветки перечитывать не
+// нужно (между записью и чтением туда мог попасть чужой коммит).
+func (g *GitLab) WriteFile(ctx context.Context, repo, ref, path, prevID, content, message string) (Commit, error) {
+	if ref == "" {
+		return Commit{}, fmt.Errorf("gitlab: нужна ветка коммита")
+	}
+	action := map[string]any{"action": "create", "file_path": path, "content": content}
+	if prevID != "" {
+		action["action"] = "update"
+		action["last_commit_id"] = prevID
+	}
+	raw, code, err := g.do(ctx, http.MethodPost,
+		"/projects/"+projectID(repo)+"/repository/commits", map[string]any{
+			"branch": ref, "commit_message": message, "actions": []any{action},
+		})
+	if err != nil {
+		return Commit{}, err
+	}
+	if code != http.StatusOK && code != http.StatusCreated {
+		return Commit{}, fmt.Errorf("gitlab commit: %d: %s", code, clip(raw))
+	}
+	var out struct {
+		ID     string `json:"id"`
+		WebURL string `json:"web_url"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return Commit{}, err
+	}
+	url := out.WebURL
+	if url == "" {
+		url = g.Base + "/" + repo + "/-/commit/" + out.ID
+	}
+	return Commit{SHA: out.ID, URL: url}, nil
 }

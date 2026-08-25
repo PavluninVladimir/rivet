@@ -520,7 +520,7 @@ func (s *Store) TimedOutDeployments(ctx context.Context, olderThan time.Duration
 // у пайплайна хостинга свой, больший дедлайн, и провал у него не про
 // «runner не вернул результат».
 func (s *Store) TimedOutExternalDeployments(ctx context.Context, olderThan time.Duration) ([]string, error) {
-	return s.timedOutDeployments(ctx, olderThan, "pipeline")
+	return s.timedOutDeployments(ctx, olderThan, "pipeline", "gitops")
 }
 
 func (s *Store) timedOutDeployments(ctx context.Context, olderThan time.Duration, execTypes ...string) ([]string, error) {
@@ -594,7 +594,7 @@ func (s *Store) StartNextExternalDeployment(ctx context.Context) (DeployAssignme
 			SELECT d.id, d.env_id
 			FROM deployments d
 			JOIN environments e ON e.id = d.env_id AND NOT e.paused
-				AND e.exec_type = 'pipeline'
+				AND e.exec_type IN ('pipeline','gitops')
 			WHERE d.status = 'queued'
 			  AND NOT EXISTS (SELECT 1 FROM deployments a
 			                  WHERE a.env_id = d.env_id AND a.status IN ('deploying','verifying'))
@@ -618,7 +618,7 @@ func (s *Store) StartNextExternalDeployment(ctx context.Context) (DeployAssignme
 		if _, err := appendEvent(ctx, tx, EventInput{
 			ActorKind: domain.ActorScheduler, Type: "deploy.status",
 			ProjectID: full.ProjectID,
-			Text: fmt.Sprintf("публикация %s: запуск пайплайна хостинга для версии %s",
+			Text: fmt.Sprintf("публикация %s: доставка версии %s внешней системой",
 				full.Env.Name, full.Deployment.Version),
 			Payload: map[string]any{"environment_id": envID, "deployment_id": depID,
 				"status": "deploying", "version": full.Deployment.Version},
@@ -701,7 +701,7 @@ func (s *Store) ActiveExternalDeployments(ctx context.Context) ([]DeployAssignme
 	rows, err := s.Pool.Query(ctx, `
 		SELECT d.id::text, d.env_id::text
 		FROM deployments d
-		JOIN environments e ON e.id = d.env_id AND e.exec_type = 'pipeline'
+		JOIN environments e ON e.id = d.env_id AND e.exec_type IN ('pipeline','gitops')
 		WHERE d.status IN ('deploying','verifying') AND d.ended_at IS NULL
 		ORDER BY d.created_at`)
 	if err != nil {

@@ -47,7 +47,7 @@ func (e *Engine) tickExternalDeployments(ctx context.Context) error {
 		if !ok {
 			break
 		}
-		e.triggerPipeline(ctx, a)
+		e.startExternal(ctx, a)
 	}
 	active, err := e.St.ActiveExternalDeployments(ctx)
 	if err != nil {
@@ -63,10 +63,10 @@ func (e *Engine) tickExternalDeployments(ctx context.Context) error {
 		// Запущенный, но ещё не найденный прогон помечен pending и сюда
 		// не попадает: второй workflow_dispatch не нужен.
 		if a.Deployment.ExternalRunID == "" {
-			e.triggerPipeline(ctx, a)
+			e.startExternal(ctx, a)
 			continue
 		}
-		if err := e.pollPipeline(ctx, a); err != nil {
+		if err := e.pollExternal(ctx, a); err != nil {
 			slog.Error("внешняя публикация", "deployment", a.Deployment.ID, "err", err)
 		}
 	}
@@ -83,6 +83,25 @@ func (e *Engine) pollDue(depID string) bool {
 	}
 	e.externalPolled[depID] = now
 	return true
+}
+
+// startExternal — этап Deploy внешнего окружения: для пайплайна это его
+// запуск, для GitOps — коммит версии в конфигурацию.
+func (e *Engine) startExternal(ctx context.Context, a store.DeployAssignment) {
+	if gitopsEnv(a.Env) {
+		e.startGitOps(ctx, a)
+		return
+	}
+	e.triggerPipeline(ctx, a)
+}
+
+// pollExternal — наблюдение за внешней доставкой: состояние прогона
+// пайплайна либо синхронизация окружения GitOps.
+func (e *Engine) pollExternal(ctx context.Context, a store.DeployAssignment) error {
+	if gitopsEnv(a.Env) {
+		return e.pollGitOps(ctx, a)
+	}
+	return e.pollPipeline(ctx, a)
 }
 
 // triggerPipeline запускает пайплайн хостинга для захваченной публикации.
@@ -269,7 +288,7 @@ func (e *Engine) rollbackExternal(ctx context.Context, a store.DeployAssignment,
 	// восстановит публикацию, если rivetd упадёт прямо сейчас.
 	a.Deployment = dep
 	a.Deployment.ExternalRunID, a.Deployment.ExternalURL = "", ""
-	e.triggerPipeline(ctx, a)
+	e.startExternal(ctx, a)
 	return nil
 }
 

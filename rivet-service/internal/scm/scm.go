@@ -61,6 +61,9 @@ var ErrRepoExists = errors.New("репозиторий с таким имене�
 // начало годится, для решений политики по путям — нет (fail-closed).
 var ErrDiffTruncated = errors.New("diff PR обрезан: превышен лимит чтения")
 
+// ErrFileNotFound — файла нет в репозитории на этой ветке.
+var ErrFileNotFound = errors.New("файла нет в репозитории")
+
 // MaxResponseBytes — лимит чтения тела ответа хостинга.
 const MaxResponseBytes = 4 << 20
 
@@ -104,6 +107,26 @@ type Adapter interface {
 	// найден: адаптер ищет свежий прогон пайплайна на ветке, начавшийся
 	// не раньше since.
 	PipelineRun(ctx context.Context, repo, pipeline, ref, runID string, since time.Time) (PipelineRun, error)
+	// ReadFile читает файл репозитория на ветке (спека scm-integration
+	// «Запись файла поверх разных хостингов»): содержимое и идентификатор
+	// версии файла для атомарной записи. ErrFileNotFound — файла нет.
+	ReadFile(ctx context.Context, repo, ref, path string) (FileContent, error)
+	// WriteFile сохраняет файл коммитом на ветке; prevID — идентификатор
+	// прочитанной версии (пусто для нового файла).
+	WriteFile(ctx context.Context, repo, ref, path, prevID, content, message string) (Commit, error)
+}
+
+// FileContent — файл репозитория: содержимое и идентификатор версии
+// (sha блоба у GitHub, last_commit_id у GitLab) для атомарной записи.
+type FileContent struct {
+	Content string
+	FileID  string
+}
+
+// Commit — созданный коммит: sha и адрес для человека.
+type Commit struct {
+	SHA string
+	URL string
 }
 
 // Состояния прогона внешнего пайплайна.
