@@ -67,7 +67,11 @@ type Epic struct {
 	Title     string
 	Goal      string
 	Status    EpicStatus
-	Created   time.Time
+	// TokenBudget — бюджет Epic в токенах; nil — без бюджета (спека
+	// orchestration «Бюджет Epic»). При превышении расхода планировщик
+	// перестаёт назначать стадии задачам Epic.
+	TokenBudget *int64
+	Created     time.Time
 }
 
 type Criterion struct {

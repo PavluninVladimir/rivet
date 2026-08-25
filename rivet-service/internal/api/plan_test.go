@@ -76,3 +76,43 @@ func TestPlanEditingAPI(t *testing.T) {
 		t.Fatalf("нужна подсказка про отмену: %s", body)
 	}
 }
+
+// Бюджет Epic меняет только владелец (api-contract add-cost-transparency).
+func TestEpicBudgetAPIOwnerOnly(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if _, err := st.CreateUser(ctx, "alice", "", "pw-alice-secret", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateUser(ctx, "bob", "", "pw-bob-secret", false); err != nil {
+		t.Fatal(err)
+	}
+	alice := loginSession(t, srv, "alice", "pw-alice-secret")
+	bob := loginSession(t, srv, "bob", "pw-bob-secret")
+	resp, body := call(t, "POST", srv.URL+"/api/v1/projects", alice, "", map[string]string{"name": "p", "repo": "o/r"})
+	mustStatus(t, resp, http.StatusCreated, "проект")
+	var project struct{ ID string }
+	_ = json.Unmarshal(body, &project)
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/members", alice, "", map[string]string{"login": "bob"})
+	mustStatus(t, resp, http.StatusCreated, "участник")
+	resp, body = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/epics", alice, "", map[string]string{"title": "E"})
+	mustStatus(t, resp, http.StatusCreated, "epic")
+	var epic domain.Epic
+	_ = json.Unmarshal(body, &epic)
+
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/epics/"+epic.ID, bob, "", map[string]any{"token_budget": 1000})
+	mustStatus(t, resp, http.StatusForbidden, "member меняет бюджет")
+	resp, body = call(t, "PATCH", srv.URL+"/api/v1/epics/"+epic.ID, alice, "", map[string]any{"token_budget": 1000})
+	mustStatus(t, resp, http.StatusOK, "owner меняет бюджет")
+	if !jsonContains(body, `"TokenBudget":1000`) {
+		t.Fatalf("бюджет в ответе: %s", body)
+	}
+	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/epics/"+epic.ID, alice, "", map[string]any{"token_budget": nil})
+	mustStatus(t, resp, http.StatusOK, "снятие бюджета")
+	// Estimate/budget в GET.
+	resp, body = call(t, "GET", srv.URL+"/api/v1/epics/"+epic.ID, bob, "", nil)
+	mustStatus(t, resp, http.StatusOK, "epic view")
+	if !jsonContains(body, `"estimate"`) || !jsonContains(body, `"budget"`) || !jsonContains(body, `"available":false`) {
+		t.Fatalf("estimate/budget в DTO: %s", body)
+	}
+}

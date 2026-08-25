@@ -249,14 +249,17 @@ type Assignment struct {
 // AssignNext атомарно назначает одну ready-задачу подходящему свободному
 // runner'у: FOR UPDATE SKIP LOCKED с обеих сторон, один runner — одна задача.
 // ok=false — назначать нечего (нет ready-задач или подходящих runner'ов).
-// excludedProjects — проекты, исключённые из назначений на этот проход
-// (дневной бюджет токенов исчерпан, спека orchestration); пустой список —
-// без исключений.
-func (s *Store) AssignNext(ctx context.Context, excludedProjects []string) (Assignment, bool, error) {
+// excludedProjects/excludedEpics — проекты и Epic'и, исключённые из
+// назначений на этот проход (дневной бюджет и бюджет Epic, спека
+// orchestration); пустые списки — без исключений.
+func (s *Store) AssignNext(ctx context.Context, excludedProjects, excludedEpics []string) (Assignment, bool, error) {
 	var a Assignment
 	assigned := false
 	if excludedProjects == nil {
 		excludedProjects = []string{}
+	}
+	if excludedEpics == nil {
+		excludedEpics = []string{}
 	}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		// Кандидат: ready-задача работающего Epic + свободный runner со всеми capabilities.
@@ -265,6 +268,7 @@ func (s *Store) AssignNext(ctx context.Context, excludedProjects []string) (Assi
 			FROM tasks t
 			JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
 				AND e.project_id <> ALL($1::uuid[])
+				AND e.id <> ALL($2::uuid[])
 			JOIN LATERAL (
 				SELECT r.id FROM runners r
 				WHERE r.status = 'idle' AND NOT r.draining AND r.capabilities @> t.capabilities
@@ -276,7 +280,7 @@ func (s *Store) AssignNext(ctx context.Context, excludedProjects []string) (Assi
 			WHERE t.status = 'ready'
 			ORDER BY t.num
 			FOR UPDATE OF t SKIP LOCKED
-			LIMIT 1`, excludedProjects)
+			LIMIT 1`, excludedProjects, excludedEpics)
 		var taskID, epicID, projectID, runnerID string
 		var num int64
 		if err := row.Scan(&taskID, &num, &epicID, &projectID, &runnerID); err != nil {

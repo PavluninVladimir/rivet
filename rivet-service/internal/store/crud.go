@@ -83,14 +83,14 @@ func (s *Store) CreateEpic(ctx context.Context, projectID, title, goal string) (
 func (s *Store) GetEpic(ctx context.Context, id string) (domain.Epic, error) {
 	var e domain.Epic
 	err := s.Pool.QueryRow(ctx,
-		`SELECT id, project_id, title, goal, status, created_at FROM epics WHERE id=$1`, id).
-		Scan(&e.ID, &e.ProjectID, &e.Title, &e.Goal, &e.Status, &e.Created)
+		`SELECT id, project_id, title, goal, status, token_budget, created_at FROM epics WHERE id=$1`, id).
+		Scan(&e.ID, &e.ProjectID, &e.Title, &e.Goal, &e.Status, &e.TokenBudget, &e.Created)
 	return e, nf(err)
 }
 
 func (s *Store) ListEpics(ctx context.Context, projectID string) ([]domain.Epic, error) {
 	rows, err := s.Pool.Query(ctx,
-		`SELECT id, project_id, title, goal, status, created_at FROM epics WHERE project_id=$1 ORDER BY created_at`,
+		`SELECT id, project_id, title, goal, status, token_budget, created_at FROM epics WHERE project_id=$1 ORDER BY created_at`,
 		projectID)
 	if err != nil {
 		return nil, err
@@ -99,7 +99,7 @@ func (s *Store) ListEpics(ctx context.Context, projectID string) ([]domain.Epic,
 	var out []domain.Epic
 	for rows.Next() {
 		var e domain.Epic
-		if err := rows.Scan(&e.ID, &e.ProjectID, &e.Title, &e.Goal, &e.Status, &e.Created); err != nil {
+		if err := rows.Scan(&e.ID, &e.ProjectID, &e.Title, &e.Goal, &e.Status, &e.TokenBudget, &e.Created); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

@@ -555,3 +555,50 @@ func TestSessionPromptAndOutcome(t *testing.T) {
 		t.Fatalf("outcome blocked-сессии: %+v", ss)
 	}
 }
+
+// Бюджет Epic (спека orchestration «Бюджет Epic»): исчерпание останавливает
+// назначения на границе стадии, событие один раз, поднятие бюджета
+// возобновляет без событий и смены статуса.
+func TestEpicBudgetPausesAssignments(t *testing.T) {
+	ctx := context.Background()
+	f := newPolicyFixture(t, "")
+	budget := int64(100)
+	if _, err := f.st.SetEpicBudget(ctx, f.epic.ID, &budget); err != nil {
+		t.Fatal(err)
+	}
+	in := int64(150)
+	if err := f.st.RecordUsage(ctx, store.UsageInput{SourceMsgID: "ebp-1", ProjectID: f.p.ID,
+		EpicID: f.epic.ID, TaskID: f.task.ID, TokensIn: &in}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := f.e.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := taskStatus(t, f.st, f.task.ID); got != domain.TaskReady {
+		t.Fatalf("при исчерпанном бюджете Epic задача не назначается: %s", got)
+	}
+	evs, _ := f.st.Events(ctx, store.EventFilter{EpicID: f.epic.ID, Type: "epic.budget_exceeded", Limit: 10})
+	if len(evs) != 1 || evs[0].Payload["used"] != float64(150) || evs[0].Payload["budget"] != float64(100) {
+		t.Fatalf("ожидали одно событие бюджета Epic: %+v", evs)
+	}
+	// Человек поднял бюджет — назначение возобновляется, событий больше нет.
+	bigger := int64(10000)
+	if _, err := f.st.SetEpicBudget(ctx, f.epic.ID, &bigger); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := taskStatus(t, f.st, f.task.ID); got != domain.TaskRunning {
+		t.Fatalf("после поднятия бюджета задача должна назначиться: %s", got)
+	}
+	if evs, _ := f.st.Events(ctx, store.EventFilter{EpicID: f.epic.ID, Type: "epic.budget_exceeded", Limit: 10}); len(evs) != 1 {
+		t.Fatalf("новых событий быть не должно: %+v", evs)
+	}
+	ep, _ := f.st.GetEpic(ctx, f.epic.ID)
+	if ep.Status != domain.EpicRunning {
+		t.Fatalf("статус Epic не должен меняться: %s", ep.Status)
+	}
+}

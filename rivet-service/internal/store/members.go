@@ -66,10 +66,10 @@ func (s *Store) MemberRole(ctx context.Context, projectID, userID string) (strin
 func (s *Store) EpicForViewer(ctx context.Context, epicID, viewerID string) (domain.Epic, error) {
 	var e domain.Epic
 	err := s.Pool.QueryRow(ctx, `
-		SELECT e.id, e.project_id, e.title, e.goal, e.status, e.created_at FROM epics e
+		SELECT e.id, e.project_id, e.title, e.goal, e.status, e.token_budget, e.created_at FROM epics e
 		JOIN project_members m ON m.project_id = e.project_id AND m.user_id = $2
 		WHERE e.id = $1`, epicID, viewerID).
-		Scan(&e.ID, &e.ProjectID, &e.Title, &e.Goal, &e.Status, &e.Created)
+		Scan(&e.ID, &e.ProjectID, &e.Title, &e.Goal, &e.Status, &e.TokenBudget, &e.Created)
 	return e, nf(err)
 }
 
