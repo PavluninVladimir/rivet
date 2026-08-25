@@ -46,10 +46,12 @@ func (e *Engine) tickDeployments(ctx context.Context) error {
 			return err
 		}
 		if !ok {
-			return nil
+			break
 		}
 		e.dispatchDeploy(a, a.Deployment.Version, "", false)
 	}
+	// Окружения с внешней доставкой идут своим путём: runner им не нужен.
+	return e.tickExternalDeployments(ctx)
 }
 
 // dispatchDeploy отправляет деплой-джобу runner'у публикации.

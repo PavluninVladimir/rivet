@@ -27,24 +27,29 @@ type environmentView struct {
 // deploymentView — DTO Deployment контракта: created_at — очередь,
 // started_at — исполнение (длительность клиент считает сам).
 type deploymentView struct {
-	ID        string     `json:"id"`
-	EnvID     string     `json:"env_id"`
-	Version   string     `json:"version"`
-	Status    string     `json:"status"`
-	Initiator string     `json:"initiator"`
-	RunnerID  string     `json:"runner_id"`
-	Detail    string     `json:"detail"`
-	HasLog    bool       `json:"has_log"`
-	CreatedAt time.Time  `json:"created_at"`
-	StartedAt *time.Time `json:"started_at"`
-	EndedAt   *time.Time `json:"ended_at"`
+	ID        string `json:"id"`
+	EnvID     string `json:"env_id"`
+	Version   string `json:"version"`
+	Status    string `json:"status"`
+	Initiator string `json:"initiator"`
+	RunnerID  string `json:"runner_id"`
+	Detail    string `json:"detail"`
+	HasLog    bool   `json:"has_log"`
+	// ExternalRunID и ExternalURL — прогон внешнего пайплайна доставки;
+	// пустые у собственной доставки (api-contract add-external-delivery).
+	ExternalRunID string     `json:"external_run_id"`
+	ExternalURL   string     `json:"external_url"`
+	CreatedAt     time.Time  `json:"created_at"`
+	StartedAt     *time.Time `json:"started_at"`
+	EndedAt       *time.Time `json:"ended_at"`
 }
 
 func deploymentDTO(d domain.Deployment) deploymentView {
 	return deploymentView{
 		ID: d.ID, EnvID: d.EnvID, Version: d.Version, Status: d.Status,
 		Initiator: d.Initiator, RunnerID: d.RunnerID, Detail: d.Detail,
-		HasLog: d.LogRef != "", CreatedAt: d.Created, StartedAt: d.Started, EndedAt: d.Ended,
+		HasLog: d.LogRef != "", ExternalRunID: d.ExternalRunID, ExternalURL: d.ExternalURL,
+		CreatedAt: d.Created, StartedAt: d.Started, EndedAt: d.Ended,
 	}
 }
 
@@ -67,18 +72,27 @@ type environmentInput struct {
 	Config   domain.EnvConfig `json:"config"`
 }
 
+// execType — тип исполнения окружения; пустой считается ssh (поведение до
+// появления внешней доставки).
+func (in environmentInput) execType() string {
+	if in.ExecType == "" {
+		return domain.ExecSSH
+	}
+	return in.ExecType
+}
+
 // validate — 422-валидация по контракту; ошибки конфигурации — domain.
 func (in environmentInput) validate() string {
 	if in.Name == "" {
 		return "нужно имя окружения"
 	}
-	if in.ExecType != "" && in.ExecType != "ssh" {
-		return "exec_type: поддерживается только ssh"
+	if in.ExecType != "" && in.ExecType != domain.ExecSSH && in.ExecType != domain.ExecPipeline {
+		return "exec_type: ожидается ssh или pipeline"
 	}
 	if in.Trigger != "auto" && in.Trigger != "manual" {
 		return "trigger: ожидается auto или manual"
 	}
-	if err := in.Config.Validate(); err != nil {
+	if err := in.Config.Validate(in.execType()); err != nil {
 		return err.Error()
 	}
 	return ""
@@ -120,7 +134,7 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	env, err := s.St.CreateEnvironment(r.Context(), domain.Environment{
-		ProjectID: r.PathValue("id"), Name: in.Name, ExecType: "ssh",
+		ProjectID: r.PathValue("id"), Name: in.Name, ExecType: in.execType(),
 		Trigger: in.Trigger, Config: in.Config,
 	})
 	if err != nil {
@@ -159,6 +173,10 @@ func (s *Server) patchEnvironment(w http.ResponseWriter, r *http.Request) {
 		env.Trigger = *in.Trigger
 	}
 	if in.Config != nil {
+		// Конфигурацию нельзя менять под идущей публикацией: она читает её
+		// на ходу, и правка адреса проверки или пайплайна относилась бы уже
+		// к другой публикации. Проверку делает сам UPDATE — окно между
+		// проверкой и записью закрыто (ответ 409).
 		env.Config = *in.Config
 	}
 	full := environmentInput{Name: env.Name, ExecType: env.ExecType, Trigger: env.Trigger, Config: env.Config}

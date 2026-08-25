@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // GitLab — адаптер GitLab REST API v4, облачный и self-hosted. MR прячется
@@ -345,4 +346,72 @@ func (g *GitLab) RegisterWebhook(ctx context.Context, repo, hookURL, secret stri
 		return false, nil
 	}
 	return false, fmt.Errorf("gitlab webhook: %d: %s", code, tailMsg(raw))
+}
+
+// ─── пайплайны доставки (спека deployment) ───────────────────────────────
+
+// TriggerPipeline запускает пайплайн GitLab CI на ветке ref с переменными
+// прогона. Ответ сразу несёт идентификатор и адрес прогона.
+func (g *GitLab) TriggerPipeline(ctx context.Context, repo, pipeline, ref string, vars map[string]string) (PipelineRun, error) {
+	if ref == "" {
+		return PipelineRun{}, fmt.Errorf("gitlab: нужна ветка запуска пайплайна")
+	}
+	variables := make([]map[string]string, 0, len(vars))
+	for k, v := range vars {
+		variables = append(variables, map[string]string{"key": k, "value": v})
+	}
+	raw, code, err := g.do(ctx, "POST", "/projects/"+projectID(repo)+"/pipeline",
+		map[string]any{"ref": ref, "variables": variables})
+	if err != nil {
+		return PipelineRun{}, err
+	}
+	if code != http.StatusCreated && code != http.StatusOK {
+		return PipelineRun{}, fmt.Errorf("gitlab pipeline: %d: %s", code, clip(raw))
+	}
+	var out gitlabPipeline
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return PipelineRun{}, err
+	}
+	return out.pipeline(), nil
+}
+
+// PipelineRun — состояние прогона по идентификатору. Пустой идентификатор
+// у GitLab не встречается: он приходит в ответе на запуск.
+func (g *GitLab) PipelineRun(ctx context.Context, repo, pipeline, ref, runID string, _ time.Time) (PipelineRun, error) {
+	if runID == "" {
+		return PipelineRun{State: PipelineStarting}, nil
+	}
+	raw, code, err := g.do(ctx, "GET", "/projects/"+projectID(repo)+"/pipelines/"+url.PathEscape(runID), nil)
+	if err != nil {
+		return PipelineRun{}, err
+	}
+	if code != http.StatusOK {
+		return PipelineRun{}, fmt.Errorf("gitlab pipeline: %d: %s", code, clip(raw))
+	}
+	var out gitlabPipeline
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return PipelineRun{}, err
+	}
+	return out.pipeline(), nil
+}
+
+type gitlabPipeline struct {
+	ID     int64  `json:"id"`
+	WebURL string `json:"web_url"`
+	Status string `json:"status"`
+}
+
+func (p gitlabPipeline) pipeline() PipelineRun {
+	out := PipelineRun{RunID: fmt.Sprintf("%d", p.ID), URL: p.WebURL, State: PipelineRunning}
+	switch p.Status {
+	case "success":
+		out.State = PipelineSuccess
+	case "failed", "canceled", "skipped":
+		// Отменённый и пропущенный прогон доставки — не успех: публикация
+		// не состоялась, и молча считать её удачной нельзя.
+		out.State = PipelineFailed
+	case "created", "waiting_for_resource", "preparing", "pending":
+		out.State = PipelineStarting
+	}
+	return out
 }

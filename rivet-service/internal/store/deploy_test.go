@@ -104,7 +104,7 @@ func TestEnvConfigValidate(t *testing.T) {
 		{DeployCmd: "true", VerifyCmd: "true", Host: "host; rm -rf /"},   // мусор в host
 	}
 	for i, c := range bad {
-		if err := c.Validate(); err == nil {
+		if err := c.Validate(domain.ExecSSH); err == nil {
 			t.Fatalf("конфиг #%d должен быть отклонён: %+v", i, c)
 		}
 	}
@@ -114,7 +114,7 @@ func TestEnvConfigValidate(t *testing.T) {
 		{DeployCmd: "true", VerifyCmd: "true", Host: "deploy@stage-01.local:2222"},
 	}
 	for i, c := range good {
-		if err := c.Validate(); err != nil {
+		if err := c.Validate(domain.ExecSSH); err != nil {
 			t.Fatalf("конфиг #%d должен пройти: %v", i, err)
 		}
 	}

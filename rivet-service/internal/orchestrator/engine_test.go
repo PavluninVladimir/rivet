@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -21,7 +22,17 @@ import (
 // Assignment через Sender) + фейковый SCM; задача проходит
 // queued → ready → running → testing → review → done; blocked даёт эскалацию.
 
-type fakeSCM struct{ merged []int }
+type fakeSCM struct {
+	merged []int
+	// Пайплайны доставки: запуски и подменяемое состояние прогона.
+	mu         sync.Mutex
+	triggers   []pipelineCall
+	runState   string
+	triggerErr error
+	// noRunID — хостинг не возвращает идентификатор прогона при запуске
+	// (поведение GitHub workflow_dispatch).
+	noRunID bool
+}
 
 func (f *fakeSCM) CreatePR(ctx context.Context, repo, branch, base, title, body string) (scm.PR, error) {
 	return scm.PR{Number: 42, URL: "https://github.com/" + repo + "/pull/42"}, nil
@@ -45,6 +56,44 @@ func (f *fakeSCM) CreateRepo(ctx context.Context, in scm.NewRepo) (scm.RepoInfo,
 }
 func (f *fakeSCM) RegisterWebhook(ctx context.Context, repo, url, secret string) (bool, error) {
 	return false, nil
+}
+
+// Пайплайны доставки: фиктивный прогон с настраиваемым исходом
+// (change add-external-delivery).
+func (f *fakeSCM) TriggerPipeline(ctx context.Context, repo, pipeline, ref string, vars map[string]string) (scm.PipelineRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.triggerErr != nil {
+		return scm.PipelineRun{}, f.triggerErr
+	}
+	f.triggers = append(f.triggers, pipelineCall{Repo: repo, Pipeline: pipeline, Ref: ref, Vars: vars})
+	if f.noRunID {
+		return scm.PipelineRun{State: scm.PipelineStarting}, nil
+	}
+	return scm.PipelineRun{RunID: "run-1", URL: "https://ci/run-1", State: scm.PipelineRunning}, nil
+}
+
+func (f *fakeSCM) PipelineRun(ctx context.Context, repo, pipeline, ref, runID string, since time.Time) (scm.PipelineRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	state := f.runState
+	if state == "" {
+		state = scm.PipelineRunning
+	}
+	if f.noRunID && state == scm.PipelineRunning {
+		// Прогон ещё не найден: адаптер вернёт «запускается».
+		return scm.PipelineRun{State: scm.PipelineStarting}, nil
+	}
+	return scm.PipelineRun{RunID: "run-1", URL: "https://ci/run-1", State: state}, nil
+}
+
+// errTrigger — ошибка запуска пайплайна в тестах.
+var errTrigger = errors.New("хостинг отказал")
+
+// pipelineCall — запуск пайплайна, записанный фиктивным адаптером.
+type pipelineCall struct {
+	Repo, Pipeline, Ref string
+	Vars                map[string]string
 }
 
 type capture struct {
