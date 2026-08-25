@@ -44,6 +44,12 @@ type policyFixture struct {
 // driveToReviewPassed проводит задачу через coding → testing → review и
 // возвращает результат одобренного review (OnStageResult REVIEW ok).
 func driveToReviewPassed(t *testing.T, f policyFixture) error {
+	return driveToReviewPassedWith(t, f, nil)
+}
+
+// driveToReviewPassedWith — то же, но с хуком перед вердиктом review:
+// им подменяют движок политик, когда отказать должен именно гейт merge.
+func driveToReviewPassedWith(t *testing.T, f policyFixture, before func()) error {
 	t.Helper()
 	ctx := context.Background()
 	if err := f.e.Tick(ctx); err != nil {
@@ -61,6 +67,9 @@ func driveToReviewPassed(t *testing.T, f policyFixture) error {
 	}
 	if as := f.out.lastAssign(t); as.Stage != pb.StageResult_REVIEW {
 		t.Fatalf("ожидали REVIEW, got %v", as.Stage)
+	}
+	if before != nil {
+		before()
 	}
 	return f.e.OnStageResult(ctx, "reviewer", &pb.StageResult{TaskId: f.task.ID, SessionId: f.out.lastAssign(t).SessionId, Stage: pb.StageResult_REVIEW, Ok: true})
 }
@@ -600,5 +609,133 @@ func TestEpicBudgetPausesAssignments(t *testing.T) {
 	ep, _ := f.st.GetEpic(ctx, f.epic.ID)
 	if ep.Status != domain.EpicRunning {
 		t.Fatalf("статус Epic не должен меняться: %s", ep.Status)
+	}
+}
+
+// deadEngine — движок, который не даёт решений (недоступный внешний OPA).
+type deadEngine struct{}
+
+func (deadEngine) Decide(context.Context, string, any) (policy.Decision, error) {
+	return policy.Decision{}, fmt.Errorf("движок не отвечает")
+}
+func (deadEngine) Mode() string { return policy.ModeExternal }
+func (deadEngine) Health(context.Context) error {
+	return fmt.Errorf("движок не отвечает")
+}
+
+// Движок не дал решения: авто-merge не выполняется, факт попадает в event
+// log и в очередь «needs attention» (спека access-policy «Движок недоступен»).
+func TestPolicyEngineFailClosed(t *testing.T) {
+	ctx := context.Background()
+	f := newPolicyFixture(t, "diff --git a/src/main.go b/src/main.go\n--- a/src/main.go\n+++ b/src/main.go\n")
+	enableAutoMerge(t, f.st, f.p.ID, nil)
+	if err := driveToReviewPassedWith(t, f, func() { f.e.Policy = deadEngine{} }); err != nil {
+		t.Fatal(err)
+	}
+	// Задача осталась в review: merge не выполнен.
+	if got := taskStatus(t, f.st, f.task.ID); got != domain.TaskReview {
+		t.Fatalf("задача должна ждать человека, статус %s", got)
+	}
+	if len(f.sc.merged) != 0 {
+		t.Fatalf("merge не должен был выполниться: %v", f.sc.merged)
+	}
+	deferred := eventsOfType(t, f.st, f.task.ID, "task.merge_deferred")
+	if len(deferred) != 1 || deferred[0].Payload["reason"] != "engine_error" {
+		t.Fatalf("merge должен быть отложен с причиной движка: %+v", deferred)
+	}
+	if deferred[0].Payload["point"] != policy.PointMerge {
+		t.Fatalf("точка принуждения в payload: %+v", deferred[0].Payload)
+	}
+	// Событие решения и эскалация уровня проекта.
+	evs, err := f.st.Events(ctx, store.EventFilter{ProjectID: f.p.ID, Type: "policy.decision", Limit: 10})
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("событие решения: %v %+v", err, evs)
+	}
+	if evs[0].Payload["point"] != policy.PointMerge || evs[0].Payload["reason"] != "engine_error" {
+		t.Fatalf("payload решения: %+v", evs[0].Payload)
+	}
+	att, err := f.st.ListAttention(ctx, f.owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var engineEsc int
+	for _, a := range att {
+		if a.Reason == domain.AttPolicyEngine {
+			engineEsc++
+			if a.TaskID != "" || a.DeploymentID != "" {
+				t.Fatalf("эскалация движка — уровня проекта: %+v", a)
+			}
+		}
+	}
+	if engineEsc != 1 {
+		t.Fatalf("ожидали одну эскалацию POLICY_ENGINE, получили %d", engineEsc)
+	}
+	// Повторный отказ не плодит эскалации.
+	if err := policyEngineDown(ctx, f.st, policy.PointAssign, f.p.ID,
+		store.EffectivePolicy{}, fmt.Errorf("снова не отвечает")); err != nil {
+		t.Fatal(err)
+	}
+	att, _ = f.st.ListAttention(ctx, f.owner.ID)
+	engineEsc = 0
+	for _, a := range att {
+		if a.Reason == domain.AttPolicyEngine {
+			engineEsc++
+		}
+	}
+	if engineEsc != 1 {
+		t.Fatalf("эскалация движка должна быть одна на проект, стало %d", engineEsc)
+	}
+}
+
+// Эскалация «движок недоступен» снимается сама, когда движок снова отвечает
+// (спека access-policy «Движок недоступен»).
+func TestPolicyEngineEscalationResolves(t *testing.T) {
+	ctx := context.Background()
+	f := newPolicyFixture(t, "")
+	openEngineEsc := func() int {
+		att, err := f.st.ListAttention(ctx, f.owner.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, a := range att {
+			if a.Reason == domain.AttPolicyEngine {
+				n++
+			}
+		}
+		return n
+	}
+	f.e.Policy = deadEngine{}
+	if _, err := f.e.budgetExclusions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if openEngineEsc() != 1 {
+		t.Fatalf("ожидали эскалацию движка, открыто %d", openEngineEsc())
+	}
+	// Движок починился: следующий проход снимает эскалацию.
+	f.e.Policy = policy.Default()
+	if _, err := f.e.budgetExclusions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if openEngineEsc() != 0 {
+		t.Fatalf("эскалация должна закрыться, открыто %d", openEngineEsc())
+	}
+}
+
+// Авто-merge выключен: задача ждёт человека без события об отложенном
+// merge — движок отвечает «auto_merge_off», а лента не засоряется.
+func TestAutoMergeOffStaysSilent(t *testing.T) {
+	f := newPolicyFixture(t, "diff --git a/src/main.go b/src/main.go\n--- a/src/main.go\n+++ b/src/main.go\n")
+	if err := driveToReviewPassed(t, f); err != nil {
+		t.Fatal(err)
+	}
+	if got := taskStatus(t, f.st, f.task.ID); got != domain.TaskReview {
+		t.Fatalf("задача должна ждать человека, статус %s", got)
+	}
+	if evs := eventsOfType(t, f.st, f.task.ID, "task.merge_deferred"); len(evs) != 0 {
+		t.Fatalf("выключенный авто-merge не должен писать событие: %+v", evs)
+	}
+	if len(f.sc.merged) != 0 {
+		t.Fatalf("merge не должен был выполниться: %v", f.sc.merged)
 	}
 }

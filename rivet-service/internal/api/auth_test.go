@@ -15,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/orchestrator"
+	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
 
@@ -49,7 +51,10 @@ func testServer(t *testing.T) (*store.Store, *httptest.Server) {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
-	srv := httptest.NewServer((&Server{St: st}).Handler())
+	// Оркестратор нужен обработчикам, которые ходят в конвейер (webhook,
+	// merge): в тестах он на fake-хостинге и без отправки runner'ам.
+	engine := orchestrator.New(st, scm.NewFake(), nil, nopSender{}, 90*time.Second)
+	srv := httptest.NewServer((&Server{St: st, Engine: engine}).Handler())
 	t.Cleanup(srv.Close)
 	return st, srv
 }

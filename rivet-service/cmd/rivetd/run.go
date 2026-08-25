@@ -17,6 +17,7 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/blob"
 	"github.com/PavluninVladimir/rivet/internal/config"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
+	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/secretbox"
 	"github.com/PavluninVladimir/rivet/internal/store"
@@ -87,8 +88,19 @@ func run(ctx context.Context, cfg config.Config) error {
 	if !box.Enabled() {
 		slog.Warn("RIVET_SECRET_KEY не задан: подключение репозиториев с токеном отключено")
 	}
+	// Движок политик: решения точек принуждения. В режиме external адрес
+	// обязателен — иначе установка не поднимается (fail-fast до listener'ов).
+	polEngine, err := policy.NewEngine(policy.Config{
+		Mode: cfg.PolicyMode, URL: cfg.PolicyURL, Timeout: cfg.PolicyTimeout,
+	})
+	if err != nil {
+		return err
+	}
+	slog.Info("движок политик", "mode", polEngine.Mode())
+
 	engine := orchestrator.New(st, adapter, bl, reg, cfg.RunnerHeartbeatTimeout)
 	engine.Box = box
+	engine.Policy = polEngine
 	// RIVET_SCM=fake — установка без настоящих хостингов (e2e-стенд).
 	engine.Adapters.Force = cfg.SCM == "fake"
 
@@ -122,7 +134,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		St: st, Engine: engine, Hub: hub, Blob: bl,
 		EnvPlanner: env, Version: version, ProtocolVersion: stream.ProtocolVersion,
 		StartedAt: time.Now(), GRPCAddr: cfg.GRPCAddr, GRPCTLS: cfg.GRPCTLSCert != "",
-		Secrets: box, PublicURL: cfg.PublicURL,
+		Secrets: box, PublicURL: cfg.PublicURL, Policy: polEngine,
 		WebhookSecret: cfg.GitHubWebhookSecret,
 		TrustProxy:    cfg.TrustProxy,
 	}

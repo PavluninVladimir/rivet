@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
 
@@ -169,4 +172,96 @@ func TestPolicyAPI(t *testing.T) {
 	}
 	resp, _ = call(t, "PATCH", srv.URL+"/api/v1/tasks/"+task.ID, root, "", map[string]any{"attempt_limit": 2})
 	mustStatus(t, resp, http.StatusNotFound, "не участник меняет задачу")
+}
+
+// Движок политик в API (change add-policy-engine): режим виден в политике
+// установки и в состоянии установки; в external-режиме локальная правка
+// пресетов отклоняется (спека access-policy «Внешний контур политик»).
+func TestPolicyEngineMode(t *testing.T) {
+	ctx := context.Background()
+	st, srv := testServer(t)
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
+		t.Fatal(err)
+	}
+	root := loginSession(t, srv, "root", "root-secret")
+
+	// Встроенный движок: правка политики работает, режим виден.
+	_, body := call(t, "GET", srv.URL+"/api/v1/system/policy", root, "", nil)
+	var view struct {
+		Engine struct{ Mode, State, Detail string } `json:"engine"`
+	}
+	_ = json.Unmarshal(body, &view)
+	if view.Engine.Mode != policy.ModeEmbedded || view.Engine.State != "ok" {
+		t.Fatalf("режим встроенного движка: %s", body)
+	}
+	_, body = call(t, "GET", srv.URL+"/api/v1/system/status", root, "", nil)
+	if !strings.Contains(string(body), `"policy"`) {
+		t.Fatalf("компонент движка в состоянии установки: %s", body)
+	}
+
+	// Внешний движок: правка пресетов отклоняется, состояние деградирует,
+	// когда он не отвечает.
+	opa := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"result":{"allow":true}}`))
+	}))
+	defer opa.Close()
+	ext, err := policy.NewEngine(policy.Config{Mode: policy.ModeExternal, URL: opa.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	extSrv := httptest.NewServer((&Server{St: st, Policy: ext}).Handler())
+	defer extSrv.Close()
+	extRoot := loginSession(t, extSrv, "root", "root-secret")
+	preset := map[string]any{"auto_merge": true, "human_review_paths": []string{}, "attempt_limit": 3,
+		"review_limit": 3, "daily_token_budget": nil, "auto_publish": true}
+	resp, _ := call(t, "PUT", extSrv.URL+"/api/v1/system/policy", extRoot, "", preset)
+	mustStatus(t, resp, http.StatusConflict, "правка политики во внешнем режиме")
+	_, body = call(t, "GET", extSrv.URL+"/api/v1/system/policy", extRoot, "", nil)
+	_ = json.Unmarshal(body, &view)
+	if view.Engine.Mode != policy.ModeExternal || view.Engine.State != "ok" {
+		t.Fatalf("режим внешнего движка: %s", body)
+	}
+	opa.Close()
+	_, body = call(t, "GET", extSrv.URL+"/api/v1/system/status", extRoot, "", nil)
+	if !strings.Contains(string(body), "не отвечает") {
+		t.Fatalf("недоступный движок — деградация с причиной: %s", body)
+	}
+}
+
+// Мутация, запрещённая движком, отклоняется, даже если право у человека
+// есть; ошибка движка отвечает 503 (спека access-policy «Точки принуждения»).
+func TestPolicyMutationGate(t *testing.T) {
+	ctx := context.Background()
+	st, _ := testServer(t)
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
+		t.Fatal(err)
+	}
+	denySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"result":{"allow":false,"reason":"prod_freeze"}}`))
+	}))
+	defer denySrv.Close()
+	deny, err := policy.NewEngine(policy.Config{Mode: policy.ModeExternal, URL: denySrv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer((&Server{St: st, Policy: deny}).Handler())
+	defer srv.Close()
+	root := loginSession(t, srv, "root", "root-secret")
+	_, body := call(t, "POST", srv.URL+"/api/v1/projects", root, "", map[string]string{"name": "p", "repo": "o/r"})
+	var project struct{ ID string }
+	_ = json.Unmarshal(body, &project)
+	_, body = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/epics", root, "",
+		map[string]string{"title": "E", "goal": "g"})
+	var epic struct{ ID string }
+	_ = json.Unmarshal(body, &epic)
+	resp, body := call(t, "POST", srv.URL+"/api/v1/epics/"+epic.ID+"/start", root, "", nil)
+	mustStatus(t, resp, http.StatusForbidden, "мутация, запрещённая движком")
+	if !strings.Contains(string(body), "prod_freeze") {
+		t.Fatalf("причина отказа: %s", body)
+	}
+
+	// Движок не отвечает — мутация отклоняется как недоступность установки.
+	denySrv.Close()
+	resp, _ = call(t, "POST", srv.URL+"/api/v1/epics/"+epic.ID+"/start", root, "", nil)
+	mustStatus(t, resp, http.StatusServiceUnavailable, "движок не дал решения")
 }

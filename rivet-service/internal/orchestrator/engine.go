@@ -37,9 +37,12 @@ type Engine struct {
 	SCM      scm.Adapter
 	Adapters *scm.Factory
 	// Box расшифровывает учётные данные проектов; nil — ключ не настроен.
-	Box  *secretbox.Box
-	Blob *blob.Store
-	Out  Sender
+	Box *secretbox.Box
+	// Policy — движок политик: решения гейтов конвейера. Ошибка движка —
+	// запрет для автоматики (спека access-policy «Точки принуждения»).
+	Policy policy.Engine
+	Blob   *blob.Store
+	Out    Sender
 
 	HeartbeatTimeout time.Duration
 	BaseBranch       string
@@ -62,6 +65,12 @@ type Engine struct {
 	// epic.budget_exceeded: раз на факт превышения, смена бюджета — новый
 	// факт; повтор после рестарта допустим (спека orchestration «Бюджет Epic»).
 	epicBudgetNotified map[string]bool
+	// policyDown — проекты, по которым уже написана эскалация «движок
+	// политик недоступен»: при первом успешном решении она закрывается.
+	// Свой mutex: переходы «упал/поднялся» ходят в базу и должны быть
+	// сериализованы между тиком планировщика и публикациями.
+	policyMu   sync.Mutex
+	policyDown map[string]bool
 	// Now — источник времени для бюджета (подменяется в тестах).
 	Now func() time.Time
 }
@@ -69,14 +78,16 @@ type Engine struct {
 func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, heartbeat time.Duration) *Engine {
 	return &Engine{
 		St: st, SCM: adapter, Adapters: &scm.Factory{Fallback: adapter}, Blob: bl, Out: send,
+		Policy:           policy.Default(),
 		HeartbeatTimeout: heartbeat, BaseBranch: "main",
-		stageContext:   map[string]string{},
-		transcripts:    map[string][]byte{},
-		sessions:       map[string]string{},
-		deployLogs:     map[string][]byte{},
-		deployOwner:    map[string]string{},
+		stageContext:       map[string]string{},
+		transcripts:        map[string][]byte{},
+		sessions:           map[string]string{},
+		deployLogs:         map[string][]byte{},
+		deployOwner:        map[string]string{},
 		budgetNotified:     map[string]string{},
 		epicBudgetNotified: map[string]bool{},
+		policyDown:         map[string]bool{},
 		Now:                time.Now,
 	}
 }
@@ -223,15 +234,35 @@ func (e *Engine) budgetExclusions(ctx context.Context) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		scope := ""
-		var used, limit int64
-		switch {
-		case inst.DailyTokenBudget != nil && total >= *inst.DailyTokenBudget:
-			scope, used, limit = "installation", total, *inst.DailyTokenBudget
-		case eff.Presets.DailyTokenBudget != nil && byProject[pid] >= *eff.Presets.DailyTokenBudget:
-			scope, used, limit = "project", byProject[pid], *eff.Presets.DailyTokenBudget
-		default:
+		// Решение о назначении принимает движок: бюджеты установки и
+		// проекта — правила стандартной политики (спека access-policy
+		// «Точки принуждения»).
+		in := budgetInput{
+			Installation: budgetOf(total, inst.DailyTokenBudget),
+			Project:      budgetOf(byProject[pid], eff.Presets.DailyTokenBudget),
+		}
+		d, err := e.decide(ctx, policy.PointAssign, in)
+		if err != nil {
+			// Решения нет — проекту в этот проход не назначается ничего.
+			excluded = append(excluded, pid)
+			if err := e.policyEngineDown(ctx, policy.PointAssign, pid, eff, err); err != nil {
+				return nil, err
+			}
 			continue
+		}
+		if err := e.policyEngineUp(ctx, pid); err != nil {
+			return nil, err
+		}
+		if d.Allow {
+			continue
+		}
+		var used, limit int64
+		scope := d.Reason
+		switch d.Reason {
+		case "installation":
+			used, limit = in.Installation.Used, in.Installation.Budget
+		default:
+			used, limit = in.Project.Used, in.Project.Budget
 		}
 		excluded = append(excluded, pid)
 		e.mu.Lock()
@@ -245,6 +276,7 @@ func (e *Engine) budgetExclusions(ctx context.Context) ([]string, error) {
 		}
 		payload := eff.Ref()
 		payload["scope"], payload["used"], payload["limit"] = scope, used, limit
+		payload["point"] = policy.PointAssign
 		payload["paused_until"] = pausedUntil.Format(time.RFC3339)
 		if _, err := e.St.AppendEvent(ctx, store.EventInput{
 			ActorKind: domain.ActorSystem, Type: "policy.budget_exceeded", ProjectID: pid,
@@ -267,6 +299,24 @@ func (e *Engine) epicBudgetExclusions(ctx context.Context) ([]string, error) {
 	}
 	ids := make([]string, 0, len(exceeded))
 	for _, x := range exceeded {
+		// Факт превышения даёт запрос, решение — движок: бюджет Epic такое
+		// же правило стандартной политики, как дневные бюджеты.
+		in := budgetInput{Epic: budgetSide{Used: x.Used, Budget: x.Budget}}
+		d, err := e.decide(ctx, policy.PointAssign, in)
+		if err != nil {
+			ids = append(ids, x.EpicID)
+			eff, effErr := e.St.EffectivePolicy(ctx, x.ProjectID)
+			if effErr != nil {
+				return nil, effErr
+			}
+			if err := e.policyEngineDown(ctx, policy.PointAssign, x.ProjectID, eff, err); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if d.Allow {
+			continue
+		}
 		ids = append(ids, x.EpicID)
 		key := fmt.Sprintf("%s|%d", x.EpicID, x.Budget)
 		e.mu.Lock()
@@ -281,7 +331,7 @@ func (e *Engine) epicBudgetExclusions(ctx context.Context) ([]string, error) {
 			ProjectID: x.ProjectID, EpicID: x.EpicID,
 			Text: fmt.Sprintf("бюджет Epic исчерпан (%d из %d токенов) — новые стадии не назначаются, поднимите или снимите бюджет",
 				x.Used, x.Budget),
-			Payload: map[string]any{"used": x.Used, "budget": x.Budget},
+			Payload: map[string]any{"used": x.Used, "budget": x.Budget, "point": policy.PointAssign},
 		}); err != nil {
 			return nil, err
 		}
@@ -666,10 +716,8 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 				return err
 			}
 			// Авто-merge — гейт политики (спека task-pipeline «Merge после
-			// успешной проверки»); выключен — ждём человека, как прежде.
-			if !eff.Presets.AutoMerge {
-				return nil
-			}
+			// успешной проверки»). Решает движок, а не пресет напрямую:
+			// во внешнем режиме локальные пресеты вообще не главные.
 			return e.autoMerge(ctx, task, p, eff)
 		}
 		// Ревьюера освобождает ConsumeAttempt в той же транзакции, что и
@@ -806,6 +854,7 @@ func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Proje
 		payload := eff.Ref()
 		payload["reason"] = reason
 		payload["paths"] = paths
+		payload["point"] = policy.PointMerge
 		_, err := e.St.AppendEvent(ctx, store.EventInput{
 			ActorKind: domain.ActorSystem, Type: "task.merge_deferred",
 			ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
@@ -813,16 +862,40 @@ func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Proje
 		})
 		return err
 	}
+	decide := func(filesUnknown bool, policyFiles, protected []string) (policy.Decision, error) {
+		// Списки идут непустыми: nil в JSON — null, а count(null) в Rego
+		// не определён, и правило молча не срабатывало бы.
+		return e.decide(ctx, policy.PointMerge, map[string]any{
+			"presets":       eff.Presets,
+			"files_unknown": filesUnknown,
+			"policy_files":  orEmpty(policyFiles),
+			"protected":     orEmpty(protected),
+		})
+	}
+	// Первый вопрос движку — без фактов PR: «пропускает ли гейт merge в
+	// принципе». Отказ auto_merge_off от файлов не зависит, и diff тогда
+	// читать незачем — иначе на каждый reviewed PR уходил бы лишний вызов
+	// хостинга при выключенном авто-merge.
+	if d, err := decide(false, nil, nil); err != nil {
+		if err := e.policyEngineDown(ctx, policy.PointMerge, p.ID, eff, err); err != nil {
+			return err
+		}
+		return deferMerge("engine_error", "движок политик не дал решения", nil)
+	} else if !d.Allow && d.Reason == "auto_merge_off" {
+		// Авто-merge выключен: задача штатно ждёт человека, отдельного
+		// события об этом нет — иначе оно писалось бы на каждую задачу.
+		return e.policyEngineUp(ctx, p.ID)
+	}
 	var paths []string
+	filesUnknown := false
 	if task.PRURL != "" {
 		diff, err := e.diffForTask(ctx, task)
 		if err != nil {
 			slog.Error("auto-merge: diff", "task", task.ID, "err", err)
-			return deferMerge("files_unknown", "список изменённых файлов PR получить не удалось", nil)
-		}
-		paths = policy.PathsFromDiff(diff)
-		if len(paths) == 0 && strings.TrimSpace(diff) != "" {
-			return deferMerge("files_unknown", "список изменённых файлов PR получить не удалось", nil)
+			filesUnknown = true
+		} else {
+			paths = policy.PathsFromDiff(diff)
+			filesUnknown = len(paths) == 0 && strings.TrimSpace(diff) != ""
 		}
 	}
 	var policyFiles, protected []string
@@ -834,21 +907,44 @@ func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Proje
 			protected = append(protected, path)
 		}
 	}
-	if len(policyFiles) > 0 {
-		// Метаправило в коде: PR с файлами политики никогда не мержится
-		// автоматически, нужен человек (спека access-policy «Защита от самоослабления»).
+	// Окончательное решение — с фактами PR.
+	d, err := decide(filesUnknown, policyFiles, protected)
+	if err != nil {
+		if err := e.policyEngineDown(ctx, policy.PointMerge, p.ID, eff, err); err != nil {
+			return err
+		}
+		return deferMerge("engine_error", "движок политик не дал решения", nil)
+	}
+	if err := e.policyEngineUp(ctx, p.ID); err != nil {
+		return err
+	}
+	switch {
+	case !d.Allow && d.Reason == "auto_merge_off":
+		return nil
+	case len(policyFiles) > 0:
+		// Метаправило в коде и поверх движка: PR с файлами политики никогда
+		// не мержится автоматически, нужен человек, и разрешающий ответ
+		// движка этого не отменяет (спека access-policy «Защита от
+		// самоослабления»).
 		if err := deferMerge("policy_file", "PR изменяет файлы политики ("+strings.Join(policyFiles, ", ")+")", policyFiles); err != nil {
 			return err
 		}
 		return e.St.Escalate(ctx, p.ID, task.ID, domain.AttPolicyChange,
 			"изменение политики требует человека: PR меняет "+strings.Join(policyFiles, ", "))
-	}
-	if len(protected) > 0 {
-		return deferMerge("human_review_path", "PR меняет пути, требующие человека ("+strings.Join(protected, ", ")+")", protected)
+	case !d.Allow:
+		switch d.Reason {
+		case "files_unknown":
+			return deferMerge(d.Reason, "список изменённых файлов PR получить не удалось", nil)
+		case "human_review_path":
+			return deferMerge(d.Reason, "PR меняет пути, требующие человека ("+strings.Join(protected, ", ")+")", protected)
+		default:
+			return deferMerge(d.Reason, "авто-merge запрещён политикой", nil)
+		}
 	}
 	payload := eff.Ref()
 	payload["status"], payload["auto_merge"] = "done", true
-	err := e.mergeTask(ctx, task, p, store.EventInput{
+	payload["point"] = policy.PointMerge
+	err = e.mergeTask(ctx, task, p, store.EventInput{
 		ActorKind: domain.ActorSystem, Type: "task.status",
 		Text: "PR смержен автоматически по политике " + shortHash(eff.Hash) + " — задача выполнена", Payload: payload,
 	})
@@ -923,21 +1019,38 @@ func (e *Engine) enqueueAutoDeploys(ctx context.Context, projectID, version stri
 	if version == "" {
 		return
 	}
-	if err := EnqueueAutoDeploys(ctx, e.St, projectID, version); err != nil {
+	if err := e.EnqueueAutoDeploys(ctx, projectID, version); err != nil {
 		slog.Error("enqueue auto deployments", "project", projectID, "err", err)
 	}
 }
 
 // EnqueueAutoDeploys — автопубликации после merge с проверкой пресета
 // auto_publish; общий путь для merge в Rivet и внешнего merge по webhook.
-func EnqueueAutoDeploys(ctx context.Context, st *store.Store, projectID, version string) error {
-	eff, err := st.EffectivePolicy(ctx, projectID)
+func (e *Engine) EnqueueAutoDeploys(ctx context.Context, projectID, version string) error {
+	eff, err := e.St.EffectivePolicy(ctx, projectID)
 	if err != nil {
 		return err
 	}
-	if eff.Presets.AutoPublish {
-		return st.EnqueueAutoDeployments(ctx, projectID, version)
+	d, decErr := e.decide(ctx, policy.PointPublish, map[string]any{"presets": eff.Presets})
+	if decErr != nil {
+		// Решения нет — автопубликация не запускается (fail-closed).
+		if err := e.policyEngineDown(ctx, policy.PointPublish, projectID, eff, decErr); err != nil {
+			return err
+		}
+		return deferDeploy(ctx, e.St, projectID, eff, "engine_error", "движок политик не дал решения")
 	}
+	if err := e.policyEngineUp(ctx, projectID); err != nil {
+		return err
+	}
+	if d.Allow {
+		return e.St.EnqueueAutoDeployments(ctx, projectID, version)
+	}
+	return deferDeploy(ctx, e.St, projectID, eff, d.Reason, "автопубликация запрещена")
+}
+
+// deferDeploy пишет deploy.deferred по автоматическим окружениям проекта;
+// без таких окружений событие не нужно.
+func deferDeploy(ctx context.Context, st *store.Store, projectID string, eff store.EffectivePolicy, reason, text string) error {
 	envs, err := st.AutoEnvironmentNames(ctx, projectID)
 	if err != nil {
 		return err
@@ -947,9 +1060,10 @@ func EnqueueAutoDeploys(ctx context.Context, st *store.Store, projectID, version
 	}
 	payload := eff.Ref()
 	payload["environments"] = envs
+	payload["reason"], payload["point"] = reason, policy.PointPublish
 	_, err = st.AppendEvent(ctx, store.EventInput{
 		ActorKind: domain.ActorSystem, Type: "deploy.deferred", ProjectID: projectID,
-		Text:    "публикация отложена политикой " + shortHash(eff.Hash) + ": автопубликация запрещена (" + strings.Join(envs, ", ") + ")",
+		Text:    "публикация отложена политикой " + shortHash(eff.Hash) + ": " + text + " (" + strings.Join(envs, ", ") + ")",
 		Payload: payload,
 	})
 	return err

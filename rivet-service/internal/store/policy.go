@@ -366,6 +366,28 @@ func (s *Store) Escalate(ctx context.Context, projectID, taskID string, reason d
 	return err
 }
 
+// EscalateProjectOnce — эскалация уровня проекта без задачи и публикации
+// (движок политик недоступен): одна открытая на проект и причину, повтор
+// молча игнорируется частичным уникальным индексом.
+func (s *Store) EscalateProjectOnce(ctx context.Context, projectID string, reason domain.AttentionReason, msg string) error {
+	_, err := s.Pool.Exec(ctx, `
+		INSERT INTO attention (project_id, task_id, reason, message)
+		VALUES ($1, NULL, $2, $3)
+		ON CONFLICT DO NOTHING`, projectID, string(reason), msg)
+	return err
+}
+
+// ResolveProjectEscalation закрывает открытые эскалации уровня проекта с
+// указанной причиной: движок снова отвечает — эскалация «движок недоступен»
+// больше не нужна и не должна занимать место (одна открытая на проект).
+func (s *Store) ResolveProjectEscalation(ctx context.Context, projectID string, reason domain.AttentionReason) error {
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE attention SET status='resolved', resolved_at=now()
+		WHERE project_id=$1 AND reason=$2 AND status <> 'resolved'
+		  AND task_id IS NULL AND deployment_id IS NULL`, projectID, string(reason))
+	return err
+}
+
 // AutoEnvironmentNames — окружения проекта с автоматическим запуском
 // публикации (для события deploy.deferred).
 func (s *Store) AutoEnvironmentNames(ctx context.Context, projectID string) ([]string, error) {
