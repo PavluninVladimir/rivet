@@ -78,7 +78,11 @@ type Epic struct {
 	// orchestration «Бюджет Epic»). При превышении расхода планировщик
 	// перестаёт назначать стадии задачам Epic.
 	TokenBudget *int64
-	Created     time.Time
+	// SourceKey — ключ источника у импортированной истории (спека
+	// domain-model «Импорт истории проекта»); пусто у живых Epic'ов.
+	// История не назначается runner'ам и не входит в оценки и бюджеты.
+	SourceKey string
+	Created   time.Time
 }
 
 type Criterion struct {

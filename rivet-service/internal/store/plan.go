@@ -303,7 +303,9 @@ func (s *Store) estimateSource(ctx context.Context, projectID string) (p25, p75 
 			FROM tasks t
 			JOIN epics e ON e.id = t.epic_id
 			JOIN usage_records u ON u.task_id = t.id
-			WHERE t.status = 'done'
+			-- Импортированная история не имеет usage и занизила бы удельный
+			-- расход до нуля (спека domain-model «История не смешивается»).
+			WHERE t.status = 'done' AND e.source_key IS NULL
 			  AND ($1 = '' OR e.project_id = NULLIF($1,'')::uuid)
 			  AND (u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL)
 			GROUP BY t.id, t.estimate
@@ -412,7 +414,7 @@ func (s *Store) ExceededEpicBudgets(ctx context.Context) ([]ExceededEpicBudget, 
 		                FILTER (WHERE u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL), 0) AS used
 		FROM epics e
 		LEFT JOIN usage_records u ON u.epic_id = e.id
-		WHERE e.status = 'running' AND e.token_budget IS NOT NULL
+		WHERE e.status = 'running' AND e.token_budget IS NOT NULL AND e.source_key IS NULL
 		GROUP BY e.id
 		HAVING COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0))
 		                FILTER (WHERE u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL), 0) >= e.token_budget`)
