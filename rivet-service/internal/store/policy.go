@@ -195,11 +195,75 @@ func (s *Store) SetProjectPolicySource(ctx context.Context, projectID, source st
 
 // SetProjectPolicyFileID запоминает версию файла, из которой создана
 // последняя версия политики: по ней синхронизация видит, что содержимое
-// не менялось, и лишних версий не создаёт.
-func (s *Store) SetProjectPolicyFileID(ctx context.Context, projectID, fileID string) error {
-	_, err := s.Pool.Exec(ctx,
-		`UPDATE projects SET policy_file_id=$2 WHERE id=$1`, projectID, fileID)
-	return err
+// не менялось, и лишних версий не создаёт. false — источник уже не git
+// (переключили, пока файл читался): запись не нужна.
+func (s *Store) SetProjectPolicyFileID(ctx context.Context, projectID, fileID string) (bool, error) {
+	tag, err := s.Pool.Exec(ctx,
+		`UPDATE projects SET policy_file_id=$2 WHERE id=$1 AND policy_source='git'`, projectID, fileID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// SaveProjectPolicyFromGit создаёт версию политики из файла репозитория
+// и запоминает идентификатор файла одной транзакцией: сбой между ними
+// давал бы дубликаты версий на следующем проходе. Версия создаётся, только
+// пока источник — git; false — источник переключили, пока файл читался.
+func (s *Store) SaveProjectPolicyFromGit(ctx context.Context, projectID string, o policy.Overrides, fileID, login string) (bool, error) {
+	if err := o.Validate(); err != nil {
+		return false, err
+	}
+	raw, err := json.Marshal(o)
+	if err != nil {
+		return false, err
+	}
+	hash := policy.Hash(o)
+	saved := false
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		// Строка проекта лочится: переключение источника ждёт конца
+		// синхронизации, а синхронизация видит актуальный источник.
+		// Порядок локов — строка проекта, затем advisory lock области:
+		// savePolicyVersion берёт только advisory lock и строку проекта не
+		// трогает, поэтому обратного порядка (и дедлока) нет.
+		var source string
+		if err := tx.QueryRow(ctx,
+			`SELECT policy_source FROM projects WHERE id=$1 FOR UPDATE`, projectID).Scan(&source); err != nil {
+			return nf(err)
+		}
+		if source != policy.SourceGit {
+			return nil
+		}
+		if _, err := tx.Exec(ctx,
+			`SELECT pg_advisory_xact_lock(hashtext('policy:' || $1 || ':' || $2))`, PolicyScopeProject, projectID); err != nil {
+			return err
+		}
+		v, err := scanPolicyVersion(tx.QueryRow(ctx, `
+			INSERT INTO policy_versions (scope, project_id, version, hash, content, created_by)
+			VALUES ($1, $2::uuid,
+				(SELECT COALESCE(MAX(version),0)+1 FROM policy_versions
+				 WHERE scope=$1 AND project_id=$2::uuid),
+				$3, $4, $5)
+			RETURNING `+policyCols, PolicyScopeProject, projectID, hash, raw, login))
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE projects SET policy_file_id=$2 WHERE id=$1`, projectID, fileID); err != nil {
+			return err
+		}
+		if _, err := appendEvent(ctx, tx, EventInput{
+			ActorKind: domain.ActorSystem, Type: "policy.activated", ProjectID: projectID,
+			Text: fmt.Sprintf("политика проекта v%d из репозитория (%s)", v.Version, shortHash(v.Hash)),
+			Payload: map[string]any{"scope": PolicyScopeProject, "version": v.Version,
+				"hash": v.Hash, "source": policy.SourceGit, "commit": fileID},
+		}); err != nil {
+			return err
+		}
+		saved = true
+		return nil
+	})
+	return saved, err
 }
 
 func (s *Store) savePolicyVersion(ctx context.Context, scope, projectID string, content any, login string) (PolicyVersion, error) {

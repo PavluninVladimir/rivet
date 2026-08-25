@@ -223,3 +223,131 @@ func TestGitPolicyTrustedRefOnly(t *testing.T) {
 		t.Fatal("политика из ветки задачи не должна применяться")
 	}
 }
+
+// Сломанный файл не даёт событие каждую минуту: одно на причину, новая
+// причина — новое событие, починка сбрасывает память (ретро-ревью).
+func TestGitPolicyBrokenFileNoEventSpam(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	sc := &fakeSCM{fileID: "sha-broken"}
+	p, e := seedGitPolicy(t, st, sc, "attempt_limit: 0\n")
+	for i := 0; i < 3; i++ {
+		if err := e.syncProjectPolicy(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	count := func() int {
+		evs, err := st.Events(ctx, store.EventFilter{ProjectID: p.ID, Type: "policy.sync_failed", Limit: 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(evs)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("одна причина — одно событие, получили %d", n)
+	}
+	// Другая причина поломки — новое событие.
+	sc.mu.Lock()
+	sc.files["o/r@main:"+policy.PolicyFile] = "auto_merges: true\n"
+	sc.mu.Unlock()
+	if err := e.syncProjectPolicy(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("новая причина — новое событие, получили %d", n)
+	}
+	// Починили, потом сломали так же — событие снова пишется.
+	sc.mu.Lock()
+	sc.files["o/r@main:"+policy.PolicyFile] = "attempt_limit: 3\n"
+	sc.fileID = "sha-ok"
+	sc.mu.Unlock()
+	p, _ = st.GetProject(ctx, p.ID)
+	if err := e.syncProjectPolicy(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	sc.mu.Lock()
+	sc.files["o/r@main:"+policy.PolicyFile] = "auto_merges: true\n"
+	sc.fileID = "sha-broken-2"
+	sc.mu.Unlock()
+	p, _ = st.GetProject(ctx, p.ID)
+	if err := e.syncProjectPolicy(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 3 {
+		t.Fatalf("после починки поломка снова даёт событие, получили %d", n)
+	}
+}
+
+// Источник переключили обратно, пока файл читался: версия из файла не
+// создаётся (ретро-ревью: гонка синхронизации и переключения).
+func TestGitPolicySourceSwitchedDuringSync(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	sc := &fakeSCM{fileID: "sha-1"}
+	p, e := seedGitPolicy(t, st, sc, "auto_merge: true\n")
+	// p ещё помнит источник git, а в базе он уже store.
+	if err := st.SetProjectPolicySource(ctx, p.ID, policy.SourceStore); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.syncProjectPolicy(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	versions, err := st.ListPolicyVersions(ctx, store.PolicyScopeProject, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(versions) != 0 {
+		t.Fatalf("после переключения на store версия из файла не нужна: %d", len(versions))
+	}
+}
+
+// Неизменный файл всё равно снимает застрявшую эскалацию (ретро-ревью).
+func TestGitPolicyUnchangedFileResolvesEscalation(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	sc := &fakeSCM{fileID: "sha-1"}
+	p, e := seedGitPolicy(t, st, sc, "auto_merge: true\n")
+	if err := e.syncProjectPolicy(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	// Эскалация осталась от прошлого прохода (снятие тогда не удалось).
+	if err := st.EscalateProjectOnce(ctx, p.ID, domain.AttPolicySource, "застряла"); err != nil {
+		t.Fatal(err)
+	}
+	p, _ = st.GetProject(ctx, p.ID)
+	if err := e.syncProjectPolicy(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM attention WHERE reason=$1 AND status <> 'resolved'`,
+		string(domain.AttPolicySource)).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("неизменный файл должен снять застрявшую эскалацию: %d", n)
+	}
+}
+
+// Сбой записи события о поломке не теряет его: следующий проход пишет
+// событие, потому что причина запоминается только после записи
+// (третий круг ревью).
+func TestGitPolicyBrokenEventSurvivesWriteFailure(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	sc := &fakeSCM{fileID: "sha-broken"}
+	p, e := seedGitPolicy(t, st, sc, "attempt_limit: 0\n")
+	// Отменённый контекст валит запись события.
+	dead, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := e.syncProjectPolicy(dead, p); err == nil {
+		t.Fatal("запись с отменённым контекстом должна упасть")
+	}
+	if err := e.syncProjectPolicy(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	evs, err := st.Events(ctx, store.EventFilter{ProjectID: p.ID, Type: "policy.sync_failed", Limit: 10})
+	if err != nil || len(evs) != 1 {
+		t.Fatalf("событие должно записаться после сбоя: %v %d", err, len(evs))
+	}
+}

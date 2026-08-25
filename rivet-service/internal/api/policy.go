@@ -199,7 +199,14 @@ func (s *Server) putProjectPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	// Политика из репозитория меняется коммитом: двух источников правды
 	// быть не должно (спека access-policy «Политика проекта из репозитория»).
-	if p, err := s.St.GetProject(r.Context(), r.PathValue("id")); err == nil && p.PolicySource == policy.SourceGit {
+	// Ошибка чтения проекта — отказ, а не пропуск проверки: иначе сбой
+	// базы открывал бы обход запрета.
+	p, err := s.St.GetProject(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if p.PolicySource == policy.SourceGit {
 		writeJSON(w, http.StatusConflict, map[string]apiError{"error": {
 			Code: "policy_from_git", Message: "политика проекта хранится в репозитории: меняйте её коммитом в " + policy.PolicyFile}})
 		return
