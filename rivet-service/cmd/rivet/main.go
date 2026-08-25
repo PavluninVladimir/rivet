@@ -8,7 +8,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: rivet <command> (migrate, createdb, projects, epics, tasks)")
+		fmt.Fprintln(os.Stderr, "usage: rivet <command> (migrate, createdb, projects, epics, tasks, history-manifest, history-import)")
 		os.Exit(2)
 	}
 	if err := dispatch(os.Args[1], os.Args[2:]); err != nil {

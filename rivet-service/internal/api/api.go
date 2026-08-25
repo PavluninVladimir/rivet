@@ -106,6 +106,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/projects/{id}/credentials", s.putCredentials)
 	mux.HandleFunc("GET /api/v1/projects/{id}/sessions", s.projectSessions)
 	mux.HandleFunc("GET /api/v1/projects/{id}/epics", s.listEpics)
+	mux.HandleFunc("POST /api/v1/projects/{id}/history", s.importHistory)
 	mux.HandleFunc("POST /api/v1/projects/{id}/epics", s.createEpic)
 	mux.HandleFunc("GET /api/v1/epics/{id}", s.getEpic)
 	mux.HandleFunc("PATCH /api/v1/epics/{id}", s.patchEpic)
@@ -217,6 +218,12 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func decode(r *http.Request, v any) error {
 	return json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20)).Decode(v)
+}
+
+// decodeLarge — для тел, которые заведомо больше обычных запросов
+// (манифест истории проекта на сотни Epic'ов).
+func decodeLarge(r *http.Request, v any) error {
+	return json.NewDecoder(http.MaxBytesReader(nil, r.Body, 16<<20)).Decode(v)
 }
 
 func unprocessable(w http.ResponseWriter, msg string) {

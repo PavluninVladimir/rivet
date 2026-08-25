@@ -30,6 +30,10 @@ func dispatch(cmd string, args []string) error {
 		return cmdEpics(args)
 	case "tasks":
 		return cmdTasks(args)
+	case "history-manifest":
+		return cmdHistoryManifest(args)
+	case "history-import":
+		return cmdHistoryImport(args)
 	default:
 		return fmt.Errorf("неизвестная команда %q", cmd)
 	}
