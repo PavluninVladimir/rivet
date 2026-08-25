@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -72,7 +73,8 @@ func (p Presets) Normalize() Presets {
 }
 
 // Validate проверяет пресеты: лимиты не меньше 1, бюджет не отрицательный,
-// шаблоны путей корректны.
+// шаблоны путей корректны и не несут управляющих символов (пути уезжают в
+// промпт агента — перевод строки превратил бы путь в отдельную инструкцию).
 func (p Presets) Validate() error {
 	if p.AttemptLimit < 1 {
 		return fmt.Errorf("%w: лимит попыток должен быть не меньше 1", ErrInvalid)
@@ -104,8 +106,13 @@ func (o Overrides) Validate() error {
 }
 
 func validatePatterns(patterns []string) error {
-	for _, pat := range patterns {
-		pat = strings.TrimSpace(pat)
+	for _, raw := range patterns {
+		// Управляющие символы ищем в исходном значении: хранится оно как
+		// есть, а TrimSpace убрал бы перевод строки только из проверки.
+		if strings.ContainsFunc(raw, promptBreaking) {
+			return fmt.Errorf("%w: шаблон пути %q содержит управляющий символ", ErrInvalid, raw)
+		}
+		pat := strings.TrimSpace(raw)
 		if pat == "" {
 			return fmt.Errorf("%w: пустой шаблон пути", ErrInvalid)
 		}
@@ -117,6 +124,13 @@ func validatePatterns(patterns []string) error {
 		}
 	}
 	return nil
+}
+
+// promptBreaking — символ, который в промпте агента начал бы новую строку
+// или сообщение: пути политики уезжают туда как есть (доставка политики
+// runner'у), и такой шаблон стал бы отдельной инструкцией.
+func promptBreaking(r rune) bool {
+	return unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
 }
 
 // Effective — действующая политика проекта: пресеты установки, перекрытые

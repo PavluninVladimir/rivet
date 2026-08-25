@@ -399,6 +399,20 @@ func (e *Engine) dispatchWith(ctx context.Context, a store.Assignment, stage pb.
 	for _, c := range p.Checks {
 		checks = append(checks, &pb.Check{Name: c.Name, Cmd: c.Cmd})
 	}
+	// Политика проекта едет вместе с назначением: у runner'а нет другого
+	// источника, рабочая копия на исполнение не влияет (спека access-policy
+	// «Доставка политик runner'ам»). Ошибка чтения не валит стадию — агент
+	// работает как прежде, гейты на plane никуда не делись.
+	var assignPolicy *pb.Policy
+	if eff, err := e.St.EffectivePolicy(ctx, p.ID); err != nil {
+		slog.Error("dispatch: политика проекта", "project", p.ID, "err", err)
+	} else {
+		assignPolicy = &pb.Policy{
+			Hash: eff.Hash, HumanReviewPaths: eff.Presets.HumanReviewPaths,
+			PolicyDir: policy.PolicyDir,
+		}
+	}
+
 	runnerID := a.Runner.ID
 	// Глубина сессии — глубина адаптера runner'а (спека agent-integration
 	// «Глубина объявлена runner'ом»).
@@ -425,6 +439,7 @@ func (e *Engine) dispatchWith(ctx context.Context, a store.Assignment, stage pb.
 		DriverKind: spec.driverKind, DriverID: spec.driverID,
 		Agent: a.Runner.Agent, Model: a.Runner.Model,
 		Depth: depth, Scope: stage.String(), Prompt: spec.prompt, Private: spec.private,
+		PolicyHash: assignPolicy.GetHash(),
 	})
 	if err != nil {
 		slog.Error("dispatch: session", "task", a.Task.ID, "err", err)
@@ -461,7 +476,7 @@ func (e *Engine) dispatchWith(ctx context.Context, a store.Assignment, stage pb.
 			Criteria: criteria, Repo: p.Repo(), Branch: a.Task.Branch,
 			Checks: checks, ExtraContext: extra, SessionId: sessionID,
 			RepoUrl: repoURL, GitToken: gitToken, BaseBranch: p.DefaultBranch,
-			UserPrompt: spec.userPrompt,
+			UserPrompt: spec.userPrompt, Policy: assignPolicy,
 		}},
 	}
 	if !e.Out.Send(runnerID, msg) {
@@ -611,6 +626,15 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 		return nil
 	}
 	ev := store.EventInput{ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "task.status"}
+	// Итог стадии привязан к версии политики, по которой работал агент:
+	// runner возвращает доставленный хэш эхом (спека access-policy
+	// «Доставка политик runner'ам»).
+	payload := func(m map[string]any) map[string]any {
+		if sr.PolicyHash != "" {
+			m["policy_hash"] = sr.PolicyHash
+		}
+		return m
+	}
 
 	switch sr.Stage {
 	case pb.StageResult_CODING, pb.StageResult_FIXING:
@@ -621,10 +645,10 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 			if private, _, perr := e.St.SessionPrivacy(ctx, sr.SessionId); perr == nil && private {
 				detail = "ошибка приватной сессии — подробности доступны её автору в итоге сессии"
 			}
-			return e.failTask(ctx, task, "Невосстановимая ошибка этапа: "+detail, runnerID)
+			return e.failTask(ctx, task, "Невосстановимая ошибка этапа: "+detail, runnerID, payload(map[string]any{}))
 		}
 		ev.Text = "реализация готова — запуск проверок"
-		ev.Payload = map[string]any{"status": "testing"}
+		ev.Payload = payload(map[string]any{"status": "testing"})
 		if err := e.St.TransitionTask(ctx, task.ID, domain.TaskTesting, ev, nil); err != nil {
 			return err
 		}
@@ -648,7 +672,7 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 			e.stageContext[task.ID] = "Вывод проверок:\n" + sr.Detail
 			e.mu.Unlock()
 			paused := e.epicPaused(ctx, task)
-			failed, err := e.St.ConsumeAttempt(ctx, task.ID, domain.AttTestFailed, sr.Detail, !paused, 0)
+			failed, err := e.St.ConsumeAttempt(ctx, task.ID, domain.AttTestFailed, sr.Detail, !paused, 0, sr.PolicyHash)
 			if err != nil || failed {
 				e.takeStageContext(task.ID)
 				return err
@@ -690,7 +714,7 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 			}
 		}
 		ev.Text = "проверки прошли, PR создан — ожидание review"
-		ev.Payload = map[string]any{"status": "review", "pr": sr.PrUrl}
+		ev.Payload = payload(map[string]any{"status": "review", "pr": sr.PrUrl})
 		return e.St.TransitionWithRunnerRelease(ctx, task.ID, domain.TaskReview, ev)
 
 	case pb.StageResult_REVIEW:
@@ -711,7 +735,8 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 			if _, err := e.St.AppendEvent(ctx, store.EventInput{
 				ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "task.review_passed",
 				ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
-				Text: "review пройден — ожидание подтверждения merge",
+				Text:    "review пройден — ожидание подтверждения merge",
+				Payload: payload(map[string]any{}),
 			}); err != nil {
 				return err
 			}
@@ -725,7 +750,7 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 		e.mu.Lock()
 		e.stageContext[task.ID] = "Замечания review:\n" + sr.Detail
 		e.mu.Unlock()
-		_, err = e.St.ConsumeAttempt(ctx, task.ID, domain.AttReviewLimit, sr.Detail, false, eff.Presets.ReviewLimit)
+		_, err = e.St.ConsumeAttempt(ctx, task.ID, domain.AttReviewLimit, sr.Detail, false, eff.Presets.ReviewLimit, sr.PolicyHash)
 		return err
 
 	default:
@@ -745,10 +770,16 @@ func (e *Engine) epicPaused(ctx context.Context, task domain.Task) bool {
 }
 
 // failTask — невосстановимая ошибка: failed + эскалация TEST_FAILED.
-func (e *Engine) failTask(ctx context.Context, task domain.Task, msg, runnerID string) error {
+func (e *Engine) failTask(ctx context.Context, task domain.Task, msg, runnerID string, extra ...map[string]any) error {
+	failPayload := map[string]any{"status": "failed"}
+	for _, m := range extra {
+		for k, v := range m {
+			failPayload[k] = v
+		}
+	}
 	return e.St.TransitionTask(ctx, task.ID, domain.TaskFailed,
 		store.EventInput{ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "task.status",
-			Text: msg, Payload: map[string]any{"status": "failed"}},
+			Text: msg, Payload: failPayload},
 		func(tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx,
 				`UPDATE runners SET status='idle', task_id=NULL WHERE task_id=$1`, task.ID); err != nil {

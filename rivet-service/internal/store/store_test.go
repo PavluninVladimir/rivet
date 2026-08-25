@@ -181,7 +181,7 @@ func TestSchedulerFlow(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		failed, err := s.ConsumeAttempt(ctx, b.ID, domain.AttReviewLimit, "issues found", false, 0)
+		failed, err := s.ConsumeAttempt(ctx, b.ID, domain.AttReviewLimit, "issues found", false, 0, "")
 		if err != nil {
 			t.Fatal(err)
 		}
