@@ -99,6 +99,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/system/policy/versions", s.listInstallationPolicyVersions)
 	mux.HandleFunc("GET /api/v1/projects/{id}/policy", s.getProjectPolicy)
 	mux.HandleFunc("PUT /api/v1/projects/{id}/policy", s.putProjectPolicy)
+	mux.HandleFunc("PUT /api/v1/projects/{id}/policy/source", s.putProjectPolicySource)
 	mux.HandleFunc("GET /api/v1/projects/{id}/policy/versions", s.listProjectPolicyVersions)
 	mux.HandleFunc("POST /api/v1/scm/probe", s.scmProbe)
 	mux.HandleFunc("GET /api/v1/projects/{id}/repository", s.getRepository)

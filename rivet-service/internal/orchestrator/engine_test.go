@@ -33,9 +33,13 @@ type fakeSCM struct {
 	// (поведение GitHub workflow_dispatch).
 	noRunID bool
 	// files и commits — фиктивные файлы репозитория и история записей
-	// (публикация GitOps).
+	// (публикация GitOps, политика из репозитория).
 	files   map[string]string
 	commits []string
+	// branchUnprotected — доверенная ветка не защищена на хостинге.
+	branchUnprotected bool
+	// fileID — идентификатор версии файла, отдаваемый ReadFile.
+	fileID string
 }
 
 func (f *fakeSCM) CreatePR(ctx context.Context, repo, branch, base, title, body string) (scm.PR, error) {
@@ -102,7 +106,11 @@ func (f *fakeSCM) ReadFile(ctx context.Context, repo, ref, path string) (scm.Fil
 	if !ok {
 		return scm.FileContent{}, scm.ErrFileNotFound
 	}
-	return scm.FileContent{Content: content, FileID: "fake"}, nil
+	id := f.fileID
+	if id == "" {
+		id = "fake"
+	}
+	return scm.FileContent{Content: content, FileID: id}, nil
 }
 
 func (f *fakeSCM) WriteFile(ctx context.Context, repo, ref, path, prevID, content, message string) (scm.Commit, error) {
@@ -118,6 +126,14 @@ func (f *fakeSCM) WriteFile(ctx context.Context, repo, ref, path, prevID, conten
 	f.files[key] = content
 	f.commits = append(f.commits, content)
 	return scm.Commit{SHA: fmt.Sprintf("commit-%d", len(f.commits)), URL: "https://scm/commit"}, nil
+}
+
+// BranchProtected — защита доверенной ветки; подменяется в тестах
+// git-провайдера политики.
+func (f *fakeSCM) BranchProtected(ctx context.Context, repo, branch string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return !f.branchUnprotected, nil
 }
 
 // pipelineCall — запуск пайплайна, записанный фиктивным адаптером.

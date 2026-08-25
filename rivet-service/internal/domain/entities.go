@@ -28,6 +28,13 @@ type Project struct {
 	// WebhookRegistered — подписку на события создала система (иначе её
 	// настраивают на хостинге руками).
 	WebhookRegistered bool
+	// PolicySource — откуда берётся политика проекта: собственное
+	// хранилище (правка из консоли) или файл в доверенной ветке
+	// репозитория (спека access-policy «Хранение политик»).
+	PolicySource string
+	// PolicyFileID — версия файла политики, из которой создана последняя
+	// версия политики проекта: по ней видно, что содержимое не менялось.
+	PolicyFileID string
 }
 
 // Repo — путь репозитория. Метод сохраняет привычное имя для мест, где
@@ -553,6 +560,10 @@ const (
 	// AttPRClosed — PR задачи закрыт на хостинге без merge: решение
 	// (повторить, отменить) за человеком (спека scm-integration).
 	AttPRClosed AttentionReason = "PR_CLOSED"
+	// AttPolicySource — политика проекта в репозитории не читается или не
+	// проходит валидацию: действует последняя валидная версия
+	// (спека access-policy «Битый файл политики»).
+	AttPolicySource AttentionReason = "POLICY_SOURCE"
 )
 
 type Attention struct {

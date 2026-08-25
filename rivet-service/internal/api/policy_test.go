@@ -265,3 +265,53 @@ func TestPolicyMutationGate(t *testing.T) {
 	resp, _ = call(t, "POST", srv.URL+"/api/v1/epics/"+epic.ID+"/start", root, "", nil)
 	mustStatus(t, resp, http.StatusServiceUnavailable, "движок не дал решения")
 }
+
+// Источник политики проекта (change add-policy-git-provider): включение
+// git-провайдера требует защищённой ветки, а правка через API при нём
+// отклоняется.
+func TestProjectPolicySource(t *testing.T) {
+	ctx := context.Background()
+	st, srv := testServer(t)
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
+		t.Fatal(err)
+	}
+	root := loginSession(t, srv, "root", "root-secret")
+	_, body := call(t, "POST", srv.URL+"/api/v1/projects", root, "", map[string]string{"name": "p", "repo": "o/r"})
+	var project struct{ ID string }
+	_ = json.Unmarshal(body, &project)
+
+	// По умолчанию — хранилище Rivet.
+	_, body = call(t, "GET", srv.URL+"/api/v1/projects/"+project.ID+"/policy", root, "", nil)
+	var view struct {
+		Source struct{ Kind, File, Ref string } `json:"source"`
+	}
+	_ = json.Unmarshal(body, &view)
+	if view.Source.Kind != "store" {
+		t.Fatalf("источник по умолчанию: %s", body)
+	}
+
+	// Включение git-провайдера: fake-хостинг считает ветку защищённой.
+	resp, body := call(t, "PUT", srv.URL+"/api/v1/projects/"+project.ID+"/policy/source",
+		root, "", map[string]string{"kind": "git"})
+	mustStatus(t, resp, http.StatusOK, "включение git-провайдера")
+	_ = json.Unmarshal(body, &view)
+	if view.Source.Kind != "git" || view.Source.File == "" {
+		t.Fatalf("источник после включения: %s", body)
+	}
+
+	// Правка политики через API при git-источнике отклоняется.
+	resp, body = call(t, "PUT", srv.URL+"/api/v1/projects/"+project.ID+"/policy", root, "",
+		map[string]any{"auto_merge": true})
+	mustStatus(t, resp, http.StatusConflict, "правка политики при git-источнике")
+	if !strings.Contains(string(body), "policy_from_git") {
+		t.Fatalf("код ошибки: %s", body)
+	}
+
+	// Возврат к хранилищу Rivet снова разрешает правку.
+	resp, _ = call(t, "PUT", srv.URL+"/api/v1/projects/"+project.ID+"/policy/source",
+		root, "", map[string]string{"kind": "store"})
+	mustStatus(t, resp, http.StatusOK, "возврат источника")
+	resp, _ = call(t, "PUT", srv.URL+"/api/v1/projects/"+project.ID+"/policy", root, "",
+		map[string]any{"auto_merge": true})
+	mustStatus(t, resp, http.StatusOK, "правка после возврата")
+}

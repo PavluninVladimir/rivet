@@ -159,6 +159,49 @@ func (s *Store) SaveProjectPolicy(ctx context.Context, projectID string, o polic
 	return s.savePolicyVersion(ctx, PolicyScopeProject, projectID, o, login)
 }
 
+// ProjectsWithGitPolicy — проекты, чья политика живёт в репозитории:
+// их файл читает синхронизация оркестратора.
+func (s *Store) ProjectsWithGitPolicy(ctx context.Context) ([]domain.Project, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT `+projectCols+` FROM projects
+		WHERE policy_source = 'git' ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Project
+	for rows.Next() {
+		p, err := scanProject(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// SetProjectPolicySource переключает источник политики проекта.
+func (s *Store) SetProjectPolicySource(ctx context.Context, projectID, source string) error {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE projects SET policy_source=$2, policy_file_id='' WHERE id=$1`, projectID, source)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetProjectPolicyFileID запоминает версию файла, из которой создана
+// последняя версия политики: по ней синхронизация видит, что содержимое
+// не менялось, и лишних версий не создаёт.
+func (s *Store) SetProjectPolicyFileID(ctx context.Context, projectID, fileID string) error {
+	_, err := s.Pool.Exec(ctx,
+		`UPDATE projects SET policy_file_id=$2 WHERE id=$1`, projectID, fileID)
+	return err
+}
+
 func (s *Store) savePolicyVersion(ctx context.Context, scope, projectID string, content any, login string) (PolicyVersion, error) {
 	raw, err := json.Marshal(content)
 	if err != nil {

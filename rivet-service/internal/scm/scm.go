@@ -114,6 +114,10 @@ type Adapter interface {
 	// WriteFile сохраняет файл коммитом на ветке; prevID — идентификатор
 	// прочитанной версии (пусто для нового файла).
 	WriteFile(ctx context.Context, repo, ref, path, prevID, content, message string) (Commit, error)
+	// BranchProtected — защищена ли ветка правилами хостинга (спека
+	// access-policy: без защиты доверенной ветки git-провайдер политики
+	// не включается). Нет прав — false без ошибки.
+	BranchProtected(ctx context.Context, repo, branch string) (bool, error)
 }
 
 // FileContent — файл репозитория: содержимое и идентификатор версии
