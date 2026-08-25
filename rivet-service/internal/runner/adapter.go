@@ -14,6 +14,9 @@ import (
 const (
 	AdapterWrap       = "wrap"
 	AdapterClaudeCode = "claude-code"
+	// AdapterExternal — адаптер-процесс по публичному контракту
+	// (пакет pkg/adapter): его пишет и запускает сам пользователь.
+	AdapterExternal = "external"
 )
 
 // DefaultAgentCmd — команда обёртки по умолчанию (флаг -cmd); её
@@ -61,26 +64,41 @@ type adapter interface {
 	Run(ctx context.Context, dir, prompt string, sink runSink) (agentRun, error)
 }
 
-// contextChannelOf — поддерживает ли адаптер обратный канал контекста:
-// нативный доводит контекст до агента хуком, обёртка ничем не может
-// (режим «только отправка»).
-func contextChannelOf(adapterName string) bool {
-	return adapterName == AdapterClaudeCode
+// contextChannel — поддерживает ли адаптер runner'а обратный канал
+// контекста: нативный доводит контекст до агента хуком, обёртка ничем не
+// может (режим «только отправка»), внешний — как объявлено при запуске.
+func (c Config) contextChannel() bool {
+	if c.Adapter == AdapterExternal {
+		return c.AdapterContext
+	}
+	return c.Adapter == AdapterClaudeCode
 }
 
-// depthOf — глубина данных адаптера (объявляется при регистрации,
-// спека agent-integration «Уровни глубины данных»).
-func depthOf(adapterName string) string {
-	if adapterName == AdapterClaudeCode {
+// depth — глубина данных адаптера (объявляется при регистрации, спека
+// agent-integration «Уровни глубины данных»). У внешнего адаптера её
+// задаёт запуск runner'а: сам адаптер о себе не отчитывается, а по
+// умолчанию честнее занизить.
+func (c Config) depth() string {
+	switch c.Adapter {
+	case AdapterClaudeCode:
 		return "full"
+	case AdapterExternal:
+		switch c.AdapterDepth {
+		case "full", "partial", "minimal":
+			return c.AdapterDepth
+		}
+		return "minimal"
 	}
 	return "minimal"
 }
 
 // newAdapter — адаптер по конфигурации.
 func newAdapter(cfg Config) adapter {
-	if cfg.Adapter == AdapterClaudeCode {
+	switch cfg.Adapter {
+	case AdapterClaudeCode:
 		return &claudeAdapter{cfg: cfg}
+	case AdapterExternal:
+		return &externalAdapter{cfg: cfg}
 	}
 	return &wrapAdapter{cfg: cfg}
 }
