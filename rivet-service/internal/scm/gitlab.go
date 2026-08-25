@@ -296,8 +296,12 @@ func (g *GitLab) namespaceID(ctx context.Context, owner string) (int, error) {
 // в X-Gitlab-Token. Существующий хук с тем же URL обновляется, а не
 // дублируется: иначе у старого остался бы прежний токен.
 func (g *GitLab) RegisterWebhook(ctx context.Context, repo, hookURL, secret string) (bool, error) {
+	// Подписка перечисляет всё, что умеет обрабатывать конвейер: merge и
+	// закрытие MR, пайплайны и комментарии (спека scm-integration
+	// «События хостинга в конвейере»).
 	body := map[string]any{
-		"url": hookURL, "token": secret, "merge_requests_events": true, "push_events": false,
+		"url": hookURL, "token": secret, "push_events": false,
+		"merge_requests_events": true, "pipeline_events": true, "note_events": true,
 	}
 	raw, code, err := g.do(ctx, "GET", "/projects/"+projectID(repo)+"/hooks", nil)
 	if err != nil {

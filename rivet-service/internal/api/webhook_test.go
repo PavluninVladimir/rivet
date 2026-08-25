@@ -498,3 +498,62 @@ func TestWebhookGitLabEvents(t *testing.T) {
 		t.Fatalf("событие закрытия MR: %d", len(evs))
 	}
 }
+
+// Review со старого PR не попадает в задачу на той же ветке: событие
+// сверяется с задачей по адресу PR (change fix-hosting-events).
+func TestWebhookReviewFromForeignPR(t *testing.T) {
+	f := seedHook(t, "github", "own/proj")
+	body := fmt.Sprintf(`{"action":"submitted","repository":{"full_name":%q},
+		"pull_request":{"html_url":"https://github.com/own/proj/pull/999","head":{"ref":%q}},
+		"review":{"state":"changes_requested","body":"старое замечание","html_url":"https://pr/999#r1",
+		"user":{"login":"reviewer"}}}`, f.project.RepoPath, f.branch)
+	resp := f.postSigned(t, "pull_request_review", body)
+	if s := bodyStatus(t, resp); s != "ignored" {
+		t.Fatalf("review чужого PR должно игнорироваться: %s", s)
+	}
+	if got := f.taskStatus(t); got != domain.TaskReview {
+		t.Fatalf("состояние не должно меняться: %s", got)
+	}
+}
+
+// GitLab squash-merge несёт sha в другом поле: задача завершается, версия
+// для автопубликации не теряется.
+func TestWebhookGitLabSquashMerge(t *testing.T) {
+	f := seedHook(t, "gitlab", "group/proj")
+	body := fmt.Sprintf(`{"object_kind":"merge_request","project":{"path_with_namespace":%q},
+		"user":{"username":"human"},"object_attributes":{"action":"merge","source_branch":%q,
+		"url":%q,"squash_commit_sha":"sha-squash"}}`, f.project.RepoPath, f.branch, f.prURL)
+	resp := f.post(t, "/api/v1/webhooks/gitlab", body, map[string]string{
+		"X-Gitlab-Event": "Merge Request Hook",
+		"X-Gitlab-Token": f.project.WebhookSecret,
+	})
+	mustStatus(t, resp, http.StatusOK, "squash-merge")
+	if got := f.taskStatus(t); got != domain.TaskDone {
+		t.Fatalf("задача должна завершиться: %s", got)
+	}
+	// Версия для автопубликации не потерялась: событие merge несёт sha
+	// из squash_commit_sha (auto-окружений в фикстуре нет, поэтому
+	// проверяем сам разбор).
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/gitlab", strings.NewReader(body))
+	req.Header.Set("X-Gitlab-Event", "Merge Request Hook")
+	if ev := parseGitLabEvent(req, []byte(body)); ev.MergeSHA != "sha-squash" {
+		t.Fatalf("sha squash-merge: %q", ev.MergeSHA)
+	}
+}
+
+// Комментарий со старого MR не привязывается к текущей задаче на той же
+// ветке: сверка идёт по адресу MR.
+func TestWebhookGitLabNoteFromForeignMR(t *testing.T) {
+	f := seedHook(t, "gitlab", "group/proj2")
+	body := fmt.Sprintf(`{"object_kind":"note","project":{"path_with_namespace":%q},
+		"user":{"username":"human"},"merge_request":{"source_branch":%q,"url":"https://gl/mr/999"},
+		"object_attributes":{"noteable_type":"MergeRequest","note":"старый комментарий","url":"https://gl/mr/999#note_1"}}`,
+		f.project.RepoPath, f.branch)
+	resp := f.post(t, "/api/v1/webhooks/gitlab", body, map[string]string{
+		"X-Gitlab-Event": "Note Hook",
+		"X-Gitlab-Token": f.project.WebhookSecret,
+	})
+	if s := bodyStatus(t, resp); s != "ignored" {
+		t.Fatalf("комментарий чужого MR должен игнорироваться: %s", s)
+	}
+}

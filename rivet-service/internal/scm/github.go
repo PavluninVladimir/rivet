@@ -275,6 +275,12 @@ func (g *GitHub) login(ctx context.Context) (string, error) {
 	return me.Login, err
 }
 
+// hookEvents — события, на которые подписывается Rivet: merge и закрытие
+// PR, review человека и итоги проверок (спека scm-integration «События
+// хостинга в конвейере»). Список явный: без него хостинг просто не шлёт
+// то, что конвейер умеет обрабатывать.
+var hookEvents = []string{"pull_request", "pull_request_review", "workflow_run", "check_suite"}
+
 // RegisterWebhook подписывает репозиторий на события задач и merge.
 // Если хук с таким URL уже есть, он обновляется: у старого хука остался
 // прежний секрет, и «успешная» регистрация без обновления означала бы,
@@ -284,7 +290,7 @@ func (g *GitHub) RegisterWebhook(ctx context.Context, repo, url, secret string) 
 		"url": url, "content_type": "json", "secret": secret, "insecure_ssl": "0",
 	}
 	raw, code, err := g.do(ctx, "POST", "/repos/"+repo+"/hooks", map[string]any{
-		"name": "web", "active": true, "events": []string{"pull_request"}, "config": config,
+		"name": "web", "active": true, "events": hookEvents, "config": config,
 	}, "")
 	if err != nil {
 		return false, err
@@ -332,7 +338,7 @@ func (g *GitHub) updateWebhook(ctx context.Context, repo, url string, config map
 			continue
 		}
 		raw, code, err := g.do(ctx, "PATCH", fmt.Sprintf("/repos/%s/hooks/%d", repo, h.ID),
-			map[string]any{"active": true, "events": []string{"pull_request"}, "config": config}, "")
+			map[string]any{"active": true, "events": hookEvents, "config": config}, "")
 		if err != nil {
 			return false, err
 		}
