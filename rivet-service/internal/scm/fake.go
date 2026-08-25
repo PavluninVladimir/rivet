@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync/atomic"
+	"time"
 )
 
 // Fake — SCM-провайдер для e2e и локальных стендов (RIVET_SCM=fake).
@@ -60,4 +61,24 @@ func (f *Fake) CreateRepo(ctx context.Context, in NewRepo) (RepoInfo, error) {
 // RegisterWebhook в fake-режиме подписки не делает: стенд шлёт события сам.
 func (f *Fake) RegisterWebhook(ctx context.Context, repo, url, secret string) (bool, error) {
 	return false, nil
+}
+
+// TriggerPipeline — фиктивный прогон пайплайна: сразу известен и сразу
+// успешен (e2e-стенд и отладка внешней доставки без хостинга).
+func (f *Fake) TriggerPipeline(ctx context.Context, repo, pipeline, ref string, vars map[string]string) (PipelineRun, error) {
+	n := f.seq.Add(1)
+	return PipelineRun{
+		RunID: fmt.Sprintf("%d", n),
+		URL:   fmt.Sprintf("https://fake.local/%s/pipelines/%d", repo, n),
+		State: PipelineRunning,
+	}, nil
+}
+
+// PipelineRun — фиктивный прогон завершается успехом при первом же опросе.
+func (f *Fake) PipelineRun(ctx context.Context, repo, pipeline, ref, runID string, _ time.Time) (PipelineRun, error) {
+	return PipelineRun{
+		RunID: runID,
+		URL:   fmt.Sprintf("https://fake.local/%s/pipelines/%s", repo, runID),
+		State: PipelineSuccess,
+	}, nil
 }

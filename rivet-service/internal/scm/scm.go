@@ -64,6 +64,16 @@ var ErrDiffTruncated = errors.New("diff PR обрезан: превышен ли
 // MaxResponseBytes — лимит чтения тела ответа хостинга.
 const MaxResponseBytes = 4 << 20
 
+// clip — хвост тела ответа для текста ошибки: целиком он не нужен, а
+// многомегабайтная страница в сообщении бесполезна.
+func clip(raw []byte) string {
+	const n = 500
+	if len(raw) <= n {
+		return string(raw)
+	}
+	return string(raw[:n]) + "…"
+}
+
 type Adapter interface {
 	// CreatePR создаёт pull request из ветки задачи в базовую ветку.
 	CreatePR(ctx context.Context, repo, branch, base, title, body string) (PR, error)
@@ -84,6 +94,32 @@ type Adapter interface {
 	// false без ошибки, если прав на подписку нет — подключение при этом
 	// не блокируется, консоль покажет данные для ручной настройки.
 	RegisterWebhook(ctx context.Context, repo, url, secret string) (bool, error)
+	// TriggerPipeline запускает пайплайн доставки хостинга (спека
+	// deployment «Дирижирование внешними системами доставки»): pipeline —
+	// идентификатор пайплайна (файл workflow у GitHub Actions), ref —
+	// ветка или тег запуска, vars — переменные прогона. Пустой RunID в
+	// ответе означает «прогон ещё не виден»: его найдёт PipelineRun.
+	TriggerPipeline(ctx context.Context, repo, pipeline, ref string, vars map[string]string) (PipelineRun, error)
+	// PipelineRun — состояние прогона. Пустой runID — прогон ещё не
+	// найден: адаптер ищет свежий прогон пайплайна на ветке, начавшийся
+	// не раньше since.
+	PipelineRun(ctx context.Context, repo, pipeline, ref, runID string, since time.Time) (PipelineRun, error)
+}
+
+// Состояния прогона внешнего пайплайна.
+const (
+	PipelineStarting = "starting" // запущен, но прогон ещё не найден
+	PipelineRunning  = "running"
+	PipelineSuccess  = "success"
+	PipelineFailed   = "failed"
+)
+
+// PipelineRun — прогон пайплайна доставки: идентификатор для опроса,
+// адрес для человека и состояние.
+type PipelineRun struct {
+	RunID string
+	URL   string
+	State string
 }
 
 // Factory создаёт адаптеры по проекту: провайдер и инстанс живут у проекта,

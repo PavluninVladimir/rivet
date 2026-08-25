@@ -195,13 +195,29 @@ type Environment struct {
 	Created   time.Time
 }
 
-// EnvConfig — конфигурация исполнения ssh-окружения. Пустой Host —
-// команды исполняются локально на deploy-runner'е (e2e, деплой «на себя»).
+// Типы исполнения окружения (спека deployment «Окружение как сущность»).
+const (
+	// ExecSSH — собственная доставка: команды на Linux-хосте по ssh
+	// (пустой Host — локально на deploy-runner'е).
+	ExecSSH = "ssh"
+	// ExecPipeline — доставку выполняет пайплайн хостинга; Rivet его
+	// триггерит, наблюдает и забирает результат как свой этап Deploy.
+	ExecPipeline = "pipeline"
+)
+
+// EnvConfig — конфигурация исполнения окружения. Для ssh значимы Host и
+// команды, для внешнего пайплайна — Pipeline, Ref и Vars.
 type EnvConfig struct {
 	Host      string `json:"host,omitempty"`
-	DeployCmd string `json:"deploy_cmd"`
+	DeployCmd string `json:"deploy_cmd,omitempty"`
 	VerifyCmd string `json:"verify_cmd,omitempty"`
 	VerifyURL string `json:"verify_url,omitempty"`
+	// Pipeline — идентификатор пайплайна хостинга (файл workflow у GitHub
+	// Actions; у GitLab CI необязателен), Ref — ветка запуска (пусто —
+	// базовая ветка проекта), Vars — переменные прогона.
+	Pipeline string            `json:"pipeline,omitempty"`
+	Ref      string            `json:"ref,omitempty"`
+	Vars     map[string]string `json:"vars,omitempty"`
 }
 
 // envHostRe — [user@]hostname[:port]; ведущий «-» запрещён отдельно
@@ -211,7 +227,37 @@ var envHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]+(@[A-Za-z0-9._-]+)?(:[0-9]{1
 // Validate — валидация конфигурации окружения (спека deployment «Окружение
 // как сущность»): доставка и Verify обязательны, verify_url — только
 // http/https без userinfo, host — безопасный аргумент ssh.
-func (c EnvConfig) Validate() error {
+func (c EnvConfig) Validate(execType string) error {
+	if execType == ExecPipeline {
+		// Доставку выполняет хостинг: команды здесь исполнять негде, а
+		// Verify делает control plane проверкой URL.
+		if c.DeployCmd != "" || c.Host != "" {
+			return errors.New("у окружения с внешним пайплайном нет команды доставки и хоста")
+		}
+		if strings.TrimSpace(c.VerifyCmd) != "" {
+			return errors.New("verify_cmd недоступен для внешнего пайплайна: Verify — проверка verify_url")
+		}
+		if strings.TrimSpace(c.VerifyURL) == "" {
+			return errors.New("нужен verify_url: этап Verify обязателен")
+		}
+		if strings.ContainsAny(c.Pipeline, " \t\n") {
+			return errors.New("pipeline: ожидается идентификатор пайплайна хостинга")
+		}
+		if c.Ref != "" && (strings.HasPrefix(c.Ref, "-") || strings.ContainsAny(c.Ref, " \t\n")) {
+			return errors.New("ref: ожидается имя ветки или тега")
+		}
+		for k := range c.Vars {
+			if k == "" || strings.ContainsAny(k, " \t\n=") {
+				return errors.New("vars: имя переменной без пробелов и «=»")
+			}
+			// RIVET_* задаёт система: версию и режим прогона решает Rivet,
+			// а не конфигурация окружения.
+			if strings.HasPrefix(k, "RIVET_") {
+				return errors.New("vars: имена RIVET_* занимает система")
+			}
+		}
+		return c.validateVerifyURL()
+	}
 	if strings.TrimSpace(c.DeployCmd) == "" {
 		return errors.New("нужна команда доставки deploy_cmd")
 	}
@@ -221,17 +267,25 @@ func (c EnvConfig) Validate() error {
 	if c.VerifyCmd != "" && strings.TrimSpace(c.VerifyCmd) == "" {
 		return errors.New("verify_cmd: пустая команда")
 	}
-	if c.VerifyURL != "" {
-		u, err := url.Parse(c.VerifyURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return errors.New("verify_url: ожидается http(s)-URL")
-		}
-		if u.User != nil {
-			return errors.New("verify_url: userinfo в URL запрещён")
-		}
+	if err := c.validateVerifyURL(); err != nil {
+		return err
 	}
 	if c.Host != "" && (strings.HasPrefix(c.Host, "-") || !envHostRe.MatchString(c.Host)) {
 		return errors.New("host: ожидается [user@]hostname[:port]")
+	}
+	return nil
+}
+
+func (c EnvConfig) validateVerifyURL() error {
+	if c.VerifyURL == "" {
+		return nil
+	}
+	u, err := url.Parse(c.VerifyURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("verify_url: ожидается http(s)-URL")
+	}
+	if u.User != nil {
+		return errors.New("verify_url: userinfo в URL запрещён")
 	}
 	return nil
 }
@@ -250,9 +304,14 @@ type Deployment struct {
 	// (durable: переживает рестарт control plane).
 	Rollback bool
 	LogRef   string
-	Created  time.Time
-	Started  *time.Time
-	Ended    *time.Time
+	// ExternalRunID и ExternalURL — прогон внешнего пайплайна, если
+	// доставку выполняет хостинг (спека deployment «Дирижирование
+	// внешними системами доставки»).
+	ExternalRunID string
+	ExternalURL   string
+	Created       time.Time
+	Started       *time.Time
+	Ended         *time.Time
 }
 
 // loginRe — формат login: URL-safe (login живёт в путях API и event log).

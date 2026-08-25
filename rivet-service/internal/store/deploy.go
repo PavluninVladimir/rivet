@@ -28,12 +28,14 @@ func scanEnv(row pgx.Row) (domain.Environment, error) {
 }
 
 const depCols = `id::text, env_id::text, version, status, initiator, runner_id,
-	detail, rollback, COALESCE(log_ref,''), created_at, started_at, ended_at`
+	detail, rollback, COALESCE(log_ref,''), external_run_id, external_url,
+	created_at, started_at, ended_at`
 
 func scanDeployment(row pgx.Row) (domain.Deployment, error) {
 	var d domain.Deployment
 	err := row.Scan(&d.ID, &d.EnvID, &d.Version, &d.Status, &d.Initiator, &d.RunnerID,
-		&d.Detail, &d.Rollback, &d.LogRef, &d.Created, &d.Started, &d.Ended)
+		&d.Detail, &d.Rollback, &d.LogRef, &d.ExternalRunID, &d.ExternalURL,
+		&d.Created, &d.Started, &d.Ended)
 	return d, err
 }
 
@@ -64,11 +66,28 @@ func (s *Store) UpdateEnvironment(ctx context.Context, e domain.Environment) (do
 	out, err := scanEnv(s.Pool.QueryRow(ctx, `
 		UPDATE environments SET name=$2, trigger=$3, config=$4
 		WHERE id=$1
+		  AND NOT EXISTS (SELECT 1 FROM deployments d
+		                  WHERE d.env_id = environments.id
+		                    AND d.status IN ('queued','deploying','verifying'))
 		RETURNING `+envCols, e.ID, e.Name, e.Trigger, cfg))
 	if isUnique(err) {
 		return out, fmt.Errorf("окружение %q: %w", e.Name, ErrConflict)
 	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Строка есть, но условие не выполнено: под окружением идёт
+		// публикация, а она читает конфигурацию на ходу.
+		if exists, cerr := s.envExists(ctx, e.ID); cerr == nil && exists {
+			return out, fmt.Errorf("у окружения идёт публикация: %w", ErrConflict)
+		}
+	}
 	return out, nf(err)
+}
+
+func (s *Store) envExists(ctx context.Context, envID string) (bool, error) {
+	var ok bool
+	err := s.Pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM environments WHERE id=$1)`, envID).Scan(&ok)
+	return ok, err
 }
 
 // DeleteEnvironment удаляет окружение с историей публикаций;
@@ -231,6 +250,7 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 			SELECT d.id, d.env_id, r.id
 			FROM deployments d
 			JOIN environments e ON e.id = d.env_id AND NOT e.paused
+				AND e.exec_type = 'ssh'
 			JOIN LATERAL (
 				SELECT r.id FROM runners r
 				WHERE r.status = 'idle' AND NOT r.draining
@@ -297,8 +317,11 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 func (s *Store) MarkDeploymentRollingBack(ctx context.Context, depID, runnerID, detail string) (bool, error) {
 	// started_at обновляется: rollback-джоба получает свой полный дедлайн
 	// watchdog'а, а не остаток от исходного деплоя.
+	// Прогон провалившейся версии сбрасывается тем же UPDATE: иначе после
+	// падения между переходом и сбросом откат опрашивал бы чужой прогон.
 	tag, err := s.Pool.Exec(ctx, `
-		UPDATE deployments SET rollback=true, detail=left($3, 8000), started_at=now()
+		UPDATE deployments SET rollback=true, detail=left($3, 8000), started_at=now(),
+			external_run_id='', external_url=''
 		WHERE id=$1 AND runner_id=$2 AND ended_at IS NULL AND NOT rollback`, depID, runnerID, detail)
 	if err != nil {
 		return false, err
@@ -477,11 +500,23 @@ func (s *Store) FailDeployment(ctx context.Context, depID, runnerID, status, det
 // TimedOutDeployments — активные публикации старше дедлайна (watchdog):
 // runner жив, но джоба зависла или результат потерян.
 func (s *Store) TimedOutDeployments(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	return s.timedOutDeployments(ctx, olderThan, "ssh")
+}
+
+// TimedOutExternalDeployments — зависшие публикации внешних окружений:
+// у пайплайна хостинга свой, больший дедлайн, и провал у него не про
+// «runner не вернул результат».
+func (s *Store) TimedOutExternalDeployments(ctx context.Context, olderThan time.Duration) ([]string, error) {
+	return s.timedOutDeployments(ctx, olderThan, "pipeline")
+}
+
+func (s *Store) timedOutDeployments(ctx context.Context, olderThan time.Duration, execType string) ([]string, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id FROM deployments
-		WHERE status IN ('deploying','verifying')
-		  AND started_at < now() - make_interval(secs => $1)`,
-		int(olderThan.Seconds()))
+		SELECT d.id FROM deployments d
+		JOIN environments e ON e.id = d.env_id AND e.exec_type = $2
+		WHERE d.status IN ('deploying','verifying')
+		  AND d.started_at < now() - make_interval(secs => $1)`,
+		int(olderThan.Seconds()), execType)
 	if err != nil {
 		return nil, err
 	}
@@ -529,4 +564,161 @@ func (s *Store) DeploymentOwned(ctx context.Context, depID, runnerID string) (bo
 		SELECT EXISTS (SELECT 1 FROM deployments
 		WHERE id=$1 AND runner_id=$2 AND ended_at IS NULL)`, depID, runnerID).Scan(&ok)
 	return ok, err
+}
+
+// ─── внешняя доставка (change add-external-delivery) ─────────────────────
+
+// StartNextExternalDeployment берёт queued-публикацию окружения с внешней
+// доставкой: runner для неё не нужен, поэтому очередь не ждёт свободного.
+// Переход queued → deploying — CAS: триггер пайплайна выполнит ровно тот
+// тик, который эту публикацию и захватил.
+func (s *Store) StartNextExternalDeployment(ctx context.Context) (DeployAssignment, bool, error) {
+	var a DeployAssignment
+	started := false
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var depID, envID string
+		err := tx.QueryRow(ctx, `
+			SELECT d.id, d.env_id
+			FROM deployments d
+			JOIN environments e ON e.id = d.env_id AND NOT e.paused
+				AND e.exec_type = 'pipeline'
+			WHERE d.status = 'queued'
+			  AND NOT EXISTS (SELECT 1 FROM deployments a
+			                  WHERE a.env_id = d.env_id AND a.status IN ('deploying','verifying'))
+			ORDER BY d.created_at
+			FOR UPDATE OF d SKIP LOCKED
+			LIMIT 1`).Scan(&depID, &envID)
+		if err != nil {
+			if err == pgx.ErrNoRows {
+				return nil
+			}
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE deployments SET status='deploying', started_at=now() WHERE id=$1`, depID); err != nil {
+			return err
+		}
+		full, err := loadDeployAssignment(ctx, tx, depID, envID)
+		if err != nil {
+			return err
+		}
+		if _, err := appendEvent(ctx, tx, EventInput{
+			ActorKind: domain.ActorScheduler, Type: "deploy.status",
+			ProjectID: full.ProjectID,
+			Text: fmt.Sprintf("публикация %s: запуск пайплайна хостинга для версии %s",
+				full.Env.Name, full.Deployment.Version),
+			Payload: map[string]any{"environment_id": envID, "deployment_id": depID,
+				"status": "deploying", "version": full.Deployment.Version},
+		}); err != nil {
+			return err
+		}
+		a, started = full, true
+		return nil
+	})
+	return a, started, err
+}
+
+// loadDeployAssignment собирает публикацию с окружением и проектом.
+func loadDeployAssignment(ctx context.Context, tx pgx.Tx, depID, envID string) (DeployAssignment, error) {
+	var a DeployAssignment
+	if err := tx.QueryRow(ctx, `
+		SELECT p.id::text, p.repo_path FROM environments e JOIN projects p ON p.id=e.project_id
+		WHERE e.id=$1`, envID).Scan(&a.ProjectID, &a.Repo); err != nil {
+		return a, err
+	}
+	env, err := scanEnv(tx.QueryRow(ctx, `SELECT `+envCols+` FROM environments WHERE id=$1`, envID))
+	if err != nil {
+		return a, err
+	}
+	dep, err := scanDeployment(tx.QueryRow(ctx, `SELECT `+depCols+` FROM deployments WHERE id=$1`, depID))
+	if err != nil {
+		return a, err
+	}
+	a.Env, a.Deployment = env, dep
+	return a, nil
+}
+
+// ExternalRunPending — пайплайн запущен, но идентификатор прогона ещё не
+// известен (GitHub на workflow_dispatch его не возвращает). Пустой
+// external_run_id означает другое: запуск ещё не выполнялся.
+const ExternalRunPending = "pending"
+
+// HasActiveDeployment — у окружения есть незавершённая публикация:
+// менять конфигурацию под ней нельзя (изменённый адрес проверки или
+// пайплайн относился бы уже к другой публикации).
+func (s *Store) HasActiveDeployment(ctx context.Context, envID string) (bool, error) {
+	var exists bool
+	err := s.Pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM deployments
+		WHERE env_id=$1 AND status IN ('queued','deploying','verifying'))`, envID).Scan(&exists)
+	return exists, err
+}
+
+// ClaimExternalTrigger — право запустить пайплайн: CAS с пустого прогона на
+// pending. false означает, что запуск уже захватил другой тик (или другой
+// инстанс rivetd) — второй workflow_dispatch не нужен, две публикации в
+// прод хуже одной зависшей (её добьёт watchdog).
+func (s *Store) ClaimExternalTrigger(ctx context.Context, depID string) (bool, error) {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE deployments SET external_run_id=$2
+		WHERE id=$1 AND external_run_id='' AND ended_at IS NULL`, depID, ExternalRunPending)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// SetDeploymentExternalRun записывает прогон внешнего пайплайна: по
+// run_id публикация опрашивается, url показывается человеку. Запись — CAS
+// от ожидаемого прежнего значения: stale-опрос не перепишет прогон уже
+// начатого отката.
+func (s *Store) SetDeploymentExternalRun(ctx context.Context, depID, expected, runID, url string) (bool, error) {
+	tag, err := s.Pool.Exec(ctx, `
+		UPDATE deployments SET external_run_id=$3, external_url=$4
+		WHERE id=$1 AND external_run_id=$2 AND ended_at IS NULL`, depID, expected, runID, url)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ActiveExternalDeployments — публикации внешних окружений, которые сейчас
+// исполняет хостинг: их состояние опрашивает тик оркестратора.
+func (s *Store) ActiveExternalDeployments(ctx context.Context) ([]DeployAssignment, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT d.id::text, d.env_id::text
+		FROM deployments d
+		JOIN environments e ON e.id = d.env_id AND e.exec_type = 'pipeline'
+		WHERE d.status IN ('deploying','verifying') AND d.ended_at IS NULL
+		ORDER BY d.created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type ref struct{ depID, envID string }
+	var refs []ref
+	for rows.Next() {
+		var r ref
+		if err := rows.Scan(&r.depID, &r.envID); err != nil {
+			return nil, err
+		}
+		refs = append(refs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]DeployAssignment, 0, len(refs))
+	for _, r := range refs {
+		var a DeployAssignment
+		err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+			var err error
+			a, err = loadDeployAssignment(ctx, tx, r.depID, r.envID)
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, nil
 }

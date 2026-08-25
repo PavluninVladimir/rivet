@@ -65,6 +65,9 @@ type Engine struct {
 	// epic.budget_exceeded: раз на факт превышения, смена бюджета — новый
 	// факт; повтор после рестарта допустим (спека orchestration «Бюджет Epic»).
 	epicBudgetNotified map[string]bool
+	// externalPolled — когда в последний раз опрашивался прогон внешней
+	// публикации: тик идёт секундами, пайплайны — минутами.
+	externalPolled map[string]time.Time
 	// policyDown — проекты, по которым уже написана эскалация «движок
 	// политик недоступен»: при первом успешном решении она закрывается.
 	// Свой mutex: переходы «упал/поднялся» ходят в базу и должны быть
@@ -88,6 +91,7 @@ func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, hear
 		budgetNotified:     map[string]string{},
 		epicBudgetNotified: map[string]bool{},
 		policyDown:         map[string]bool{},
+		externalPolled:     map[string]time.Time{},
 		Now:                time.Now,
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -345,4 +346,100 @@ func (g *GitHub) updateWebhook(ctx context.Context, repo, url string, config map
 	}
 	// Хук с нашим URL не нашёлся: считать регистрацию выполненной нельзя.
 	return false, nil
+}
+
+// ─── пайплайны доставки (спека deployment) ───────────────────────────────
+
+// TriggerPipeline запускает workflow GitHub Actions через workflow_dispatch.
+// Ответ API пустой: идентификатор прогона придётся искать отдельно, поэтому
+// возвращается состояние «запускается».
+func (g *GitHub) TriggerPipeline(ctx context.Context, repo, pipeline, ref string, vars map[string]string) (PipelineRun, error) {
+	if pipeline == "" {
+		return PipelineRun{}, fmt.Errorf("github: нужен файл workflow (например deploy.yml)")
+	}
+	inputs := map[string]any{}
+	for k, v := range vars {
+		inputs[k] = v
+	}
+	raw, code, err := g.do(ctx, "POST",
+		fmt.Sprintf("/repos/%s/actions/workflows/%s/dispatches", repo, url.PathEscape(pipeline)),
+		map[string]any{"ref": ref, "inputs": inputs}, "")
+	if err != nil {
+		return PipelineRun{}, err
+	}
+	if code != http.StatusNoContent && code != http.StatusCreated {
+		return PipelineRun{}, fmt.Errorf("github workflow_dispatch: %d: %s", code, clip(raw))
+	}
+	return PipelineRun{State: PipelineStarting}, nil
+}
+
+// PipelineRun — состояние прогона. Без известного идентификатора ищется
+// свежий прогон этого workflow на ветке, начавшийся не раньше since:
+// workflow_dispatch идентификатор не возвращает.
+func (g *GitHub) PipelineRun(ctx context.Context, repo, pipeline, ref, runID string, since time.Time) (PipelineRun, error) {
+	if runID != "" {
+		raw, code, err := g.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runs/%s", repo, url.PathEscape(runID)), nil, "")
+		if err != nil {
+			return PipelineRun{}, err
+		}
+		if code != http.StatusOK {
+			return PipelineRun{}, fmt.Errorf("github run: %d: %s", code, clip(raw))
+		}
+		var run githubRun
+		if err := json.Unmarshal(raw, &run); err != nil {
+			return PipelineRun{}, err
+		}
+		return run.pipeline(), nil
+	}
+	path := fmt.Sprintf("/repos/%s/actions/workflows/%s/runs?event=workflow_dispatch&per_page=10",
+		repo, url.PathEscape(pipeline))
+	if ref != "" {
+		path += "&branch=" + url.QueryEscape(ref)
+	}
+	raw, code, err := g.do(ctx, "GET", path, nil, "")
+	if err != nil {
+		return PipelineRun{}, err
+	}
+	if code != http.StatusOK {
+		return PipelineRun{}, fmt.Errorf("github runs: %d: %s", code, clip(raw))
+	}
+	var out struct {
+		WorkflowRuns []githubRun `json:"workflow_runs"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return PipelineRun{}, err
+	}
+	// Прогоны приходят от свежих к старым: берём первый, начавшийся не
+	// раньше запуска публикации. workflow_dispatch идентификатор не
+	// возвращает, поэтому окно узкое — чужой прошлый прогон того же
+	// workflow на той же ветке не должен попасть в публикацию.
+	for _, run := range out.WorkflowRuns {
+		if !run.CreatedAt.IsZero() && run.CreatedAt.Before(since.Add(-15*time.Second)) {
+			continue
+		}
+		return run.pipeline(), nil
+	}
+	return PipelineRun{State: PipelineStarting}, nil
+}
+
+type githubRun struct {
+	ID         int64     `json:"id"`
+	HTMLURL    string    `json:"html_url"`
+	Status     string    `json:"status"`
+	Conclusion string    `json:"conclusion"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+func (r githubRun) pipeline() PipelineRun {
+	p := PipelineRun{RunID: fmt.Sprintf("%d", r.ID), URL: r.HTMLURL, State: PipelineRunning}
+	if r.Status != "completed" {
+		return p
+	}
+	switch strings.ToLower(r.Conclusion) {
+	case "success", "neutral":
+		p.State = PipelineSuccess
+	default:
+		p.State = PipelineFailed
+	}
+	return p
 }
