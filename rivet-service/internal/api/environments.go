@@ -95,9 +95,9 @@ func (in environmentInput) validate() string {
 		return "нужно имя окружения"
 	}
 	switch in.execType() {
-	case domain.ExecSSH, domain.ExecPipeline, domain.ExecK8s:
+	case domain.ExecSSH, domain.ExecPipeline, domain.ExecK8s, domain.ExecGitOps:
 	default:
-		return "exec_type: ожидается ssh, k8s или pipeline"
+		return "exec_type: ожидается ssh, k8s, pipeline или gitops"
 	}
 	if in.Trigger != "auto" && in.Trigger != "manual" {
 		return "trigger: ожидается auto или manual"

@@ -3,11 +3,12 @@ package scm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	neturl "net/url"
 	"strings"
 	"time"
 )
@@ -368,7 +369,7 @@ func (g *GitHub) TriggerPipeline(ctx context.Context, repo, pipeline, ref string
 		inputs[k] = v
 	}
 	raw, code, err := g.do(ctx, "POST",
-		fmt.Sprintf("/repos/%s/actions/workflows/%s/dispatches", repo, url.PathEscape(pipeline)),
+		fmt.Sprintf("/repos/%s/actions/workflows/%s/dispatches", repo, neturl.PathEscape(pipeline)),
 		map[string]any{"ref": ref, "inputs": inputs}, "")
 	if err != nil {
 		return PipelineRun{}, err
@@ -384,7 +385,7 @@ func (g *GitHub) TriggerPipeline(ctx context.Context, repo, pipeline, ref string
 // workflow_dispatch идентификатор не возвращает.
 func (g *GitHub) PipelineRun(ctx context.Context, repo, pipeline, ref, runID string, since time.Time) (PipelineRun, error) {
 	if runID != "" {
-		raw, code, err := g.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runs/%s", repo, url.PathEscape(runID)), nil, "")
+		raw, code, err := g.do(ctx, "GET", fmt.Sprintf("/repos/%s/actions/runs/%s", repo, neturl.PathEscape(runID)), nil, "")
 		if err != nil {
 			return PipelineRun{}, err
 		}
@@ -398,9 +399,9 @@ func (g *GitHub) PipelineRun(ctx context.Context, repo, pipeline, ref, runID str
 		return run.pipeline(), nil
 	}
 	path := fmt.Sprintf("/repos/%s/actions/workflows/%s/runs?event=workflow_dispatch&per_page=10",
-		repo, url.PathEscape(pipeline))
+		repo, neturl.PathEscape(pipeline))
 	if ref != "" {
-		path += "&branch=" + url.QueryEscape(ref)
+		path += "&branch=" + neturl.QueryEscape(ref)
 	}
 	raw, code, err := g.do(ctx, "GET", path, nil, "")
 	if err != nil {
@@ -448,4 +449,87 @@ func (r githubRun) pipeline() PipelineRun {
 		p.State = PipelineFailed
 	}
 	return p
+}
+
+// ─── файлы репозитория (спека scm-integration) ───────────────────────────
+
+// ReadFile читает файл через Contents API: содержимое приезжает в base64,
+// sha блоба нужен для атомарной записи.
+func (g *GitHub) ReadFile(ctx context.Context, repo, ref, path string) (FileContent, error) {
+	url := fmt.Sprintf("/repos/%s/contents/%s", repo, escapePath(path))
+	if ref != "" {
+		url += "?ref=" + neturl.QueryEscape(ref)
+	}
+	raw, code, err := g.do(ctx, "GET", url, nil, "")
+	if err != nil {
+		return FileContent{}, err
+	}
+	if code == http.StatusNotFound {
+		return FileContent{}, ErrFileNotFound
+	}
+	if code != http.StatusOK {
+		return FileContent{}, fmt.Errorf("github contents: %d: %s", code, clip(raw))
+	}
+	var out struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+		SHA      string `json:"sha"`
+		Type     string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return FileContent{}, err
+	}
+	if out.Type != "file" {
+		return FileContent{}, fmt.Errorf("github contents: %s — не файл", path)
+	}
+	content := out.Content
+	if out.Encoding == "base64" {
+		decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(content, "\n", ""))
+		if err != nil {
+			return FileContent{}, fmt.Errorf("github contents: %w", err)
+		}
+		content = string(decoded)
+	}
+	return FileContent{Content: content, FileID: out.SHA}, nil
+}
+
+// WriteFile сохраняет файл коммитом; prevID — sha прочитанного блоба
+// (пусто для нового файла): конфликт параллельной записи виден сразу.
+func (g *GitHub) WriteFile(ctx context.Context, repo, ref, path, prevID, content, message string) (Commit, error) {
+	body := map[string]any{
+		"message": message,
+		"content": base64.StdEncoding.EncodeToString([]byte(content)),
+	}
+	if ref != "" {
+		body["branch"] = ref
+	}
+	if prevID != "" {
+		body["sha"] = prevID
+	}
+	raw, code, err := g.do(ctx, "PUT", fmt.Sprintf("/repos/%s/contents/%s", repo, escapePath(path)), body, "")
+	if err != nil {
+		return Commit{}, err
+	}
+	if code != http.StatusOK && code != http.StatusCreated {
+		return Commit{}, fmt.Errorf("github contents write: %d: %s", code, clip(raw))
+	}
+	var out struct {
+		Commit struct {
+			SHA     string `json:"sha"`
+			HTMLURL string `json:"html_url"`
+		} `json:"commit"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return Commit{}, err
+	}
+	return Commit{SHA: out.Commit.SHA, URL: out.Commit.HTMLURL}, nil
+}
+
+// escapePath экранирует сегменты пути, сохраняя разделители.
+func escapePath(path string) string {
+	parts := strings.Split(path, "/")
+	for i, p := range parts {
+		parts[i] = neturl.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
 }

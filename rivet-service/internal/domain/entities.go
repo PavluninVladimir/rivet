@@ -211,6 +211,9 @@ const (
 	// ExecK8s — собственная доставка в кластер: манифесты или helm-чарт.
 	// Команды собирает control plane, исполняет deploy-runner.
 	ExecK8s = "k8s"
+	// ExecGitOps — версия меняется коммитом в репозиторий конфигурации,
+	// выкат делает контроллер кластера; Rivet ждёт синхронизации.
+	ExecGitOps = "gitops"
 )
 
 // EnvConfig — конфигурация исполнения окружения. Для ssh значимы Host и
@@ -235,7 +238,20 @@ type EnvConfig struct {
 	Chart     string            `json:"chart,omitempty"`
 	Release   string            `json:"release,omitempty"`
 	Values    map[string]string `json:"values,omitempty"`
+	// GitOps: репозиторий конфигурации (пусто — репозиторий проекта),
+	// файл, куда пишется версия, и ключ YAML внутри него (пусто — файл
+	// целиком). Ветка коммита берётся из Ref.
+	Repo string `json:"repo,omitempty"`
+	File string `json:"file,omitempty"`
+	Key  string `json:"key,omitempty"`
 }
+
+// yamlKeyRe — путь ключа YAML: точки между сегментами, сегмент — буквы,
+// цифры, дефис и подчёркивание.
+var yamlKeyRe = regexp.MustCompile(`^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$`)
+
+// repoPathSlugRe — owner/name репозитория конфигурации.
+var repoPathSlugRe = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$`)
 
 // k8sNameRe — имя объекта Kubernetes (RFC 1123): строчные буквы, цифры и
 // дефис. Значение уезжает в команду deploy-runner'а, поэтому проверяется
@@ -257,6 +273,9 @@ var envHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]+(@[A-Za-z0-9._-]+)?(:[0-9]{1
 // как сущность»): доставка и Verify обязательны, verify_url — только
 // http/https без userinfo, host — безопасный аргумент ssh.
 func (c EnvConfig) Validate(execType string) error {
+	if execType == ExecGitOps {
+		return c.validateGitOps()
+	}
 	if execType == ExecK8s {
 		return c.validateK8s()
 	}
@@ -306,6 +325,37 @@ func (c EnvConfig) Validate(execType string) error {
 		return errors.New("host: ожидается [user@]hostname[:port]")
 	}
 	return nil
+}
+
+// validateGitOps — конфигурация GitOps: коммит версии делает control
+// plane, поэтому ни хоста, ни команд здесь нет, а ждать синхронизацию
+// без адреса окружения нечем.
+func (c EnvConfig) validateGitOps() error {
+	if c.Host != "" || c.DeployCmd != "" {
+		return errors.New("у окружения GitOps нет хоста и команды доставки: версия меняется коммитом")
+	}
+	if strings.TrimSpace(c.VerifyCmd) != "" {
+		return errors.New("verify_cmd недоступен для GitOps: выполнять команду негде")
+	}
+	if strings.TrimSpace(c.VerifyURL) == "" {
+		return errors.New("нужен verify_url: по нему видно, что окружение приняло версию")
+	}
+	if c.File == "" {
+		return errors.New("нужен файл, в который пишется версия")
+	}
+	if err := validRepoPath(c.File, "file"); err != nil {
+		return err
+	}
+	if c.Repo != "" && !repoPathSlugRe.MatchString(c.Repo) {
+		return errors.New("repo: ожидается owner/name репозитория конфигурации")
+	}
+	if c.Ref != "" && (strings.HasPrefix(c.Ref, "-") || strings.ContainsAny(c.Ref, " \t\n")) {
+		return errors.New("ref: ожидается имя ветки")
+	}
+	if c.Key != "" && !yamlKeyRe.MatchString(c.Key) {
+		return errors.New("key: ожидается путь ключа YAML, например image.tag")
+	}
+	return c.validateVerifyURL()
 }
 
 // validateK8s — конфигурация кластера: либо манифесты, либо чарт; имена и
