@@ -41,6 +41,9 @@ func cmdHistoryManifest(args []string) error {
 	if token == "" {
 		token = os.Getenv("GH_TOKEN")
 	}
+	if strings.TrimSpace(*repo) == "" {
+		return fmt.Errorf("укажи основной репозиторий: -repo owner/name")
+	}
 	repos := []string{*repo}
 	if *extra != "" {
 		repos = append(repos, strings.Split(*extra, ",")...)
@@ -68,7 +71,8 @@ func cmdHistoryManifest(args []string) error {
 		}
 	}
 	links, report := history.LinkChanges(changes, prs, lm)
-	m := history.BuildManifest(links, report.OrphanPRs)
+	mainRepo := repos[0][strings.LastIndex(repos[0], "/")+1:]
+	m := history.BuildManifest(links, report.OrphanPRs, mainRepo)
 	// Отчёт — в stderr, манифест — в stdout: их удобно разделять.
 	fmt.Fprintf(os.Stderr, "change'ей: %d, PR: %d, без PR: %d, PR без change'а: %d\n",
 		len(changes), len(prs), len(report.ChangesWithoutPR), len(report.OrphanPRs))

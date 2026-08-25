@@ -93,6 +93,10 @@ type EventFilter struct {
 	Type      string
 	AfterID   int64
 	Limit     int
+	// Latest — без курсора отдать последние Limit событий (лента консоли),
+	// а не первые по id. Порядок в ответе всё равно по id по возрастанию,
+	// чтобы контракт курсора не менялся.
+	Latest bool
 	// ViewerID — обязательный для API фильтр слоя видимости: только события
 	// проектов, где пользователь участник. Пустой ViewerID — системный вызов
 	// (SSE-реплей после проверки членства, внутренние потребители).
@@ -112,7 +116,12 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 	}
 	// Обычная лента: project_id IN (...) ложен для NULL, поэтому события
 	// установки в неё не попадают — это и нужно участникам.
+	order := "ORDER BY id"
+	if f.Latest && f.AfterID == 0 {
+		order = "ORDER BY id DESC"
+	}
 	rows, err := s.Pool.Query(ctx, `
+		SELECT * FROM (
 		SELECT id, ts, actor_kind, actor_id, type, COALESCE(project_id::text,''),
 		       COALESCE(epic_id::text,''), COALESCE(task_id::text,''), text, payload
 		FROM events
@@ -123,8 +132,9 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 		  AND id > $5
 		  AND (CASE WHEN $8 THEN project_id IS NULL
 		       ELSE ($7 = '' OR project_id IN (SELECT project_id FROM project_members WHERE user_id = $7::uuid)) END)
-		ORDER BY id
-		LIMIT $6`,
+		`+order+`
+		LIMIT $6) page
+		ORDER BY id`,
 		f.ProjectID, f.EpicID, f.TaskID, f.Type, f.AfterID, f.Limit, f.ViewerID, f.Installation)
 	if err != nil {
 		return nil, err

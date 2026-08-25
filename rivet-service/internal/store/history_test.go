@@ -97,6 +97,20 @@ func TestImportHistory(t *testing.T) {
 		t.Fatalf("повтор не должен плодить события задач: %d", len(evs))
 	}
 
+	// Лента без курсора отдаёт последние события, а не первые по id:
+	// иначе после импорта истории живая активность до экрана не доходит.
+	latest, err := s.Events(ctx, EventFilter{ProjectID: p.ID, Limit: 2, Latest: true})
+	if err != nil || len(latest) != 2 {
+		t.Fatalf("последние события: %v %d", err, len(latest))
+	}
+	if latest[1].Type != "history.imported" || latest[0].ID >= latest[1].ID {
+		t.Fatalf("ожидали два последних события по возрастанию id: %s, %s", latest[0].Type, latest[1].Type)
+	}
+	first, _ := s.Events(ctx, EventFilter{ProjectID: p.ID, Limit: 2})
+	if len(first) != 2 || first[0].ID >= latest[0].ID {
+		t.Fatalf("без Latest порядок с начала: %+v", first)
+	}
+
 	// История не видна планировщику: назначать нечего.
 	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r-hist", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
