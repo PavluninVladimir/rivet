@@ -141,7 +141,8 @@ func (s *Store) RegisterRunner(ctx context.Context, r domain.Runner, token domai
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		r = normalizeAdapter(r)
 		if _, err := tx.Exec(ctx, upsertRunnerSQL+`, token_id=$8`,
-			r.ID, r.Agent, r.Model, r.Host, r.Capabilities, r.Adapter, r.Depth, tokenID(token)); err != nil {
+			r.ID, r.Agent, r.Model, r.Host, r.Capabilities, r.Adapter, r.Depth,
+			tokenID(token), r.ContextChannel); err != nil {
 			return err
 		}
 		_, err := appendEvent(ctx, tx, EventInput{

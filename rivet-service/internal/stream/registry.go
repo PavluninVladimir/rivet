@@ -40,10 +40,13 @@ func (r *Registry) Detach(runnerID string, ch chan *pb.PlaneMsg) {
 }
 
 // Send — неблокирующая доставка; false, если runner не подключён или канал полон.
+// Блокировка держится на время отправки: Attach/Detach закрывают канал под
+// write-lock, и без этого reconnect во время отправки уронил бы plane
+// («send on closed channel»). Отправка неблокирующая, ждать под lock нечего.
 func (r *Registry) Send(runnerID string, msg *pb.PlaneMsg) bool {
 	r.mu.RLock()
+	defer r.mu.RUnlock()
 	ch, ok := r.conns[runnerID]
-	r.mu.RUnlock()
 	if !ok {
 		return false
 	}

@@ -245,6 +245,30 @@ func (s *Store) SessionProjectEpic(ctx context.Context, sessionID string) (proje
 	return
 }
 
+// SessionRunner — runner, выполняющий сессию, и поддержка им обратного
+// канала контекста (спека agent-integration «Обратный канал контекста»).
+// Runner выбирается по стадии сессии: review исполняет ревьюер, остальные
+// стадии — исполнитель задачи (runner_id на задаче во время review ещё
+// хранит прошлого исполнителя, и предупреждение ушло бы не тому агенту).
+// Пустой runnerID — стадия завершилась или сессия уже закрыта: доставлять
+// контекст некому.
+func (s *Store) SessionRunner(ctx context.Context, sessionID string) (runnerID string, contextChannel bool, err error) {
+	err = nf(s.Pool.QueryRow(ctx, `
+		SELECT COALESCE(stage.runner_id, ''), COALESCE(r.context_channel, false)
+		FROM sessions ss
+		JOIN tasks t ON t.id = ss.task_id
+		CROSS JOIN LATERAL (
+			SELECT CASE WHEN ss.scope = 'REVIEW' THEN t.reviewer_id ELSE t.runner_id END AS runner_id
+		) stage
+		LEFT JOIN runners r ON r.id = stage.runner_id
+		WHERE ss.id = $1 AND ss.ended_at IS NULL`, sessionID).Scan(&runnerID, &contextChannel))
+	if errors.Is(err, ErrNotFound) {
+		// Сессия закрыта или удалена — не ошибка обработки шага.
+		return "", false, nil
+	}
+	return runnerID, contextChannel, err
+}
+
 // ─── сессия доработки (change add-user-sessions) ─────────────────────────
 
 // ErrNoRunner — нет свободного runner'а с нужными capabilities: запуск

@@ -43,6 +43,8 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	// адаптера полной глубины (спека agent-integration «Шаги сессии»).
 	sink := runSink{
 		transcript: transcript,
+		session:    as.SessionId,
+		contexts:   a.contexts,
 		step: func(ev *pb.AgentEvent) {
 			ev.TaskId, ev.SessionId = as.TaskId, as.SessionId
 			emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Event{Event: ev}})

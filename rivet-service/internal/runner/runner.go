@@ -22,12 +22,13 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 7: промпт пользователя в Assignment — сессия доработки
-// (add-user-sessions); v6 — адаптер и глубина данных, структурированные
-// шаги; v5 — токены регистрации, v4 — репозиторий проекта, v3 —
-// деплой-джобы, v2 — session_id. Runner'ы младших версий отклоняются
-// при Register.
-const protocolVersion = "7"
+// Версия 8: обратный канал контекста — сообщение Context работающему
+// агенту и объявление поддержки канала при регистрации
+// (add-context-channel); v7 — промпт пользователя в Assignment; v6 —
+// адаптер и глубина данных, структурированные шаги; v5 — токены
+// регистрации, v4 — репозиторий проекта, v3 — деплой-джобы, v2 —
+// session_id. Runner'ы младших версий отклоняются при Register.
+const protocolVersion = "8"
 
 type Config struct {
 	PlaneAddr string
@@ -86,7 +87,8 @@ func Run(ctx context.Context, cfg Config) error {
 	defer conn.Close()
 	client := pb.NewRunnerServiceClient(conn)
 
-	r := &agent{cfg: cfg, client: client, outbox: outbox, adapter: newAdapter(cfg)}
+	r := &agent{cfg: cfg, client: client, outbox: outbox,
+		adapter: newAdapter(cfg), contexts: newContextHub()}
 	r.ctxPct.Store(ctxUnknown)
 	// Переподключение с бэкоффом: соединение всегда исходящее от runner'а.
 	for {
@@ -117,6 +119,9 @@ type agent struct {
 	// и после нового Assignment (design add-usage-metering, решение 5).
 	ctxPct atomic.Int32
 
+	// contexts — очереди контекста выполняющихся стадий (обратный канал).
+	contexts *contextHub
+
 	mu     sync.Mutex
 	cancel map[string]context.CancelFunc // отмена стадий по task_id
 }
@@ -128,6 +133,7 @@ func (a *agent) session(ctx context.Context) error {
 		RunnerId: a.cfg.ID, Agent: a.cfg.Agent, Model: a.cfg.Model,
 		Host: hostname(), Capabilities: a.cfg.Capabilities, ProtocolVersion: protocolVersion,
 		Adapter: a.cfg.Adapter, Depth: depthOf(a.cfg.Adapter),
+		ContextChannel: contextChannelOf(a.cfg.Adapter),
 	})
 	if err != nil {
 		return err
@@ -224,6 +230,13 @@ func (a *agent) session(ctx context.Context) error {
 				c()
 			}
 			a.mu.Unlock()
+		case *pb.PlaneMsg_Context:
+			// Контекст работающему агенту: очередь заберёт адаптер на
+			// ближайшем хуке. Нет очереди — стадия уже закончилась.
+			if !a.contexts.push(k.Context.SessionId, k.Context.Text) {
+				slog.Debug("контекст без активной стадии — отброшен",
+					"session", k.Context.SessionId, "kind", k.Context.Kind)
+			}
 		case *pb.PlaneMsg_Answer:
 			// Ответ человека приходит новой стадией Assign — отдельной обработки нет.
 		case *pb.PlaneMsg_Pause:
