@@ -10,7 +10,6 @@ import (
 	"net/http"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
-	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
@@ -174,7 +173,7 @@ func (s *Server) handleMergeEvent(w http.ResponseWriter, r *http.Request, provid
 	// Внешний merge запускает автопубликации так же, как merge кнопкой
 	// (спека deployment «Режимы запуска»).
 	if ev.MergeSHA != "" {
-		if err := orchestrator.EnqueueAutoDeploys(r.Context(), s.St, project.ID, ev.MergeSHA); err != nil {
+		if err := s.Engine.EnqueueAutoDeploys(r.Context(), project.ID, ev.MergeSHA); err != nil {
 			writeErr(w, err)
 			return
 		}

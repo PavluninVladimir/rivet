@@ -338,6 +338,9 @@ const (
 	// AttPolicyChange — PR меняет файлы политики (.rivet/): авто-merge
 	// заблокирован метаправилом, нужен человек (спека access-policy).
 	AttPolicyChange AttentionReason = "POLICY_CHANGE"
+	// AttPolicyEngine — движок политик не дал решения: автоматика проекта
+	// остановлена (fail-closed, спека access-policy «Движок недоступен»).
+	AttPolicyEngine AttentionReason = "POLICY_ENGINE"
 )
 
 type Attention struct {

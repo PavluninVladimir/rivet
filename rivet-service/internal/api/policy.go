@@ -22,11 +22,14 @@ func (s *Server) getInstallationPolicy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"version": v, "presets": p})
+	writeJSON(w, http.StatusOK, map[string]any{"version": v, "presets": p, "engine": s.engineView(r)})
 }
 
 func (s *Server) putInstallationPolicy(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
+		return
+	}
+	if s.policyExternal(w) || s.policyBlocks(w, r, actionPolicyWrite, "") {
 		return
 	}
 	var in policy.Presets
@@ -68,12 +71,16 @@ type projectPolicyView struct {
 	Overrides           policy.Overrides     `json:"overrides"`
 	Version             *store.PolicyVersion `json:"version"`
 	InstallationVersion *store.PolicyVersion `json:"installation_version"`
+	// Engine — режим движка: в external правка пресетов проекта тоже
+	// отключена, и консоль должна это показать, а не ловить 409.
+	Engine engineView `json:"engine"`
 }
 
-func writeProjectPolicy(w http.ResponseWriter, eff store.EffectivePolicy) {
+func (s *Server) writeProjectPolicy(w http.ResponseWriter, r *http.Request, eff store.EffectivePolicy) {
 	writeJSON(w, http.StatusOK, projectPolicyView{
 		Effective: eff.Presets, EffectiveHash: eff.Hash, Overrides: eff.Overrides,
 		Version: eff.Project, InstallationVersion: eff.Installation,
+		Engine: s.engineView(r),
 	})
 }
 
@@ -86,11 +93,14 @@ func (s *Server) getProjectPolicy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeProjectPolicy(w, eff)
+	s.writeProjectPolicy(w, r, eff)
 }
 
 func (s *Server) putProjectPolicy(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOwner(w, r, r.PathValue("id")) {
+		return
+	}
+	if s.policyExternal(w) || s.policyBlocks(w, r, actionPolicyWrite, r.PathValue("id")) {
 		return
 	}
 	var in policy.Overrides
@@ -109,7 +119,7 @@ func (s *Server) putProjectPolicy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeProjectPolicy(w, eff)
+	s.writeProjectPolicy(w, r, eff)
 }
 
 func (s *Server) listProjectPolicyVersions(w http.ResponseWriter, r *http.Request) {

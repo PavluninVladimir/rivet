@@ -141,6 +141,18 @@ func (s *Server) systemStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	comps = append(comps, pl)
 
+	// Движок политик: недоступность — деградация, а не отказ установки.
+	// Автоматика при этом стоит (fail-closed), люди продолжают работать.
+	pol := componentView{Name: "policy", Status: "ok"}
+	ev := s.engineView(r)
+	pol.Data = map[string]any{"mode": ev.Mode}
+	pol.Detail = ev.Detail
+	if ev.State != "ok" {
+		pol.Status = "degraded"
+		pol.Detail = "движок политик (" + ev.Mode + ") не отвечает: " + ev.Detail
+	}
+	comps = append(comps, pol)
+
 	rn := componentView{Name: "runners", Status: "ok"}
 	runners, err := s.St.ListRunners(ctx)
 	if err != nil {

@@ -60,6 +60,13 @@ type Config struct {
 	// Secure-cookie (rivetd за TLS-терминирующим reverse proxy).
 	TrustProxy bool
 
+	// PolicyMode/PolicyURL/PolicyTimeout — движок политик (спека
+	// access-policy «Policy-движок с двумя режимами»): embedded (по
+	// умолчанию, в процессе rivetd) или external с адресом OPA установки.
+	PolicyMode    string
+	PolicyURL     string
+	PolicyTimeout time.Duration
+
 	// RunnerHeartbeatTimeout — тишина от runner'а, после которой он offline.
 	RunnerHeartbeatTimeout time.Duration
 	// DefaultAttemptLimit — лимит попыток задачи по умолчанию (спека orchestration).
@@ -90,6 +97,9 @@ func FromEnv() (Config, error) {
 		AdminLogin:             os.Getenv("RIVET_ADMIN_LOGIN"),
 		AdminPassword:          os.Getenv("RIVET_ADMIN_PASSWORD"),
 		TrustProxy:             os.Getenv("RIVET_TRUST_PROXY") == "1",
+		PolicyMode:             os.Getenv("RIVET_POLICY_MODE"),
+		PolicyURL:              strings.TrimSuffix(os.Getenv("RIVET_POLICY_URL"), "/"),
+		PolicyTimeout:          3 * time.Second,
 		RunnerHeartbeatTimeout: 90 * time.Second,
 		DefaultAttemptLimit:    3,
 	}
@@ -102,6 +112,13 @@ func FromEnv() (Config, error) {
 	}
 	if (c.GRPCTLSCert == "") != (c.GRPCTLSKey == "") {
 		return c, fmt.Errorf("RIVET_GRPC_TLS_CERT и RIVET_GRPC_TLS_KEY задаются вместе")
+	}
+	if v := os.Getenv("RIVET_POLICY_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return c, fmt.Errorf("RIVET_POLICY_TIMEOUT: %w", err)
+		}
+		c.PolicyTimeout = d
 	}
 	if v := os.Getenv("RIVET_RUNNER_HEARTBEAT_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)

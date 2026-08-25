@@ -25,6 +25,9 @@ type Server struct {
 	St     *store.Store
 	Engine *orchestrator.Engine
 	Hub    *stream.Hub
+	// Policy — движок политик: режим и состояние в состоянии установки,
+	// решения точек принуждения для мутаций людей (спека access-policy).
+	Policy policy.Engine
 
 	// Кэш оценок стоимости Epic: дашборд рефетчит Epic на каждый SSE-тик
 	// (включая чанки live-лога), а оценка — два агрегата по истории.
@@ -564,7 +567,7 @@ func (s *Server) patchEpic(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.St.AppendEvent(r.Context(), store.EventInput{
 		ActorKind: domain.ActorUser, ActorID: user(r), Type: "epic.status",
 		ProjectID: epic.ProjectID, EpicID: epic.ID,
-		Text: "бюджет Epic изменён",
+		Text:    "бюджет Epic изменён",
 		Payload: map[string]any{"token_budget": epic.TokenBudget},
 	}); err != nil {
 		writeErr(w, err)
@@ -678,10 +681,15 @@ func (s *Server) addTask(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) epicAction(to domain.EpicStatus, text string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.requireEpicMember(w, r, r.PathValue("id")) {
+		epic, err := s.St.EpicForViewer(r.Context(), r.PathValue("id"), currentUser(r).ID)
+		if err != nil {
+			writeErr(w, err)
 			return
 		}
-		err := s.St.TransitionEpic(r.Context(), r.PathValue("id"), to, store.EventInput{
+		if s.policyBlocks(w, r, actionEpicStatus, epic.ProjectID) {
+			return
+		}
+		err = s.St.TransitionEpic(r.Context(), r.PathValue("id"), to, store.EventInput{
 			ActorKind: domain.ActorUser, ActorID: user(r), Type: "epic.status",
 			Text: text, Payload: map[string]any{"status": string(to)},
 		})
@@ -824,6 +832,16 @@ func (s *Server) taskMerge(w http.ResponseWriter, r *http.Request) {
 	if !s.requireTaskMember(w, r, r.PathValue("id")) {
 		return
 	}
+	// Мутация, управляемая политикой: право уже проверено выше, движок
+	// может только запретить (спека access-policy «Точки принуждения»).
+	projectID, _, err := s.St.TaskRefs(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if s.policyBlocks(w, r, actionTaskMerge, projectID) {
+		return
+	}
 	if err := s.Engine.MergeTask(r.Context(), r.PathValue("id"), user(r)); err != nil {
 		writeErr(w, err)
 		return
@@ -882,6 +900,9 @@ func (s *Server) listRunners(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runnerDrain(drain bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.requireAdmin(w, r) {
+			return
+		}
+		if s.policyBlocks(w, r, actionRunnerAdmin, "") {
 			return
 		}
 		if err := s.St.SetRunnerDraining(r.Context(), r.PathValue("id"), drain); err != nil {
