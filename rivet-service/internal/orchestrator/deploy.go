@@ -8,6 +8,7 @@ import (
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/redact"
+	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
@@ -60,14 +61,27 @@ func (e *Engine) dispatchDeploy(a store.DeployAssignment, version, prevVersion s
 	e.mu.Lock()
 	e.deployOwner[a.Deployment.ID] = a.RunnerID
 	e.mu.Unlock()
+	// У k8s-окружения команды собирает control plane из параметров
+	// (спека deployment «Публикация в Kubernetes»); у Linux-хоста они
+	// приходят из конфигурации как есть.
+	deployCmd, verifyCmd := a.Env.Config.DeployCmd, a.Env.Config.VerifyCmd
+	checkout, repoURL, gitToken := false, "", ""
+	if a.Env.ExecType == domain.ExecK8s {
+		// Манифесты и чарт лежат в репозитории: команды исполняются в
+		// рабочей копии на публикуемой версии (протокол v10).
+		deployCmd, verifyCmd = k8sJob(a.Env.Config, version)
+		checkout = true
+		repoURL, gitToken = e.deployRepoAccess(a)
+	}
 	msg := &pb.PlaneMsg{
 		MsgId: fmt.Sprintf("deploy-%s-%v-%d", a.Deployment.ID, rollback, time.Now().UnixNano()),
 		Kind: &pb.PlaneMsg_Deploy{Deploy: &pb.DeployJob{
 			DeploymentId: a.Deployment.ID, EnvName: a.Env.Name, Repo: a.Repo,
 			Version: version, PrevVersion: prevVersion, Rollback: rollback,
-			Host: a.Env.Config.Host, DeployCmd: a.Env.Config.DeployCmd,
-			VerifyCmd: a.Env.Config.VerifyCmd, VerifyUrl: a.Env.Config.VerifyURL,
+			Host: a.Env.Config.Host, DeployCmd: deployCmd,
+			VerifyCmd: verifyCmd, VerifyUrl: a.Env.Config.VerifyURL,
 			TimeoutS: int32(deployTimeout.Seconds()),
+			Checkout: checkout, RepoUrl: repoURL, GitToken: gitToken,
 		}},
 	}
 	if !e.Out.Send(a.RunnerID, msg) {
@@ -319,4 +333,26 @@ func (e *Engine) deployEvent(ctx context.Context, depID, status, text string) er
 			"status": status, "version": version},
 	})
 	return err
+}
+
+// deployRepoAccess — адрес клонирования и токен доступа для рабочей копии
+// деплоя. Ошибка не валит джобу: без адреса runner склонирует по своему
+// RIVET_GIT_BASE (стенды), а приватный репозиторий провалится понятной
+// ошибкой git.
+func (e *Engine) deployRepoAccess(a store.DeployAssignment) (repoURL, gitToken string) {
+	ctx := context.Background()
+	p, err := e.St.GetProject(ctx, a.ProjectID)
+	if err != nil {
+		slog.Error("деплой: проект", "project", a.ProjectID, "err", err)
+		return "", ""
+	}
+	if p.Provider == string(scm.ProviderFake) {
+		return "", "" // e2e-стенд клонирует по RIVET_GIT_BASE
+	}
+	token, err := e.St.ProjectToken(ctx, p.ID, e.Box)
+	if err != nil {
+		slog.Error("деплой: учётные данные проекта", "project", p.ID, "err", err)
+		return p.WebURL(), ""
+	}
+	return p.WebURL(), token
 }

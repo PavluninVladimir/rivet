@@ -49,7 +49,20 @@ func (a *agent) executeDeploy(ctx context.Context, job *pb.DeployJob, emit func(
 	}
 	transcript([]byte(fmt.Sprintf("== %s: %s ==\n", job.EnvName, step)))
 
-	out, err := a.runDeployCmd(dctx, job, job.DeployCmd, transcript)
+	// Доставка файлами репозитория (манифесты Kubernetes, helm-чарт)
+	// исполняется в рабочей копии на версии публикации: пути в командах
+	// относительные от корня репозитория (протокол v10).
+	dir := a.cfg.Workdir
+	if job.Checkout {
+		var err error
+		dir, err = a.deployWorkspace(dctx, job, transcript)
+		if err != nil {
+			result(pb.DeployResult_DEPLOY, false, "рабочая копия: "+err.Error())
+			return
+		}
+	}
+
+	out, err := a.runDeployCmd(dctx, job, dir, job.DeployCmd, transcript)
 	if err != nil {
 		result(pb.DeployResult_DEPLOY, false, fmt.Sprintf("deploy: %v\n%s", err, out))
 		return
@@ -58,7 +71,7 @@ func (a *agent) executeDeploy(ctx context.Context, job *pb.DeployJob, emit func(
 
 	if job.VerifyCmd != "" {
 		transcript([]byte("== verify: команда ==\n"))
-		if out, err := a.runDeployCmd(dctx, job, job.VerifyCmd, transcript); err != nil {
+		if out, err := a.runDeployCmd(dctx, job, dir, job.VerifyCmd, transcript); err != nil {
 			result(pb.DeployResult_VERIFY, false, fmt.Sprintf("verify: %v\n%s", err, out))
 			return
 		}
@@ -76,7 +89,7 @@ func (a *agent) executeDeploy(ctx context.Context, job *pb.DeployJob, emit func(
 // runDeployCmd исполняет скрипт с переменными RIVET_* локально или по ssh.
 // Host передаётся отдельным аргументом exec (никакой shell-склейки; формат
 // провалидирован на control plane, здесь — последний рубеж).
-func (a *agent) runDeployCmd(ctx context.Context, job *pb.DeployJob, script string, transcript func([]byte)) (string, error) {
+func (a *agent) runDeployCmd(ctx context.Context, job *pb.DeployJob, dir, script string, transcript func([]byte)) (string, error) {
 	rivetEnv := map[string]string{
 		"RIVET_REPO":         job.Repo,
 		"RIVET_VERSION":      job.Version,
@@ -86,7 +99,7 @@ func (a *agent) runDeployCmd(ctx context.Context, job *pb.DeployJob, script stri
 	var cmd *exec.Cmd
 	if job.Host == "" {
 		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", script)
-		cmd.Dir = a.cfg.Workdir
+		cmd.Dir = dir
 		cmd.Env = os.Environ()
 		for k, v := range rivetEnv {
 			cmd.Env = append(cmd.Env, k+"="+v)
@@ -181,4 +194,128 @@ func verifyURL(ctx context.Context, url string, transcript func([]byte)) error {
 		lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, tail(string(body), 500))
 	}
 	return fmt.Errorf("health-check не прошёл за %d попыток: %w", verifyURLAttempts, lastErr)
+}
+
+// deployWorkspace — клон репозитория проекта на версии публикации: у
+// доставки манифестами и чартом пути относительные от корня репозитория,
+// и применять надо ровно ту версию, которую публикуем.
+func (a *agent) deployWorkspace(ctx context.Context, job *pb.DeployJob, transcript func([]byte)) (string, error) {
+	dir := a.cfg.Workdir + "/deploy/" + deployKey(job)
+	env, cleanup, err := deployGitCredentials(a.cfg.Workdir, job)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	if _, err := os.Stat(dir + "/.git"); err != nil {
+		url := job.RepoUrl
+		if url == "" {
+			url = cloneBase(a.cfg.GitBase) + job.Repo + ".git"
+		} else {
+			url += ".git"
+		}
+		transcript([]byte("== клонирование " + job.Repo + " ==\n"))
+		cmd := exec.CommandContext(ctx, "git", "clone", "--", url, dir)
+		cmd.Dir = a.cfg.Workdir
+		if len(env) > 0 {
+			cmd.Env = append(os.Environ(), env...)
+		}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("clone: %v: %s", err, out)
+		}
+	}
+	// Версия публикации — sha коммита: fetch и жёсткий checkout на него.
+	if err := validVersion(job.Version); err != nil {
+		return "", err
+	}
+	// Дерево приводится к версии публикации целиком: клон переиспользуется
+	// между публикациями, и остатки прошлой (в том числе неотслеживаемые
+	// файлы) не должны уехать в kubectl apply.
+	script := "git fetch origin && git checkout --detach --force " + shq(job.Version) +
+		" && git reset --hard " + shq(job.Version) + " && git clean -fdx"
+	out, err := runShellEnv(ctx, dir, script, env, nil)
+	if err != nil {
+		return "", fmt.Errorf("checkout %s: %v: %s", job.Version, err, out)
+	}
+	return dir, nil
+}
+
+// deployKey — каталог клона по полной идентичности репозитория и
+// окружению: один и тот же owner/name встречается на разных инстансах, и
+// общий каталог применил бы чужие манифесты.
+func deployKey(job *pb.DeployJob) string {
+	id := job.Repo
+	if job.RepoUrl != "" {
+		id = strings.TrimPrefix(strings.TrimPrefix(job.RepoUrl, "https://"), "http://")
+	}
+	var b strings.Builder
+	for _, r := range id + "-" + job.EnvName {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+// validVersion — версия публикации как безопасный аргумент git.
+func validVersion(v string) error {
+	if v == "" {
+		return fmt.Errorf("пустая версия публикации")
+	}
+	if strings.HasPrefix(v, "-") {
+		return fmt.Errorf("версия %q начинается с дефиса", v)
+	}
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.', r == '/':
+		default:
+			return fmt.Errorf("недопустимый символ %q в версии %q", r, v)
+		}
+	}
+	return nil
+}
+
+// cloneBase — префикс адреса клонирования (e2e-стенды передают file://).
+func cloneBase(gitBase string) string {
+	if gitBase == "" {
+		return "https://github.com/"
+	}
+	return gitBase
+}
+
+// deployGitCredentials — askpass-хелпер для клона приватного репозитория:
+// токен уходит в git через окружение, а не в аргументы команды.
+func deployGitCredentials(workdir string, job *pb.DeployJob) ([]string, func(), error) {
+	if job.GitToken == "" {
+		return nil, func() {}, nil
+	}
+	f, err := os.CreateTemp(workdir, "deploy-askpass-*.sh")
+	if err != nil {
+		return nil, func() {}, err
+	}
+	cleanup := func() { _ = os.Remove(f.Name()) }
+	script := "#!/bin/sh\n" +
+		`case "$1" in *Username*) echo "$RIVET_GIT_USER";; *) echo "$RIVET_GIT_TOKEN";; esac` + "\n"
+	if _, err := f.WriteString(script); err != nil {
+		_ = f.Close()
+		cleanup()
+		return nil, func() {}, err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	if err := os.Chmod(f.Name(), 0o700); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	return []string{
+		"GIT_ASKPASS=" + f.Name(),
+		"GIT_TERMINAL_PROMPT=0",
+		"RIVET_GIT_USER=rivet",
+		"RIVET_GIT_TOKEN=" + job.GitToken,
+	}, cleanup, nil
 }

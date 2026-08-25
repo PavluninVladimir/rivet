@@ -188,11 +188,16 @@ type Environment struct {
 	ID        string
 	ProjectID string
 	Name      string
-	ExecType  string // ssh
+	ExecType  string // ssh | k8s | pipeline
 	Trigger   string // auto | manual
 	Config    EnvConfig
 	Paused    bool
-	Created   time.Time
+	// RunnerCaps — какие capability нужны runner'у публикации помимо
+	// deploy: доступ к кластеру и к закрытому периметру даёт окружение
+	// конкретных runner'ов (спека deployment «Собственная способность
+	// деплоить»). Пусто — подойдёт любой deploy-runner.
+	RunnerCaps []string
+	Created    time.Time
 }
 
 // Типы исполнения окружения (спека deployment «Окружение как сущность»).
@@ -203,6 +208,9 @@ const (
 	// ExecPipeline — доставку выполняет пайплайн хостинга; Rivet его
 	// триггерит, наблюдает и забирает результат как свой этап Deploy.
 	ExecPipeline = "pipeline"
+	// ExecK8s — собственная доставка в кластер: манифесты или helm-чарт.
+	// Команды собирает control plane, исполняет deploy-runner.
+	ExecK8s = "k8s"
 )
 
 // EnvConfig — конфигурация исполнения окружения. Для ssh значимы Host и
@@ -218,7 +226,28 @@ type EnvConfig struct {
 	Pipeline string            `json:"pipeline,omitempty"`
 	Ref      string            `json:"ref,omitempty"`
 	Vars     map[string]string `json:"vars,omitempty"`
+	// Kubernetes: Namespace и либо каталог манифестов (Manifests) с
+	// объектом для проверки готовности (Workload), либо чарт (Chart) с
+	// релизом (Release) и значениями (Values).
+	Namespace string            `json:"namespace,omitempty"`
+	Manifests string            `json:"manifests,omitempty"`
+	Workload  string            `json:"workload,omitempty"`
+	Chart     string            `json:"chart,omitempty"`
+	Release   string            `json:"release,omitempty"`
+	Values    map[string]string `json:"values,omitempty"`
 }
+
+// k8sNameRe — имя объекта Kubernetes (RFC 1123): строчные буквы, цифры и
+// дефис. Значение уезжает в команду deploy-runner'а, поэтому проверяется
+// форматом, а не экранированием «на всякий случай».
+var k8sNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// k8sWorkloadRe — объект для kubectl rollout status: тип/имя.
+var k8sWorkloadRe = regexp.MustCompile(`^[a-z]+/[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$`)
+
+// repoPathRe — путь внутри рабочей копии: без метасимволов shell,
+// без ведущего дефиса и без выхода наверх.
+var repoPathRe = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
 // envHostRe — [user@]hostname[:port]; ведущий «-» запрещён отдельно
 // (аргумент ssh не должен читаться как опция).
@@ -228,6 +257,9 @@ var envHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]+(@[A-Za-z0-9._-]+)?(:[0-9]{1
 // как сущность»): доставка и Verify обязательны, verify_url — только
 // http/https без userinfo, host — безопасный аргумент ssh.
 func (c EnvConfig) Validate(execType string) error {
+	if execType == ExecK8s {
+		return c.validateK8s()
+	}
 	if execType == ExecPipeline {
 		// Доставку выполняет хостинг: команды здесь исполнять негде, а
 		// Verify делает control plane проверкой URL.
@@ -272,6 +304,70 @@ func (c EnvConfig) Validate(execType string) error {
 	}
 	if c.Host != "" && (strings.HasPrefix(c.Host, "-") || !envHostRe.MatchString(c.Host)) {
 		return errors.New("host: ожидается [user@]hostname[:port]")
+	}
+	return nil
+}
+
+// validateK8s — конфигурация кластера: либо манифесты, либо чарт; имена и
+// пути проверяются форматом, потому что уезжают в команду runner'а.
+func (c EnvConfig) validateK8s() error {
+	if c.Host != "" {
+		return errors.New("у окружения Kubernetes нет хоста: доступ к кластеру даёт окружение runner'а")
+	}
+	if c.DeployCmd != "" {
+		// Команду доставки собирает система из параметров кластера: своя
+		// команда обошла бы их проверку. Для произвольных команд есть тип
+		// окружения «Linux-хост».
+		return errors.New("у окружения Kubernetes нет собственной команды доставки: её собирает Rivet")
+	}
+	if (c.Manifests == "") == (c.Chart == "") {
+		return errors.New("нужно ровно одно: каталог манифестов или helm-чарт")
+	}
+	if c.Namespace != "" && !k8sNameRe.MatchString(c.Namespace) {
+		return errors.New("namespace: ожидается имя Kubernetes (строчные буквы, цифры, дефис)")
+	}
+	if c.Manifests != "" {
+		if err := validRepoPath(c.Manifests, "manifests"); err != nil {
+			return err
+		}
+		if c.Workload != "" && !k8sWorkloadRe.MatchString(c.Workload) {
+			return errors.New("workload: ожидается тип/имя, например deployment/api")
+		}
+		// Verify обязателен: без объекта выката и без своей проверки
+		// публикация считалась бы успешной сразу после apply.
+		if c.Workload == "" && c.VerifyCmd == "" && c.VerifyURL == "" {
+			return errors.New("нужен объект выката (workload) либо своя проверка: этап Verify обязателен")
+		}
+	}
+	if c.Chart != "" {
+		if err := validRepoPath(c.Chart, "chart"); err != nil {
+			return err
+		}
+		if !k8sNameRe.MatchString(c.Release) {
+			return errors.New("release: ожидается имя релиза helm (строчные буквы, цифры, дефис)")
+		}
+	}
+	for k, v := range c.Values {
+		if k == "" || strings.ContainsAny(k, " \t\n=") || strings.ContainsAny(v, " \t\n'\"`$;&|<>") {
+			return errors.New("values: ключ без пробелов и «=», значение без подстановок shell")
+		}
+	}
+	if c.VerifyCmd != "" && strings.TrimSpace(c.VerifyCmd) == "" {
+		return errors.New("verify_cmd: пустая команда")
+	}
+	return c.validateVerifyURL()
+}
+
+// validRepoPath — путь внутри рабочей копии: без метасимволов, без выхода
+// за корень и без ведущего дефиса (иначе команда прочитает его как опцию).
+func validRepoPath(p, field string) error {
+	if strings.HasPrefix(p, "-") || strings.HasPrefix(p, "/") || !repoPathRe.MatchString(p) {
+		return errors.New(field + ": ожидается путь от корня репозитория без подстановок shell")
+	}
+	for _, part := range strings.Split(p, "/") {
+		if part == ".." {
+			return errors.New(field + ": путь не должен выходить за корень репозитория")
+		}
 	}
 	return nil
 }

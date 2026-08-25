@@ -232,6 +232,13 @@ message DeployJob {
   string verify_cmd = 9;
   string verify_url = 10;
   int32 timeout_s = 11; // дедлайн джобы на runner'е
+  // Рабочая копия репозитория на версии публикации: нужна доставке,
+  // которая применяет файлы репозитория (манифесты Kubernetes, чарт).
+  // Пустой repo_url — команды исполняются в рабочем каталоге runner'а,
+  // как у доставки на Linux-хост.
+  bool checkout = 12;
+  string repo_url = 13;
+  string git_token = 14;
 }
 
 // DeployResult — итог этапа публикации; чужой/stale deployment_id
