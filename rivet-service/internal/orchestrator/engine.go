@@ -58,6 +58,10 @@ type Engine struct {
 	// уже написано policy.budget_exceeded: событие пишется раз в сутки на
 	// проект; после рестарта возможен повтор — допустимо (design).
 	budgetNotified map[string]string
+	// epicBudgetNotified — по каким Epic и значениям бюджета уже написано
+	// epic.budget_exceeded: раз на факт превышения, смена бюджета — новый
+	// факт; повтор после рестарта допустим (спека orchestration «Бюджет Epic»).
+	epicBudgetNotified map[string]bool
 	// Now — источник времени для бюджета (подменяется в тестах).
 	Now func() time.Time
 }
@@ -71,8 +75,9 @@ func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, hear
 		sessions:       map[string]string{},
 		deployLogs:     map[string][]byte{},
 		deployOwner:    map[string]string{},
-		budgetNotified: map[string]string{},
-		Now:            time.Now,
+		budgetNotified:     map[string]string{},
+		epicBudgetNotified: map[string]bool{},
+		Now:                time.Now,
 	}
 }
 
@@ -125,9 +130,15 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("budget: %w", err)
 	}
+	// Бюджет Epic (спека orchestration «Бюджет Epic»): исчерпанные Epic
+	// исключаются из назначений до решения человека (поднять/снять бюджет).
+	excludedEpics, err := e.epicBudgetExclusions(ctx)
+	if err != nil {
+		return fmt.Errorf("epic budget: %w", err)
+	}
 	// Назначения: кодирование, исправления, review — до исчерпания кандидатов.
 	for {
-		a, ok, err := e.St.AssignNext(ctx, excluded)
+		a, ok, err := e.St.AssignNext(ctx, excluded, excludedEpics)
 		if err != nil {
 			return err
 		}
@@ -137,7 +148,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		e.dispatch(ctx, a, pb.StageResult_CODING, "")
 	}
 	for {
-		a, ok, err := e.St.AssignFixing(ctx, excluded)
+		a, ok, err := e.St.AssignFixing(ctx, excluded, excludedEpics)
 		if err != nil {
 			return err
 		}
@@ -147,7 +158,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		e.dispatch(ctx, a, pb.StageResult_FIXING, e.takeStageContext(a.Task.ID))
 	}
 	for {
-		a, ok, err := e.St.AssignTesting(ctx, excluded)
+		a, ok, err := e.St.AssignTesting(ctx, excluded, excludedEpics)
 		if err != nil {
 			return err
 		}
@@ -157,7 +168,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		e.dispatch(ctx, a, pb.StageResult_TESTING, "")
 	}
 	for {
-		a, ok, err := e.St.AssignReview(ctx, excluded)
+		a, ok, err := e.St.AssignReview(ctx, excluded, excludedEpics)
 		if err != nil {
 			return err
 		}
@@ -245,6 +256,37 @@ func (e *Engine) budgetExclusions(ctx context.Context) ([]string, error) {
 		}
 	}
 	return excluded, nil
+}
+
+// epicBudgetExclusions — работающие Epic с исчерпанным бюджетом: список
+// для запросов назначений и событие epic.budget_exceeded раз на факт.
+func (e *Engine) epicBudgetExclusions(ctx context.Context) ([]string, error) {
+	exceeded, err := e.St.ExceededEpicBudgets(ctx)
+	if err != nil || len(exceeded) == 0 {
+		return nil, err
+	}
+	ids := make([]string, 0, len(exceeded))
+	for _, x := range exceeded {
+		ids = append(ids, x.EpicID)
+		key := fmt.Sprintf("%s|%d", x.EpicID, x.Budget)
+		e.mu.Lock()
+		seen := e.epicBudgetNotified[key]
+		e.epicBudgetNotified[key] = true
+		e.mu.Unlock()
+		if seen {
+			continue
+		}
+		if _, err := e.St.AppendEvent(ctx, store.EventInput{
+			ActorKind: domain.ActorSystem, Type: "epic.budget_exceeded",
+			ProjectID: x.ProjectID, EpicID: x.EpicID,
+			Text: fmt.Sprintf("бюджет Epic исчерпан (%d из %d токенов) — новые стадии не назначаются, поднимите или снимите бюджет",
+				x.Used, x.Budget),
+			Payload: map[string]any{"used": x.Used, "budget": x.Budget},
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
 }
 
 func (e *Engine) takeStageContext(taskID string) string {

@@ -275,3 +275,158 @@ func (s *Store) DeletePlannedTask(ctx context.Context, taskID, login string) err
 	}
 	return err
 }
+
+// ─── прозрачность затрат (change add-cost-transparency) ──────────────────
+
+// CostEstimate — оценка стоимости плана Epic: диапазон p25–p75 удельного
+// расхода истории, взвешенный суммой оценок задач (спека monetization
+// «Прозрачность затрат до запуска»).
+type CostEstimate struct {
+	Available   bool     `json:"available"`
+	Reason      string   `json:"reason,omitempty"`
+	TokensMin   int64    `json:"tokens_min,omitempty"`
+	TokensMax   int64    `json:"tokens_max,omitempty"`
+	CostMin     *float64 `json:"cost_min,omitempty"`
+	CostMax     *float64 `json:"cost_max,omitempty"`
+	BasedOn     string   `json:"based_on,omitempty"` // project | installation
+	SampleTasks int      `json:"sample_tasks,omitempty"`
+}
+
+// estimateSource — перцентили удельного расхода (на единицу оценки) по
+// done-задачам источника; scope пустой — вся установка.
+func (s *Store) estimateSource(ctx context.Context, projectID string) (p25, p75 float64, c25, c75 *float64, n, nCost int, err error) {
+	err = s.Pool.QueryRow(ctx, `
+		WITH per_task AS (
+			SELECT t.id, t.estimate,
+			       SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)) AS tokens,
+			       SUM(u.cost_usd)::float8 AS cost
+			FROM tasks t
+			JOIN epics e ON e.id = t.epic_id
+			JOIN usage_records u ON u.task_id = t.id
+			WHERE t.status = 'done'
+			  AND ($1 = '' OR e.project_id = NULLIF($1,'')::uuid)
+			  AND (u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL)
+			GROUP BY t.id, t.estimate
+			HAVING SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0)) > 0
+		)
+		SELECT COALESCE(percentile_cont(0.25) WITHIN GROUP (ORDER BY tokens::float8/estimate), 0),
+		       COALESCE(percentile_cont(0.75) WITHIN GROUP (ORDER BY tokens::float8/estimate), 0),
+		       percentile_cont(0.25) WITHIN GROUP (ORDER BY cost/estimate) FILTER (WHERE cost IS NOT NULL),
+		       percentile_cont(0.75) WITHIN GROUP (ORDER BY cost/estimate) FILTER (WHERE cost IS NOT NULL),
+		       count(*),
+		       count(*) FILTER (WHERE cost IS NOT NULL)
+		FROM per_task`, projectID).Scan(&p25, &p75, &c25, &c75, &n, &nCost)
+	return
+}
+
+// minEstimateSample — минимум завершённых задач в источнике оценки: меньше —
+// диапазон случаен, источник не используется.
+const minEstimateSample = 3
+
+// EpicCostEstimate — оценка плана Epic: история проекта, при недостатке —
+// установки; при пустой истории Available=false с причиной, не нули.
+func (s *Store) EpicCostEstimate(ctx context.Context, epicID string) (CostEstimate, error) {
+	var projectID string
+	var totalEstimate int64
+	if err := s.Pool.QueryRow(ctx, `
+		SELECT e.project_id::text,
+		       COALESCE((SELECT SUM(estimate) FROM tasks t
+		                 WHERE t.epic_id = e.id AND t.status <> 'cancelled'), 0)
+		FROM epics e WHERE e.id = $1`, epicID).Scan(&projectID, &totalEstimate); err != nil {
+		return CostEstimate{}, nf(err)
+	}
+	if totalEstimate == 0 {
+		return CostEstimate{Available: false, Reason: "в плане нет задач"}, nil
+	}
+	basedOn := "project"
+	p25, p75, c25, c75, n, nCost, err := s.estimateSource(ctx, projectID)
+	if err != nil {
+		return CostEstimate{}, err
+	}
+	if n < minEstimateSample {
+		basedOn = "installation"
+		if p25, p75, c25, c75, n, nCost, err = s.estimateSource(ctx, ""); err != nil {
+			return CostEstimate{}, err
+		}
+	}
+	if n < minEstimateSample {
+		return CostEstimate{Available: false,
+			Reason: "нет истории: оценка появится после первых завершённых задач с учтёнными токенами"}, nil
+	}
+	est := CostEstimate{
+		Available: true, BasedOn: basedOn, SampleTasks: n,
+		TokensMin: int64(p25 * float64(totalEstimate)),
+		TokensMax: int64(p75 * float64(totalEstimate)),
+	}
+	// Деньги — только при достаточной истории со стоимостью в ТОМ ЖЕ
+	// источнике, что и токены: смешение источников дало бы несогласованные
+	// диапазоны. Частичные данные не показываются.
+	if nCost >= minEstimateSample && c25 != nil && c75 != nil {
+		lo, hi := *c25*float64(totalEstimate), *c75*float64(totalEstimate)
+		est.CostMin, est.CostMax = &lo, &hi
+	}
+	return est, nil
+}
+
+// SetEpicBudget — бюджет Epic в токенах (nil снимает); меняет владелец
+// проекта (проверяет API), возобновление назначений — следующим проходом
+// планировщика.
+func (s *Store) SetEpicBudget(ctx context.Context, epicID string, budget *int64) (domain.Epic, error) {
+	if budget != nil && *budget < 1 {
+		return domain.Epic{}, fmt.Errorf("%w: бюджет должен быть не меньше 1 токена", ErrInvalid)
+	}
+	tag, err := s.Pool.Exec(ctx, `UPDATE epics SET token_budget=$2 WHERE id=$1`, epicID, budget)
+	if err != nil {
+		return domain.Epic{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.Epic{}, ErrNotFound
+	}
+	return s.GetEpic(ctx, epicID)
+}
+
+// EpicTokensUsed — учтённые токены задач Epic (NULL не считается нулём).
+func (s *Store) EpicTokensUsed(ctx context.Context, epicID string) (int64, error) {
+	var used int64
+	err := s.Pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(COALESCE(tokens_in,0)+COALESCE(tokens_out,0)), 0)
+		FROM usage_records
+		WHERE epic_id = $1 AND (tokens_in IS NOT NULL OR tokens_out IS NOT NULL)`, epicID).Scan(&used)
+	return used, err
+}
+
+// ExceededEpicBudget — превышение бюджета работающего Epic (для Tick).
+type ExceededEpicBudget struct {
+	EpicID    string
+	ProjectID string
+	Budget    int64
+	Used      int64
+}
+
+// ExceededEpicBudgets — работающие Epic с бюджетом, чей учтённый расход
+// достиг бюджета: планировщик исключает их из назначений (граница стадии).
+func (s *Store) ExceededEpicBudgets(ctx context.Context) ([]ExceededEpicBudget, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT e.id::text, e.project_id::text, e.token_budget,
+		       COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0))
+		                FILTER (WHERE u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL), 0) AS used
+		FROM epics e
+		LEFT JOIN usage_records u ON u.epic_id = e.id
+		WHERE e.status = 'running' AND e.token_budget IS NOT NULL
+		GROUP BY e.id
+		HAVING COALESCE(SUM(COALESCE(u.tokens_in,0)+COALESCE(u.tokens_out,0))
+		                FILTER (WHERE u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL), 0) >= e.token_budget`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ExceededEpicBudget
+	for rows.Next() {
+		var e ExceededEpicBudget
+		if err := rows.Scan(&e.EpicID, &e.ProjectID, &e.Budget, &e.Used); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}

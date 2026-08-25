@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/blob"
@@ -24,6 +25,12 @@ type Server struct {
 	St     *store.Store
 	Engine *orchestrator.Engine
 	Hub    *stream.Hub
+
+	// Кэш оценок стоимости Epic: дашборд рефетчит Epic на каждый SSE-тик
+	// (включая чанки live-лога), а оценка — два агрегата по истории.
+	// 30 секунд достаточно: история меняется завершением задач.
+	estMu    sync.Mutex
+	estCache map[string]cachedEstimate
 	// Planner — горячо заменяемый планировщик декомпозиции; пересобирается
 	// ReloadPlanner из базы либо EnvPlanner (design add-operations-management).
 	Planner    *planner.Holder
@@ -97,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{id}/epics", s.listEpics)
 	mux.HandleFunc("POST /api/v1/projects/{id}/epics", s.createEpic)
 	mux.HandleFunc("GET /api/v1/epics/{id}", s.getEpic)
+	mux.HandleFunc("PATCH /api/v1/epics/{id}", s.patchEpic)
 	mux.HandleFunc("POST /api/v1/epics/{id}/tasks", s.addTask)
 	mux.HandleFunc("POST /api/v1/epics/{id}/decompose", s.decompose)
 	mux.HandleFunc("POST /api/v1/epics/{id}/start", s.epicAction(domain.EpicRunning, "Epic запущен"))
@@ -132,6 +140,32 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/webhooks/github", s.githubWebhook)
 	mux.HandleFunc("POST /api/v1/webhooks/gitlab", s.gitlabWebhook)
 	return s.withAuth(mux)
+}
+
+type cachedEstimate struct {
+	est     store.CostEstimate
+	expires time.Time
+}
+
+// epicEstimate — оценка с кэшем на 30 секунд.
+func (s *Server) epicEstimate(r *http.Request, epicID string) (store.CostEstimate, error) {
+	s.estMu.Lock()
+	if c, ok := s.estCache[epicID]; ok && time.Now().Before(c.expires) {
+		s.estMu.Unlock()
+		return c.est, nil
+	}
+	s.estMu.Unlock()
+	est, err := s.St.EpicCostEstimate(r.Context(), epicID)
+	if err != nil {
+		return est, err
+	}
+	s.estMu.Lock()
+	if s.estCache == nil {
+		s.estCache = map[string]cachedEstimate{}
+	}
+	s.estCache[epicID] = cachedEstimate{est: est, expires: time.Now().Add(30 * time.Second)}
+	s.estMu.Unlock()
+	return est, nil
 }
 
 // ─── формат ошибок и ответов ─────────────────────────────────────────────
@@ -481,6 +515,62 @@ type epicView struct {
 	Progress   map[string]any   `json:"progress"`
 	Usage      []store.UsageRow `json:"usage,omitempty"`
 	UsageTotal *store.UsageRow  `json:"usage_total,omitempty"`
+	// Оценка стоимости плана и состояние бюджета Epic
+	// (api-contract add-cost-transparency).
+	Estimate store.CostEstimate `json:"estimate"`
+	Budget   epicBudgetView     `json:"budget"`
+}
+
+type epicBudgetView struct {
+	Tokens    *int64 `json:"tokens"`
+	Used      int64  `json:"used"`
+	Exhausted bool   `json:"exhausted"`
+}
+
+// patchEpic — бюджет Epic в токенах (api-contract add-cost-transparency):
+// null снимает, возобновление назначений — следующим проходом планировщика.
+func (s *Server) patchEpic(w http.ResponseWriter, r *http.Request) {
+	// Слой видимости — членство (404 чужим), право на бюджет — владелец
+	// проекта: бюджет — spend-control, участник не должен его ослаблять.
+	epicForRole, err := s.St.EpicForViewer(r.Context(), r.PathValue("id"), currentUser(r).ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !s.requireOwner(w, r, epicForRole.ProjectID) {
+		return
+	}
+	var in struct {
+		TokenBudget json.RawMessage `json:"token_budget"`
+	}
+	if err := decode(r, &in); err != nil || in.TokenBudget == nil {
+		unprocessable(w, "нужен token_budget (число или null)")
+		return
+	}
+	var budget *int64
+	if string(in.TokenBudget) != "null" {
+		var v int64
+		if err := json.Unmarshal(in.TokenBudget, &v); err != nil {
+			unprocessable(w, "token_budget: ожидается число или null")
+			return
+		}
+		budget = &v
+	}
+	epic, err := s.St.SetEpicBudget(r.Context(), r.PathValue("id"), budget)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if _, err := s.St.AppendEvent(r.Context(), store.EventInput{
+		ActorKind: domain.ActorUser, ActorID: user(r), Type: "epic.status",
+		ProjectID: epic.ProjectID, EpicID: epic.ID,
+		Text: "бюджет Epic изменён",
+		Payload: map[string]any{"token_budget": epic.TokenBudget},
+	}); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, epic)
 }
 
 func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
@@ -510,11 +600,24 @@ func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	estimate, err := s.epicEstimate(r, e.ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	used, err := s.St.EpicTokensUsed(r.Context(), e.ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, epicView{
 		Epic: e, Tasks: tasks,
 		Progress:   map[string]any{"pct": pct, "weighted": true},
 		Usage:      usage,
 		UsageTotal: usageTotal,
+		Estimate:   estimate,
+		Budget: epicBudgetView{Tokens: e.TokenBudget, Used: used,
+			Exhausted: e.TokenBudget != nil && used >= *e.TokenBudget},
 	})
 }
 
