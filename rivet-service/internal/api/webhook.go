@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -36,12 +37,15 @@ const (
 // hostingEvent — то общее, что конвейеру нужно от события любого хостинга.
 // Пустой Kind — событие нас не интересует.
 type hostingEvent struct {
-	Kind      string
-	RepoPath  string // owner/name
-	Branch    string // ветка-источник PR/MR или проверок
-	URL       string
-	MergeSHA  string
-	Actor     string // кто смержил, закрыл или оставил review
+	Kind     string
+	RepoPath string // owner/name
+	Branch   string // ветка-источник PR/MR или проверок
+	URL      string
+	MergeSHA string
+	Actor    string // кто смержил, закрыл или оставил review
+	// PRURL — адрес PR/MR события: у review в URL лежит сам комментарий,
+	// а с задачей сверяется именно PR.
+	PRURL     string
 	Name      string // имя набора проверок
 	Body      string // текст review
 	State     string // review: approved | changes_requested | commented
@@ -171,13 +175,13 @@ func (s *Server) handleHostingEvent(w http.ResponseWriter, r *http.Request, prov
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
-	// URL сравнивается только у событий про сам PR: у проверок и review
-	// в URL приезжает прогон CI или комментарий, а не адрес PR.
-	if ev.Kind == hookMerge || ev.Kind == hookPRClosed {
-		if task.PRURL != "" && ev.URL != "" && ev.URL != task.PRURL {
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
-			return
-		}
+	// Событие сверяется с задачей по адресу PR, когда хостинг его дал:
+	// отложенная повторная доставка со старого PR не должна попасть в
+	// новую задачу на той же ветке. У прогонов проверок такой привязки
+	// нет — там остаётся ветка (известное ограничение).
+	if task.PRURL != "" && ev.PRURL != "" && ev.PRURL != task.PRURL {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
+		return
 	}
 	switch ev.Kind {
 	case hookMerge:
@@ -239,11 +243,12 @@ func (s *Server) hostingMerge(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	// Внешний merge запускает автопубликации так же, как merge кнопкой
-	// (спека deployment «Режимы запуска»).
+	// (спека deployment «Режимы запуска»). Ошибка постановки не валит
+	// ответ: задача уже done, и повтор webhook'а сюда не дойдёт —
+	// публикацию догонит следующий merge, а проблема видна в логе.
 	if ev.MergeSHA != "" {
 		if err := s.Engine.EnqueueAutoDeploys(r.Context(), project.ID, ev.MergeSHA); err != nil {
-			writeErr(w, err)
-			return
+			slog.Error("автопубликация после внешнего merge", "project", project.ID, "err", err)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "done"})
@@ -306,7 +311,7 @@ func parseGitHubEvent(r *http.Request, body []byte) hostingEvent {
 			return ev
 		}
 		ev.Branch, ev.URL = payload.PullRequest.Head.Ref, payload.PullRequest.HTMLURL
-		ev.MergeSHA = payload.PullRequest.MergeCommitSHA
+		ev.PRURL, ev.MergeSHA = payload.PullRequest.HTMLURL, payload.PullRequest.MergeCommitSHA
 		if payload.PullRequest.Merged {
 			ev.Kind, ev.Actor = hookMerge, payload.PullRequest.MergedBy.Login
 			return ev
@@ -318,6 +323,7 @@ func parseGitHubEvent(r *http.Request, body []byte) hostingEvent {
 		}
 		ev.Kind = hookReview
 		ev.Branch, ev.URL = payload.PullRequest.Head.Ref, payload.Review.HTMLURL
+		ev.PRURL = payload.PullRequest.HTMLURL
 		ev.Actor, ev.Body = payload.Review.User.Login, payload.Review.Body
 		ev.State = reviewState(payload.Review.State)
 	case "workflow_run":
@@ -342,6 +348,16 @@ func parseGitHubEvent(r *http.Request, body []byte) hostingEvent {
 		ev.Name = payload.CheckSuite.App.Name
 	}
 	return ev
+}
+
+// firstNonEmpty — первое непустое значение.
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // checksOutcome — итог набора проверок GitHub. Отменённый или пропущенный
@@ -384,6 +400,8 @@ func parseGitLabEvent(r *http.Request, body []byte) hostingEvent {
 			SourceBranch string `json:"source_branch"`
 			URL          string `json:"url"`
 			MergeCommit  string `json:"merge_commit_sha"`
+			SquashCommit string `json:"squash_commit_sha"`
+			SHA          string `json:"sha"`
 			// Pipeline Hook: ветка и статус пайплайна.
 			Ref    string `json:"ref"`
 			Status string `json:"status"`
@@ -403,7 +421,10 @@ func parseGitLabEvent(r *http.Request, body []byte) hostingEvent {
 	ev := hostingEvent{RepoPath: payload.Project.PathWithNamespace, Actor: payload.User.Username}
 	switch r.Header.Get("X-Gitlab-Event") {
 	case "Merge Request Hook":
-		ev.Branch, ev.URL, ev.MergeSHA = a.SourceBranch, a.URL, a.MergeCommit
+		ev.Branch, ev.URL, ev.PRURL = a.SourceBranch, a.URL, a.URL
+		// При squash и fast-forward sha приезжает не в merge_commit_sha:
+		// тот же порядок, что у собственного merge-адаптера GitLab.
+		ev.MergeSHA = firstNonEmpty(a.MergeCommit, a.SquashCommit, a.SHA)
 		switch {
 		case a.Action == "merge" || a.State == "merged":
 			ev.Kind = hookMerge
@@ -429,7 +450,8 @@ func parseGitLabEvent(r *http.Request, body []byte) hostingEvent {
 		}
 		ev.Kind, ev.State = hookReview, "commented"
 		ev.Branch, ev.Body = payload.MergeRequest.SourceBranch, a.Note
-		ev.URL = a.URL
+		// URL — сам комментарий, PRURL — MR: сверка задачи идёт по второму.
+		ev.URL, ev.PRURL = a.URL, payload.MergeRequest.URL
 	}
 	return ev
 }
