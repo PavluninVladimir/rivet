@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
@@ -22,14 +24,28 @@ import (
 // проверяется секретом этого проекта. Проект без своего секрета проверяется
 // секретом установки. Нет ни того, ни другого — приём выключен (fail-closed).
 
-// mergeEvent — то общее, что конвейеру нужно от события любого хостинга.
-type mergeEvent struct {
+// Виды событий хостинга, на которые реагирует конвейер (спека
+// scm-integration «События хостинга в конвейере»).
+const (
+	hookMerge    = "merge"     // PR/MR смержен человеком
+	hookPRClosed = "pr_closed" // PR/MR закрыт без merge
+	hookChecks   = "checks"    // внешние проверки завершились
+	hookReview   = "review"    // review человека на хостинге
+)
+
+// hostingEvent — то общее, что конвейеру нужно от события любого хостинга.
+// Пустой Kind — событие нас не интересует.
+type hostingEvent struct {
+	Kind      string
 	RepoPath  string // owner/name
-	Branch    string // ветка-источник PR/MR
+	Branch    string // ветка-источник PR/MR или проверок
 	URL       string
 	MergeSHA  string
-	MergedBy  string
-	IsMerge   bool // событие вообще про состоявшийся merge
+	Actor     string // кто смержил, закрыл или оставил review
+	Name      string // имя набора проверок
+	Body      string // текст review
+	State     string // review: approved | changes_requested | commented
+	OK        bool   // checks: проверки прошли
 	Malformed bool
 }
 
@@ -43,7 +59,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		unprocessable(w, "невалидный payload")
 		return
 	}
-	s.handleMergeEvent(w, r, string(scm.ProviderGitHub), body, ev, verifyGitHubSignature)
+	s.handleHostingEvent(w, r, string(scm.ProviderGitHub), body, ev, verifyGitHubSignature)
 }
 
 // gitlabWebhook — тот же конвейер для GitLab: вместо подписи HMAC общий
@@ -58,7 +74,7 @@ func (s *Server) gitlabWebhook(w http.ResponseWriter, r *http.Request) {
 		unprocessable(w, "невалидный payload")
 		return
 	}
-	s.handleMergeEvent(w, r, string(scm.ProviderGitLab), body, ev, verifyGitLabToken)
+	s.handleHostingEvent(w, r, string(scm.ProviderGitLab), body, ev, verifyGitLabToken)
 }
 
 func readWebhookBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
@@ -82,10 +98,10 @@ func verifyGitLabToken(r *http.Request, _ []byte, secret string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(secret)) == 1
 }
 
-// handleMergeEvent — общая часть: выбор проекта, проверка подлинности,
-// перевод задачи в done и запуск автопубликаций.
-func (s *Server) handleMergeEvent(w http.ResponseWriter, r *http.Request, provider string,
-	body []byte, ev mergeEvent, verify func(*http.Request, []byte, string) bool) {
+// handleHostingEvent — общая часть: выбор проекта, проверка подлинности,
+// связывание с задачей и реакция конвейера по виду события.
+func (s *Server) handleHostingEvent(w http.ResponseWriter, r *http.Request, provider string,
+	body []byte, ev hostingEvent, verify func(*http.Request, []byte, string) bool) {
 
 	if ev.RepoPath == "" {
 		// Событие без репозитория: не с чем сопоставить ключ проверки.
@@ -134,7 +150,7 @@ func (s *Server) handleMergeEvent(w http.ResponseWriter, r *http.Request, provid
 	}
 	// Подлинность проверена до всего остального; дальше решаем, интересует
 	// ли нас это событие (спека: проверяется каждое входящее событие).
-	if !ev.IsMerge {
+	if ev.Kind == "" {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
@@ -151,16 +167,68 @@ func (s *Server) handleMergeEvent(w http.ResponseWriter, r *http.Request, provid
 		writeErr(w, err)
 		return
 	}
-	if epic.ProjectID != project.ID || (task.PRURL != "" && ev.URL != "" && ev.URL != task.PRURL) {
+	if epic.ProjectID != project.ID {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
 		return
 	}
+	// URL сравнивается только у событий про сам PR: у проверок и review
+	// в URL приезжает прогон CI или комментарий, а не адрес PR.
+	if ev.Kind == hookMerge || ev.Kind == hookPRClosed {
+		if task.PRURL != "" && ev.URL != "" && ev.URL != task.PRURL {
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
+			return
+		}
+	}
+	switch ev.Kind {
+	case hookMerge:
+		s.hostingMerge(w, r, project, task, ev)
+	case hookPRClosed:
+		if task.Status == domain.TaskDone {
+			// Хостинг закрывает PR и после merge: задача уже завершена.
+			writeJSON(w, http.StatusOK, map[string]string{"status": "already done"})
+			return
+		}
+		if err := s.Engine.OnPRClosed(r.Context(), task, ev.Actor, ev.URL); err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "noted"})
+	case hookChecks:
+		reacted, err := s.Engine.OnExternalChecks(r.Context(), task, ev.OK, ev.Name, ev.URL)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": statusOf(reacted)})
+	case hookReview:
+		reacted, err := s.Engine.OnExternalReview(r.Context(), task, ev.State, ev.Actor, ev.Body, ev.URL)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": statusOf(reacted)})
+	}
+}
+
+// statusOf — ответ webhook'у: изменили конвейер или только записали событие.
+func statusOf(reacted orchestrator.ExternalReacted) string {
+	if reacted {
+		return "done"
+	}
+	return "noted"
+}
+
+// hostingMerge — PR смержен человеком на хостинге: задача завершается и
+// запускаются автопубликации, как при merge кнопкой.
+func (s *Server) hostingMerge(w http.ResponseWriter, r *http.Request,
+	project domain.Project, task domain.Task, ev hostingEvent) {
+
 	if task.Status == domain.TaskDone {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "already done"})
 		return
 	}
 	if err := s.St.CompleteTask(r.Context(), task.ID,
-		store.EventInput{ActorKind: domain.ActorUser, ActorID: ev.MergedBy,
+		store.EventInput{ActorKind: domain.ActorUser, ActorID: ev.Actor,
 			Type: "task.status", Text: "PR смержен вручную на хостинге",
 			Payload: map[string]any{"status": "done", "pr": ev.URL}}); err != nil {
 		writeErr(w, err)
@@ -181,7 +249,7 @@ func (s *Server) handleMergeEvent(w http.ResponseWriter, r *http.Request, provid
 	writeJSON(w, http.StatusOK, map[string]string{"status": "done"})
 }
 
-func parseGitHubEvent(r *http.Request, body []byte) mergeEvent {
+func parseGitHubEvent(r *http.Request, body []byte) hostingEvent {
 	var payload struct {
 		Action     string `json:"action"`
 		Repository struct {
@@ -197,23 +265,111 @@ func parseGitHubEvent(r *http.Request, body []byte) mergeEvent {
 			MergedBy struct {
 				Login string `json:"login"`
 			} `json:"merged_by"`
+			User struct {
+				Login string `json:"login"`
+			} `json:"user"`
 		} `json:"pull_request"`
+		Sender struct {
+			Login string `json:"login"`
+		} `json:"sender"`
+		Review struct {
+			State   string `json:"state"`
+			Body    string `json:"body"`
+			HTMLURL string `json:"html_url"`
+			User    struct {
+				Login string `json:"login"`
+			} `json:"user"`
+		} `json:"review"`
+		CheckSuite struct {
+			HeadBranch string `json:"head_branch"`
+			Conclusion string `json:"conclusion"`
+			Status     string `json:"status"`
+			App        struct {
+				Name string `json:"name"`
+			} `json:"app"`
+		} `json:"check_suite"`
+		WorkflowRun struct {
+			Name       string `json:"name"`
+			HeadBranch string `json:"head_branch"`
+			Conclusion string `json:"conclusion"`
+			Status     string `json:"status"`
+			HTMLURL    string `json:"html_url"`
+		} `json:"workflow_run"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return mergeEvent{Malformed: true}
+		return hostingEvent{Malformed: true}
 	}
-	return mergeEvent{
-		RepoPath: payload.Repository.FullName,
-		Branch:   payload.PullRequest.Head.Ref,
-		URL:      payload.PullRequest.HTMLURL,
-		MergeSHA: payload.PullRequest.MergeCommitSHA,
-		MergedBy: payload.PullRequest.MergedBy.Login,
-		IsMerge: r.Header.Get("X-GitHub-Event") == "pull_request" &&
-			payload.Action == "closed" && payload.PullRequest.Merged,
+	ev := hostingEvent{RepoPath: payload.Repository.FullName}
+	switch r.Header.Get("X-GitHub-Event") {
+	case "pull_request":
+		if payload.Action != "closed" {
+			return ev
+		}
+		ev.Branch, ev.URL = payload.PullRequest.Head.Ref, payload.PullRequest.HTMLURL
+		ev.MergeSHA = payload.PullRequest.MergeCommitSHA
+		if payload.PullRequest.Merged {
+			ev.Kind, ev.Actor = hookMerge, payload.PullRequest.MergedBy.Login
+			return ev
+		}
+		ev.Kind, ev.Actor = hookPRClosed, payload.Sender.Login
+	case "pull_request_review":
+		if payload.Action != "submitted" {
+			return ev
+		}
+		ev.Kind = hookReview
+		ev.Branch, ev.URL = payload.PullRequest.Head.Ref, payload.Review.HTMLURL
+		ev.Actor, ev.Body = payload.Review.User.Login, payload.Review.Body
+		ev.State = reviewState(payload.Review.State)
+	case "workflow_run":
+		if payload.WorkflowRun.Status != "completed" {
+			return ev
+		}
+		ok, decisive := checksOutcome(payload.WorkflowRun.Conclusion)
+		if !decisive {
+			return ev
+		}
+		ev.Kind, ev.Branch, ev.OK = hookChecks, payload.WorkflowRun.HeadBranch, ok
+		ev.Name, ev.URL = payload.WorkflowRun.Name, payload.WorkflowRun.HTMLURL
+	case "check_suite":
+		if payload.CheckSuite.Status != "completed" {
+			return ev
+		}
+		ok, decisive := checksOutcome(payload.CheckSuite.Conclusion)
+		if !decisive {
+			return ev
+		}
+		ev.Kind, ev.Branch, ev.OK = hookChecks, payload.CheckSuite.HeadBranch, ok
+		ev.Name = payload.CheckSuite.App.Name
 	}
+	return ev
 }
 
-func parseGitLabEvent(r *http.Request, body []byte) mergeEvent {
+// checksOutcome — итог набора проверок GitHub. Отменённый или пропущенный
+// прогон вердикта не даёт: возвращать из-за него задачу в работу нельзя,
+// и писать «проверки прошли» тоже неправда.
+func checksOutcome(conclusion string) (ok, decisive bool) {
+	switch strings.ToLower(conclusion) {
+	case "success", "neutral":
+		return true, true
+	case "failure", "timed_out", "action_required", "startup_failure":
+		return false, true
+	}
+	return false, false
+}
+
+// reviewState нормализует состояние review GitHub (APPROVED,
+// CHANGES_REQUESTED, COMMENTED) в значения контракта.
+func reviewState(s string) string {
+	switch strings.ToLower(s) {
+	case "approved":
+		return "approved"
+	case "changes_requested":
+		return "changes_requested"
+	}
+	return "commented"
+}
+
+func parseGitLabEvent(r *http.Request, body []byte) hostingEvent {
 	var payload struct {
 		ObjectKind string `json:"object_kind"`
 		User       struct {
@@ -228,19 +384,52 @@ func parseGitLabEvent(r *http.Request, body []byte) mergeEvent {
 			SourceBranch string `json:"source_branch"`
 			URL          string `json:"url"`
 			MergeCommit  string `json:"merge_commit_sha"`
+			// Pipeline Hook: ветка и статус пайплайна.
+			Ref    string `json:"ref"`
+			Status string `json:"status"`
+			// Note Hook: текст комментария и к чему он относится.
+			Note         string `json:"note"`
+			NoteableType string `json:"noteable_type"`
 		} `json:"object_attributes"`
+		MergeRequest struct {
+			SourceBranch string `json:"source_branch"`
+			URL          string `json:"url"`
+		} `json:"merge_request"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return mergeEvent{Malformed: true}
+		return hostingEvent{Malformed: true}
 	}
 	a := payload.ObjectAttributes
-	return mergeEvent{
-		RepoPath: payload.Project.PathWithNamespace,
-		Branch:   a.SourceBranch,
-		URL:      a.URL,
-		MergeSHA: a.MergeCommit,
-		MergedBy: payload.User.Username,
-		IsMerge: r.Header.Get("X-Gitlab-Event") == "Merge Request Hook" &&
-			(a.Action == "merge" || a.State == "merged"),
+	ev := hostingEvent{RepoPath: payload.Project.PathWithNamespace, Actor: payload.User.Username}
+	switch r.Header.Get("X-Gitlab-Event") {
+	case "Merge Request Hook":
+		ev.Branch, ev.URL, ev.MergeSHA = a.SourceBranch, a.URL, a.MergeCommit
+		switch {
+		case a.Action == "merge" || a.State == "merged":
+			ev.Kind = hookMerge
+		case a.Action == "close" || a.State == "closed":
+			ev.Kind = hookPRClosed
+		case a.Action == "approved":
+			ev.Kind, ev.State = hookReview, "approved"
+		case a.Action == "unapproved":
+			// В GitLab запрос изменений выражается снятием одобрения:
+			// отдельного changes_requested в модели MR нет.
+			ev.Kind, ev.State = hookReview, "changes_requested"
+		}
+	case "Pipeline Hook":
+		switch a.Status {
+		case "success", "failed":
+			ev.Kind, ev.Branch, ev.URL = hookChecks, a.Ref, a.URL
+			ev.OK = a.Status == "success"
+			ev.Name = "pipeline"
+		}
+	case "Note Hook":
+		if a.NoteableType != "MergeRequest" {
+			return ev
+		}
+		ev.Kind, ev.State = hookReview, "commented"
+		ev.Branch, ev.Body = payload.MergeRequest.SourceBranch, a.Note
+		ev.URL = a.URL
 	}
+	return ev
 }

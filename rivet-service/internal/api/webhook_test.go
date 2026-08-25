@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -250,5 +251,250 @@ func TestWebhookIgnoresNonMerge(t *testing.T) {
 	mustStatus(t, resp, http.StatusOK, "ping/opened")
 	if got := f.taskStatus(t); got == domain.TaskDone {
 		t.Fatal("не-merge событие не должно менять конвейер")
+	}
+}
+
+// События хостинга в конвейере (change add-scm-events): внешние проверки,
+// review человека и закрытие PR без merge.
+
+// bodyStatus — статус ответа webhook'а (done / noted / ignored).
+func bodyStatus(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	var out struct{ Status string }
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	return out.Status
+}
+
+func (f hookFixture) postSigned(t *testing.T, event, body string) *http.Response {
+	t.Helper()
+	return f.post(t, "/api/v1/webhooks/github", body, map[string]string{
+		"X-GitHub-Event":      event,
+		"X-Hub-Signature-256": sign(f.project.WebhookSecret, body),
+	})
+}
+
+func (f hookFixture) events(t *testing.T, typ string) []domain.Event {
+	t.Helper()
+	evs, err := f.st.Events(context.Background(), store.EventFilter{Type: typ, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return evs
+}
+
+// Провал внешних проверок возвращает задачу в работу, успех — только
+// событие (спека scm-integration «Внешние проверки провалились»).
+func TestWebhookExternalChecks(t *testing.T) {
+	f := seedHook(t, "github", "own/proj")
+	ok := fmt.Sprintf(`{"repository":{"full_name":%q},"workflow_run":{"name":"CI","status":"completed",
+		"conclusion":"success","head_branch":%q,"html_url":"https://ci/1"}}`, f.project.RepoPath, f.branch)
+	resp := f.postSigned(t, "workflow_run", ok)
+	mustStatus(t, resp, http.StatusOK, "успешные проверки")
+	if s := bodyStatus(t, resp); s != "noted" {
+		t.Fatalf("успех не меняет конвейер: %s", s)
+	}
+	if got := f.taskStatus(t); got != domain.TaskReview {
+		t.Fatalf("задача должна остаться в review, got %s", got)
+	}
+
+	bad := fmt.Sprintf(`{"repository":{"full_name":%q},"workflow_run":{"name":"CI","status":"completed",
+		"conclusion":"failure","head_branch":%q,"html_url":"https://ci/2"}}`, f.project.RepoPath, f.branch)
+	resp = f.postSigned(t, "workflow_run", bad)
+	mustStatus(t, resp, http.StatusOK, "проваленные проверки")
+	if s := bodyStatus(t, resp); s != "done" {
+		t.Fatalf("провал должен вернуть задачу в работу: %s", s)
+	}
+	if got := f.taskStatus(t); got != domain.TaskFixing {
+		t.Fatalf("задача должна вернуться в fixing, got %s", got)
+	}
+	if evs := f.events(t, "task.checks_external"); len(evs) != 2 {
+		t.Fatalf("оба итога проверок в timeline: %d", len(evs))
+	}
+
+	// Повторная доставка того же события: задача уже не в review — только
+	// событие, второй попытки не тратится.
+	resp = f.postSigned(t, "workflow_run", bad)
+	if s := bodyStatus(t, resp); s != "noted" {
+		t.Fatalf("повтор не должен реагировать дважды: %s", s)
+	}
+	if got := f.taskStatus(t); got != domain.TaskFixing {
+		t.Fatalf("статус после повтора: %s", got)
+	}
+}
+
+// Review человека: запрос изменений возвращает задачу в работу с
+// замечаниями, одобрение — информационное событие.
+func TestWebhookExternalReview(t *testing.T) {
+	f := seedHook(t, "github", "own/proj")
+	review := func(state, body string) string {
+		return fmt.Sprintf(`{"action":"submitted","repository":{"full_name":%q},
+			"pull_request":{"head":{"ref":%q}},
+			"review":{"state":%q,"body":%q,"html_url":"https://pr/1#r1","user":{"login":"reviewer"}}}`,
+			f.project.RepoPath, f.branch, state, body)
+	}
+	resp := f.postSigned(t, "pull_request_review", review("approved", "ок"))
+	if s := bodyStatus(t, resp); s != "noted" {
+		t.Fatalf("одобрение конвейер не трогает: %s", s)
+	}
+	if got := f.taskStatus(t); got != domain.TaskReview {
+		t.Fatalf("после одобрения статус: %s", got)
+	}
+
+	resp = f.postSigned(t, "pull_request_review", review("changes_requested", "поправь обработку ошибок"))
+	if s := bodyStatus(t, resp); s != "done" {
+		t.Fatalf("запрос изменений возвращает задачу в работу: %s", s)
+	}
+	if got := f.taskStatus(t); got != domain.TaskFixing {
+		t.Fatalf("после запроса изменений статус: %s", got)
+	}
+	evs := f.events(t, "task.review_external")
+	if len(evs) != 2 {
+		t.Fatalf("оба review в timeline: %d", len(evs))
+	}
+	var seen bool
+	for _, e := range evs {
+		if e.Payload["state"] == "changes_requested" && e.Payload["author"] == "reviewer" {
+			seen = true
+			if body, _ := e.Payload["body"].(string); body == "" {
+				t.Fatalf("замечания должны сохраниться: %+v", e.Payload)
+			}
+		}
+	}
+	if !seen {
+		t.Fatalf("событие запроса изменений: %+v", evs)
+	}
+}
+
+// Закрытый без merge PR не завершает задачу, но поднимает эскалацию.
+func TestWebhookPRClosedWithoutMerge(t *testing.T) {
+	f := seedHook(t, "github", "own/proj")
+	body := fmt.Sprintf(`{"action":"closed","repository":{"full_name":%q},
+		"sender":{"login":"human"},
+		"pull_request":{"merged":false,"html_url":%q,"head":{"ref":%q}}}`,
+		f.project.RepoPath, f.prURL, f.branch)
+	resp := f.postSigned(t, "pull_request", body)
+	mustStatus(t, resp, http.StatusOK, "PR закрыт без merge")
+	if s := bodyStatus(t, resp); s != "noted" {
+		t.Fatalf("закрытие PR не меняет конвейер: %s", s)
+	}
+	if got := f.taskStatus(t); got != domain.TaskReview {
+		t.Fatalf("задача не должна завершаться, got %s", got)
+	}
+	if evs := f.events(t, "task.pr_closed"); len(evs) != 1 {
+		t.Fatalf("событие закрытия PR: %d", len(evs))
+	}
+	var reason string
+	if err := f.st.Pool.QueryRow(context.Background(),
+		`SELECT reason FROM attention WHERE status <> 'resolved' ORDER BY created_at DESC LIMIT 1`).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason != string(domain.AttPRClosed) {
+		t.Fatalf("эскалация: %s", reason)
+	}
+}
+
+// Отменённый прогон проверок вердикта не даёт: задача не возвращается в
+// работу и «проверки прошли» не пишется.
+func TestWebhookIgnoresCancelledChecks(t *testing.T) {
+	f := seedHook(t, "github", "own/proj")
+	body := fmt.Sprintf(`{"repository":{"full_name":%q},"workflow_run":{"name":"CI","status":"completed",
+		"conclusion":"cancelled","head_branch":%q}}`, f.project.RepoPath, f.branch)
+	resp := f.postSigned(t, "workflow_run", body)
+	if s := bodyStatus(t, resp); s != "ignored" {
+		t.Fatalf("отменённый прогон: %s", s)
+	}
+	if got := f.taskStatus(t); got != domain.TaskReview {
+		t.Fatalf("состояние не должно меняться: %s", got)
+	}
+	if evs := f.events(t, "task.checks_external"); len(evs) != 0 {
+		t.Fatalf("события быть не должно: %+v", evs)
+	}
+}
+
+// Повторное закрытие PR не плодит эскалации.
+func TestWebhookPRClosedTwice(t *testing.T) {
+	f := seedHook(t, "github", "own/proj")
+	body := fmt.Sprintf(`{"action":"closed","repository":{"full_name":%q},"sender":{"login":"human"},
+		"pull_request":{"merged":false,"html_url":%q,"head":{"ref":%q}}}`,
+		f.project.RepoPath, f.prURL, f.branch)
+	for i := 0; i < 2; i++ {
+		if s := bodyStatus(t, f.postSigned(t, "pull_request", body)); s != "noted" {
+			t.Fatalf("закрытие PR #%d: %s", i+1, s)
+		}
+	}
+	var n int
+	if err := f.st.Pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM attention WHERE reason=$1 AND status <> 'resolved'`,
+		string(domain.AttPRClosed)).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("эскалация должна быть одна, стало %d", n)
+	}
+}
+
+// Событие о чужой ветке игнорируется без изменения состояния.
+func TestWebhookIgnoresForeignBranch(t *testing.T) {
+	f := seedHook(t, "github", "own/proj")
+	body := fmt.Sprintf(`{"repository":{"full_name":%q},"workflow_run":{"name":"CI","status":"completed",
+		"conclusion":"failure","head_branch":"чужая/ветка"}}`, f.project.RepoPath)
+	resp := f.postSigned(t, "workflow_run", body)
+	mustStatus(t, resp, http.StatusOK, "чужая ветка")
+	if s := bodyStatus(t, resp); s != "ignored" {
+		t.Fatalf("чужая ветка должна игнорироваться: %s", s)
+	}
+	if got := f.taskStatus(t); got != domain.TaskReview {
+		t.Fatalf("состояние не должно меняться: %s", got)
+	}
+}
+
+// GitLab: пайплайн, снятие одобрения и закрытие MR доходят до конвейера
+// теми же путями, что и события GitHub.
+func TestWebhookGitLabEvents(t *testing.T) {
+	f := seedHook(t, "gitlab", "group/sub/proj")
+	post := func(event, body string) *http.Response {
+		return f.post(t, "/api/v1/webhooks/gitlab", body, map[string]string{
+			"X-Gitlab-Event": event,
+			"X-Gitlab-Token": f.project.WebhookSecret,
+			"Content-Type":   "application/json",
+		})
+	}
+	pipeline := fmt.Sprintf(`{"object_kind":"pipeline","project":{"path_with_namespace":%q},
+		"user":{"username":"ci"},"object_attributes":{"ref":%q,"status":"failed","url":"https://gl/pipe/1"}}`,
+		f.project.RepoPath, f.branch)
+	resp := post("Pipeline Hook", pipeline)
+	mustStatus(t, resp, http.StatusOK, "пайплайн упал")
+	if s := bodyStatus(t, resp); s != "done" {
+		t.Fatalf("упавший пайплайн возвращает задачу в работу: %s", s)
+	}
+	if got := f.taskStatus(t); got != domain.TaskFixing {
+		t.Fatalf("после падения пайплайна: %s", got)
+	}
+
+	// Комментарий к MR — информационное событие.
+	note := fmt.Sprintf(`{"object_kind":"note","project":{"path_with_namespace":%q},
+		"user":{"username":"human"},"merge_request":{"source_branch":%q},
+		"object_attributes":{"noteable_type":"MergeRequest","note":"вопрос по коду","url":"https://gl/mr/1#note_1"}}`,
+		f.project.RepoPath, f.branch)
+	resp = post("Note Hook", note)
+	if s := bodyStatus(t, resp); s != "noted" {
+		t.Fatalf("комментарий конвейер не трогает: %s", s)
+	}
+	if evs := f.events(t, "task.review_external"); len(evs) != 1 {
+		t.Fatalf("комментарий в timeline: %d", len(evs))
+	}
+
+	// Закрытие MR без merge — эскалация.
+	closed := fmt.Sprintf(`{"object_kind":"merge_request","project":{"path_with_namespace":%q},
+		"user":{"username":"human"},"object_attributes":{"action":"close","source_branch":%q,"url":%q}}`,
+		f.project.RepoPath, f.branch, f.prURL)
+	resp = post("Merge Request Hook", closed)
+	if s := bodyStatus(t, resp); s != "noted" {
+		t.Fatalf("закрытие MR: %s", s)
+	}
+	if evs := f.events(t, "task.pr_closed"); len(evs) != 1 {
+		t.Fatalf("событие закрытия MR: %d", len(evs))
 	}
 }

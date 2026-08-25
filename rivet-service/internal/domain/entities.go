@@ -345,6 +345,9 @@ const (
 	// AttPolicyEngine — движок политик не дал решения: автоматика проекта
 	// остановлена (fail-closed, спека access-policy «Движок недоступен»).
 	AttPolicyEngine AttentionReason = "POLICY_ENGINE"
+	// AttPRClosed — PR задачи закрыт на хостинге без merge: решение
+	// (повторить, отменить) за человеком (спека scm-integration).
+	AttPRClosed AttentionReason = "PR_CLOSED"
 )
 
 type Attention struct {

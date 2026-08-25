@@ -35,11 +35,11 @@ func FuzzWebhookPayload(f *testing.F) {
 		gl := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/gitlab", bytes.NewReader(body))
 		gl.Header.Set("X-Gitlab-Event", "Merge Request Hook")
 
-		for _, ev := range []mergeEvent{parseGitHubEvent(gh, body), parseGitLabEvent(gl, body)} {
+		for _, ev := range []hostingEvent{parseGitHubEvent(gh, body), parseGitLabEvent(gl, body)} {
 			if ev.Malformed {
 				// Нечитаемое тело не должно давать данных, по которым
 				// конвейер что-то предпримет.
-				if ev.RepoPath != "" || ev.Branch != "" || ev.IsMerge {
+				if ev.RepoPath != "" || ev.Branch != "" || ev.Kind != "" {
 					t.Fatalf("сломанный разбор вернул данные: %+v", ev)
 				}
 				continue
