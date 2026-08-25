@@ -49,11 +49,23 @@ type agentRun struct {
 type runSink struct {
 	transcript func([]byte)
 	step       func(ev *pb.AgentEvent)
+	// session — сессия стадии: под ней адаптер с обратным каналом
+	// регистрирует в contexts очередь контекста на время запуска
+	// (спека agent-integration «Обратный канал контекста»).
+	session  string
+	contexts *contextHub
 }
 
 // adapter выполняет один запуск агента в каталоге рабочей копии.
 type adapter interface {
 	Run(ctx context.Context, dir, prompt string, sink runSink) (agentRun, error)
+}
+
+// contextChannelOf — поддерживает ли адаптер обратный канал контекста:
+// нативный доводит контекст до агента хуком, обёртка ничем не может
+// (режим «только отправка»).
+func contextChannelOf(adapterName string) bool {
+	return adapterName == AdapterClaudeCode
 }
 
 // depthOf — глубина данных адаптера (объявляется при регистрации,

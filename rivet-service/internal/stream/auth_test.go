@@ -154,7 +154,7 @@ func TestRunnerRegistrationRequiresToken(t *testing.T) {
 }
 
 // Runner прежней версии протокола получает понятный отказ, а не разрыв
-// (api-contract add-claude-code-adapter: v6).
+// (api-contract add-context-channel: v8).
 func TestRegisterRejectsOldProtocol(t *testing.T) {
 	ctx := context.Background()
 	st := testStore(t)
@@ -169,10 +169,10 @@ func TestRegisterRejectsOldProtocol(t *testing.T) {
 	client := dialAuthServer(t, st)
 	authed := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+secret)
 	resp, err := client.Register(authed, &pb.RegisterRequest{
-		RunnerId: "old", Agent: "fake", ProtocolVersion: "5",
+		RunnerId: "old", Agent: "fake", ProtocolVersion: "7",
 	})
 	if err != nil || resp.Accepted {
-		t.Fatalf("v5 должен отклоняться: %v %+v", err, resp)
+		t.Fatalf("v7 должен отклоняться: %v %+v", err, resp)
 	}
 	if !strings.Contains(resp.Message, protocolVersion) {
 		t.Fatalf("сообщение должно называть нужную версию: %q", resp.Message)
@@ -189,12 +189,17 @@ func TestRegisterRejectsOldProtocol(t *testing.T) {
 	resp, err = client.Register(authed, &pb.RegisterRequest{
 		RunnerId: "fresh", Agent: "claude-code", Capabilities: []string{"coding"},
 		ProtocolVersion: protocolVersion, Adapter: "claude-code", Depth: "full",
+		ContextChannel: true,
 	})
 	if err != nil || !resp.Accepted {
-		t.Fatalf("v6 должен регистрироваться: %v %+v", err, resp)
+		t.Fatalf("актуальная версия должна регистрироваться: %v %+v", err, resp)
 	}
 	runners, err := st.ListRunners(ctx)
 	if err != nil || len(runners) != 1 || runners[0].Adapter != "claude-code" || runners[0].Depth != domain.DepthFull {
 		t.Fatalf("адаптер и глубина в списке: %v %+v", err, runners)
+	}
+	// Поддержка обратного канала объявляется при регистрации (спека runners).
+	if !runners[0].ContextChannel {
+		t.Fatalf("обратный канал должен сохраниться: %+v", runners[0])
 	}
 }

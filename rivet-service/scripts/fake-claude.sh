@@ -9,14 +9,19 @@ set -eu
 # Промпт приходит на stdin (адаптер передаёт его так, а не в argv).
 PROMPT=$(cat)
 
-hook() { # $1 - JSON события хука
-  if [ -n "${RIVET_HOOK_CMD:-}" ]; then
-    # Команда приходит с shell-кавычками (путь бинарника может нести пробелы).
-    printf '%s' "$1" | sh -c "$RIVET_HOOK_CMD" || true
-  fi
-}
-
 emit() { printf '%s\n' "$1"; }
+
+hook() { # $1 - JSON события хука
+  [ -n "${RIVET_HOOK_CMD:-}" ] || return 0
+  # Команда приходит с shell-кавычками (путь бинарника может нести пробелы).
+  # Контекст от Rivet приходит хуку в stderr с кодом возврата 2 (обратный
+  # канал, add-context-channel) — настоящий агент увидел бы его как
+  # сообщение системы, fake печатает его текстом ассистента.
+  ctx=$(printf '%s' "$1" | sh -c "$RIVET_HOOK_CMD" 2>&1 >/dev/null || true)
+  [ -n "$ctx" ] || return 0
+  ctx=$(printf '%s' "$ctx" | tr '\n' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g')
+  emit "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fake-1\",\"content\":[{\"type\":\"text\",\"text\":\"$ctx\"}]}}"
+}
 
 emit '{"type":"system","subtype":"init","session_id":"fake-claude-1","model":"claude-fake-1"}'
 hook '{"hook_event_name":"SessionStart","session_id":"fake-claude-1"}'
@@ -47,7 +52,12 @@ hook "{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"fake-claude-1\",\"to
 # [e2e-slow]: подержать сессию открытой после шага с файлом — e2e смотрит
 # реестр активных сессий и пересечения работ (add-team-visibility).
 case "$PROMPT" in
-*"[e2e-slow]"*) sleep 6 ;;
+*"[e2e-slow]"*)
+  sleep 6
+  # Ещё один вызов инструмента после паузы: обратный канал доставляет
+  # контекст именно на PostToolUse (add-context-channel).
+  hook "{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"fake-claude-1\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"git status --porcelain\"}}"
+  ;;
 esac
 
 hook '{"hook_event_name":"Stop","session_id":"fake-claude-1"}'

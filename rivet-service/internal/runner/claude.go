@@ -63,12 +63,18 @@ func (c *claudeAdapter) Run(ctx context.Context, dir, prompt string, sink runSin
 	}
 	defer settings.cleanup()
 
-	// Приём событий хуков: одно подключение — одно событие JSON'ом.
-	// Барьер доставки: Run не возвращается, пока принятые события не отданы
-	// в sink — иначе StageResult закрыл бы сессию раньше поздних шагов.
-	// Хук мог успеть подключиться (backlog), но не быть принятым к выходу
-	// claude — после Wait приём продолжается до короткого deadline, а не
-	// обрывается закрытием сокета.
+	// Очередь контекста запуска: plane шлёт предупреждения работающему
+	// агенту, хук забирает их на ближайшем вызове инструмента
+	// (спека agent-integration «Обратный канал контекста»).
+	queue := sink.contexts.open(sink.session)
+	defer sink.contexts.close(sink.session)
+
+	// Приём событий хуков: одно подключение — одно событие JSON'ом, ответом
+	// уходит накопленный контекст. Барьер доставки: Run не возвращается,
+	// пока принятые события не отданы в sink — иначе StageResult закрыл бы
+	// сессию раньше поздних шагов. Хук мог успеть подключиться (backlog), но
+	// не быть принятым к выходу claude — после Wait приём продолжается до
+	// короткого deadline, а не обрывается закрытием сокета.
 	var wg sync.WaitGroup
 	acceptDone := make(chan struct{})
 	go func() {
@@ -87,9 +93,11 @@ func (c *claudeAdapter) Run(ctx context.Context, dir, prompt string, sink runSin
 				if err != nil || len(raw) == 0 {
 					return
 				}
-				if ev, ok := parseHookEvent(raw, dir); ok {
+				ev, ok := parseHookEvent(raw, dir)
+				if ok {
 					sink.step(ev)
 				}
+				replyContext(conn, raw, queue)
 			}()
 		}
 	}()
@@ -433,10 +441,40 @@ func clipRunes(s string, n int) string {
 
 // ─── подкоманда hook ─────────────────────────────────────────────────────
 
+// hookContextExit — код возврата хука, которым Claude Code показывает
+// stderr самому агенту («инструмент уже выполнен, вот текст»). Это
+// единственный штатный способ дописать контекст работающему агенту в
+// неинтерактивном режиме (design add-context-channel).
+const hookContextExit = 2
+
+// replyContext отдаёт хуку накопленный контекст стадии — только на
+// событие PostToolUse: там код возврата 2 показывает stderr агенту, не
+// отменяя выполненный инструмент. На Stop тот же код заставил бы агента
+// продолжать работу, поэтому контекст ждёт ближайшего вызова инструмента.
+func replyContext(conn net.Conn, raw []byte, queue *contextQueue) {
+	var ev hookEvent
+	if err := json.Unmarshal(raw, &ev); err != nil || ev.HookEventName != "PostToolUse" {
+		return
+	}
+	items := queue.take()
+	if len(items) == 0 {
+		return
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+	if _, err := conn.Write([]byte(strings.Join(items, "\n\n"))); err != nil {
+		// Хук отвалился — контекст возвращается в очередь и уйдёт агенту
+		// на следующем вызове инструмента.
+		queue.restore(items)
+		slog.Warn("контекст не отдан хуку", "err", err)
+	}
+}
+
 // HookMain — команда хука Claude Code: читает JSON события со stdin и
-// пересылает runner'у по unix-сокету из RIVET_HOOK_SOCK. Завершается
-// успешно всегда: хук не должен блокировать или прерывать агента
-// (спека agent-integration «Хук без связи с runner'ом»).
+// пересылает runner'у по unix-сокету из RIVET_HOOK_SOCK. Ответ runner'а —
+// контекст для агента: он печатается в stderr с кодом возврата 2 (Claude
+// Code показывает такой stderr агенту). Пустой ответ или любая ошибка —
+// выход нулём: хук не должен блокировать или прерывать агента (спека
+// agent-integration «Хук без связи с runner'ом»).
 func HookMain() int {
 	raw, err := io.ReadAll(io.LimitReader(os.Stdin, 1<<20))
 	if err != nil || len(raw) == 0 {
@@ -454,8 +492,20 @@ func HookMain() int {
 	_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 	if _, err := conn.Write(raw); err != nil {
 		slog.Debug("hook: событие не доставлено", "err", err)
+		return 0
 	}
-	return 0
+	// Половинное закрытие: runner читает событие до EOF, а ответ идёт
+	// обратно по тому же соединению.
+	if uc, ok := conn.(*net.UnixConn); ok {
+		_ = uc.CloseWrite()
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	reply, err := io.ReadAll(io.LimitReader(conn, 64<<10))
+	if err != nil || len(strings.TrimSpace(string(reply))) == 0 {
+		return 0
+	}
+	fmt.Fprintln(os.Stderr, string(reply))
+	return hookContextExit
 }
 
 // createTemp — временный файл с содержимым и функцией очистки.

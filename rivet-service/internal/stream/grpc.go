@@ -2,12 +2,14 @@ package stream
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
@@ -17,12 +19,13 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Версия 7: промпт пользователя в Assignment — сессия доработки
-// (add-user-sessions); v6 — адаптер и глубина данных, структурированные
-// шаги; v5 — токены регистрации, v4 — репозиторий проекта, v3 —
-// деплой-джобы, v2 — session_id. Runner'ы младших версий отклоняются
-// при Register.
-const protocolVersion = "7"
+// Версия 8: обратный канал контекста — сообщение Context работающему
+// агенту и объявление поддержки канала при регистрации
+// (add-context-channel); v7 — промпт пользователя в Assignment; v6 —
+// адаптер и глубина данных, структурированные шаги; v5 — токены
+// регистрации, v4 — репозиторий проекта, v3 — деплой-джобы, v2 —
+// session_id. Runner'ы младших версий отклоняются при Register.
+const protocolVersion = "8"
 
 // ProtocolVersion — версия протокола для состояния установки.
 const ProtocolVersion = protocolVersion
@@ -199,6 +202,7 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 		ID: req.RunnerId, Agent: req.Agent, Model: req.Model,
 		Host: req.Host, Capabilities: req.Capabilities,
 		Adapter: req.Adapter, Depth: domain.SessionDepth(req.Depth),
+		ContextChannel: req.ContextChannel,
 	}, token)
 	if err != nil {
 		return nil, err
@@ -245,7 +249,7 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 			return nil
 		}
 		if _, dup := seen[msg.MsgId]; dup {
-			s.ack(sendCh, msg.MsgId)
+			s.ack(runnerID, msg.MsgId)
 			continue
 		}
 		if len(seen) > 65536 {
@@ -257,7 +261,7 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 			slog.Error("runner msg", "runner", runnerID, "err", err)
 			continue // без Ack — runner повторит
 		}
-		s.ack(sendCh, msg.MsgId)
+		s.ack(runnerID, msg.MsgId)
 	}
 }
 
@@ -330,6 +334,72 @@ func clip(s string, n int) string {
 	return s[:n] + "…"
 }
 
+// Причины недоставки контекста агенту (api-contract: delivery_reason).
+const (
+	reasonNoChannel     = "no_channel"     // адаптер runner'а без обратного канала
+	reasonRunnerOffline = "runner_offline" // runner не подключён или канал переполнен
+	reasonNoRunner      = "no_runner"      // стадия завершилась — доставлять некому
+)
+
+// overlapContext — текст предупреждения для самого агента. Формулировка
+// явно отделяет предупреждение от ошибки инструмента: нативный адаптер
+// отдаёт его через stderr хука, и агент не должен принять его за отказ
+// вызова (design, решение о коде возврата 2).
+func overlapContext(otherNum int64, files []string) string {
+	// Пути приходят от runner'а и уезжают в промпт другого агента: перевод
+	// строки в имени файла превратил бы предупреждение в чужую инструкцию.
+	safe := make([]string, 0, len(files))
+	for _, f := range files {
+		safe = append(safe, clip(sanitizeLine(f), 300))
+	}
+	return "Предупреждение Rivet (не ошибка инструмента): параллельно с тобой над task-" +
+		strconv.FormatInt(otherNum, 10) + " идёт работа в общих файлах: " + strings.Join(safe, ", ") +
+		". Продолжай задачу, но учитывай пересечение: не переписывай чужие изменения целиком и держи правки минимальными."
+}
+
+// sanitizeLine заменяет управляющие символы и разделители строк пробелом:
+// текст контекста должен остаться одной строкой без разметки, которую агент
+// примет за границу сообщения (U+2028/U+2029 — не control, но перевод
+// строки для многих потребителей).
+func sanitizeLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+// deliverContext доставляет контекст работающему агенту сессии: сообщение
+// уходит только runner'у, объявившему обратный канал (спека
+// agent-integration «Адаптер без обратного канала»). Недоставка — не
+// ошибка: она фиксируется причиной и не влияет на выполнение стадии.
+func (s *Server) deliverContext(ctx context.Context, taskID, sessionID, kind, text string) (bool, string) {
+	runnerID, channel, err := s.St.SessionRunner(ctx, sessionID)
+	if err != nil {
+		slog.Warn("контекст: runner сессии не определён", "session", sessionID, "err", err)
+		return false, reasonNoRunner
+	}
+	if runnerID == "" {
+		return false, reasonNoRunner
+	}
+	if !channel {
+		return false, reasonNoChannel
+	}
+	if s.Reg == nil {
+		return false, reasonRunnerOffline
+	}
+	sent := s.Reg.Send(runnerID, &pb.PlaneMsg{
+		MsgId: fmt.Sprintf("ctx-%s-%s-%d", sessionID, kind, time.Now().UnixNano()),
+		Kind: &pb.PlaneMsg_Context{Context: &pb.Context{
+			TaskId: taskID, SessionId: sessionID, Kind: kind, Text: text}},
+	})
+	if !sent {
+		return false, reasonRunnerOffline
+	}
+	return true, ""
+}
+
 // emitOverlaps — пересечения работ: общие затронутые файлы у активных
 // сессий разных задач проекта дают событие session.overlap в timeline
 // обеих задач; работа не блокируется (спека team-visibility).
@@ -371,20 +441,33 @@ func (s *Server) emitOverlaps(ctx context.Context, sessionID, projectID, epicID 
 		}
 		pairs := []struct {
 			project, epic, task string
+			session             string
+			otherNum            int64
 			payload             map[string]any
 			text                string
 		}{
-			{projectID, epicID, self.TaskID, map[string]any{
+			{projectID, epicID, self.TaskID, self.SessionID, h.TaskNum, map[string]any{
 				"session_id": self.SessionID, "other_task_id": h.TaskID,
 				"other_task_num": h.TaskNum, "other_session_id": h.SessionID, "files": h.Files,
 			}, text(h.TaskNum, h.Files)},
-			{otherProject, otherEpic, otherTask, map[string]any{
+			{otherProject, otherEpic, otherTask, h.SessionID, self.TaskNum, map[string]any{
 				"session_id": h.SessionID, "other_task_id": self.TaskID,
 				"other_task_num": self.TaskNum, "other_session_id": self.SessionID, "files": h.Files,
 			}, text(self.TaskNum, h.Files)},
 		}
 		evs := make([]store.EventInput, 0, len(pairs))
 		for _, p := range pairs {
+			// Предупреждение доезжает до самого агента обратным каналом, а
+			// результат доставки — в payload события (спека team-visibility
+			// «Агент предупреждён о пересечении»). Контекст уходит до записи
+			// события: агент должен узнать о пересечении как можно раньше,
+			// а событие несёт уже фактический результат.
+			delivered, reason := s.deliverContext(ctx, p.task, p.session, "overlap",
+				overlapContext(p.otherNum, h.Files))
+			p.payload["delivered"] = delivered
+			if !delivered {
+				p.payload["delivery_reason"] = reason
+			}
 			evs = append(evs, store.EventInput{
 				ActorKind: domain.ActorSystem, Type: "session.overlap",
 				ProjectID: p.project, EpicID: p.epic, TaskID: p.task,
@@ -401,11 +484,14 @@ func (s *Server) emitOverlaps(ctx context.Context, sessionID, projectID, epicID 
 	return nil
 }
 
-func (s *Server) ack(sendCh chan *pb.PlaneMsg, msgID string) {
-	select {
-	case sendCh <- &pb.PlaneMsg{Kind: &pb.PlaneMsg_Ack{Ack: &pb.Ack{AckedMsgId: msgID}}}:
-	default:
-	}
+// ack подтверждает приём сообщения runner'у. Отправка идёт через реестр, а
+// не прямо в канал соединения: reconnect закрывает прежний канал, и прямая
+// запись в него уронила бы plane. Потерянный ack не страшен — доставка
+// at-least-once, runner повторит.
+func (s *Server) ack(runnerID, msgID string) {
+	s.Reg.Send(runnerID, &pb.PlaneMsg{
+		MsgId: "ack-" + msgID,
+		Kind:  &pb.PlaneMsg_Ack{Ack: &pb.Ack{AckedMsgId: msgID}}})
 }
 
 func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg) error {

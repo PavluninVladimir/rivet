@@ -28,6 +28,11 @@ message RegisterRequest {
   // «Уровни глубины данных»). Сессии runner'а создаются с этой глубиной.
   string adapter = 7;
   string depth = 8;
+  // Поддерживает ли адаптер обратный канал контекста (PlaneMsg.Context):
+  // нативный адаптер доводит контекст до агента, обёртка — нет, и таким
+  // runner'ам control plane контекст не шлёт (спека agent-integration
+  // «Обратный канал контекста»).
+  bool context_channel = 9;
 }
 
 message RegisterResponse {
@@ -130,7 +135,19 @@ message PlaneMsg {
     CancelTask cancel = 5;
     PauseRunner pause = 6;
     DeployJob deploy = 7;
+    Context context = 8;
   }
+}
+
+// Context — контекст работающему агенту от control plane (обратный канал):
+// предупреждение о пересечении работ и т.п. Доставляется во время
+// выполняющейся стадии, работу не прерывает и результат не отменяет.
+// Отправляется только runner'ам, объявившим context_channel.
+message Context {
+  string task_id = 1;
+  string session_id = 2; // сессия стадии из Assignment
+  string kind = 3;       // вид контекста: overlap
+  string text = 4;       // готовое сообщение агенту
 }
 
 message Ack {

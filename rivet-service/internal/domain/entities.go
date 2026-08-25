@@ -120,6 +120,10 @@ type Runner struct {
 	// (спека agent-integration «Уровни глубины данных»).
 	Adapter string
 	Depth   SessionDepth
+	// ContextChannel — адаптер доводит контекст от Rivet до работающего
+	// агента (спека agent-integration «Обратный канал контекста»);
+	// без него система контекст этому runner'у не шлёт.
+	ContextChannel bool
 }
 
 // HasCapabilities — подбор по требованиям задачи (спека orchestration).
