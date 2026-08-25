@@ -122,3 +122,9 @@ func (f *Fake) WriteFile(ctx context.Context, repo, ref, path, prevID, content, 
 	sha := fmt.Sprintf("fake-commit-%04d", f.seq.Add(1))
 	return Commit{SHA: sha, URL: fmt.Sprintf("https://fake.local/%s/commit/%s", repo, sha)}, nil
 }
+
+// BranchProtected — на стенде ветка считается защищённой: настоящих
+// правил хостинга у fake нет, а сценарии проверяют логику Rivet.
+func (f *Fake) BranchProtected(ctx context.Context, repo, branch string) (bool, error) {
+	return true, nil
+}

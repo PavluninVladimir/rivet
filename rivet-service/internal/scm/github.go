@@ -533,3 +533,32 @@ func escapePath(path string) string {
 	}
 	return strings.Join(parts, "/")
 }
+
+// BranchProtected — защищена ли ветка правилами хостинга с обязательным
+// ревью. Нет прав или нет защиты — false без ошибки: включение
+// git-провайдера политики просто не состоится.
+func (g *GitHub) BranchProtected(ctx context.Context, repo, branch string) (bool, error) {
+	raw, code, err := g.do(ctx, "GET",
+		fmt.Sprintf("/repos/%s/branches/%s/protection", repo, neturl.PathEscape(branch)), nil, "")
+	if err != nil {
+		return false, err
+	}
+	switch code {
+	case http.StatusNotFound, http.StatusForbidden, http.StatusUnauthorized:
+		return false, nil
+	case http.StatusOK:
+	default:
+		return false, fmt.Errorf("github branch protection: %d: %s", code, clip(raw))
+	}
+	var out struct {
+		RequiredPullRequestReviews *struct {
+			RequiredApprovingReviewCount int `json:"required_approving_review_count"`
+		} `json:"required_pull_request_reviews"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return false, err
+	}
+	// Защита без обязательного ревью политику не бережёт: push в неё
+	// закрыт, но merge PR без ревьюера-человека остаётся возможен.
+	return out.RequiredPullRequestReviews != nil, nil
+}

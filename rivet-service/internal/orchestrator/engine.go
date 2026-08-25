@@ -65,6 +65,9 @@ type Engine struct {
 	// epic.budget_exceeded: раз на факт превышения, смена бюджета — новый
 	// факт; повтор после рестарта допустим (спека orchestration «Бюджет Epic»).
 	epicBudgetNotified map[string]bool
+	// policySyncedAt — когда последний раз читалась политика проектов из
+	// репозитория (git-провайдер).
+	policySyncedAt time.Time
 	// externalPolled — когда в последний раз опрашивался прогон внешней
 	// публикации: тик идёт секундами, пайплайны — минутами.
 	externalPolled map[string]time.Time
@@ -128,6 +131,11 @@ func (e *Engine) Tick(ctx context.Context) error {
 		if err := e.failDeployNow(ctx, depID, "", "deploy-runner потерян (heartbeat)"); err != nil {
 			slog.Error("deploy runner lost", "deployment", depID, "err", err)
 		}
+	}
+	// Политика проектов, которая живёт в репозитории: свежие правки
+	// доверенной ветки становятся версиями политики (спека access-policy).
+	if err := e.syncGitPolicies(ctx); err != nil {
+		slog.Error("синхронизация политики из репозитория", "err", err)
 	}
 	epics, err := e.St.RunningEpics(ctx)
 	if err != nil {

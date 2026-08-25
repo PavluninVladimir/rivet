@@ -494,3 +494,27 @@ func (g *GitLab) WriteFile(ctx context.Context, repo, ref, path, prevID, content
 	}
 	return Commit{SHA: out.ID, URL: url}, nil
 }
+
+// BranchProtected — защищена ли ветка в GitLab. Нет прав или нет защиты —
+// false без ошибки.
+func (g *GitLab) BranchProtected(ctx context.Context, repo, branch string) (bool, error) {
+	raw, code, err := g.do(ctx, http.MethodGet,
+		"/projects/"+projectID(repo)+"/protected_branches/"+url.PathEscape(branch), nil)
+	if err != nil {
+		return false, err
+	}
+	switch code {
+	case http.StatusNotFound, http.StatusForbidden, http.StatusUnauthorized:
+		return false, nil
+	case http.StatusOK:
+	default:
+		return false, fmt.Errorf("gitlab protected branch: %d: %s", code, clip(raw))
+	}
+	var out struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return false, err
+	}
+	return out.Name != "", nil
+}

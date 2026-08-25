@@ -17,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/bmatcuk/doublestar/v4"
+	"sigs.k8s.io/yaml"
 )
 
 // Presets — полный документ политики (область «установка» и действующая
@@ -56,6 +57,33 @@ func Defaults() Presets {
 // всегда: PR, меняющий файлы в нём, не проходит авто-merge (метаправило
 // «Защита от самоослабления»), пресетами не отключается.
 const PolicyDir = ".rivet/"
+
+// PolicyFile — файл политики проекта в репозитории (git-провайдер).
+const PolicyFile = PolicyDir + "policy.yaml"
+
+// Источники политики проекта (спека access-policy «Хранение политик»).
+const (
+	SourceStore = "store"
+	SourceGit   = "git"
+)
+
+// ParseOverrides разбирает файл политики проекта: YAML или JSON (YAML —
+// его надмножество). Набор полей и валидация те же, что у правки из
+// консоли: два источника не должны расходиться в том, что вообще можно
+// задать.
+func ParseOverrides(raw []byte) (Overrides, error) {
+	var o Overrides
+	// Строгий разбор: опечатка в имени ключа (auto_merges вместо
+	// auto_merge) должна быть видимой ошибкой, а не молча проигнорированным
+	// полем — иначе автор думает, что политика изменилась, а она нет.
+	if err := yaml.UnmarshalStrict(raw, &o); err != nil {
+		return Overrides{}, fmt.Errorf("%w: файл политики не разбирается: %v", ErrInvalid, err)
+	}
+	if err := o.Validate(); err != nil {
+		return Overrides{}, err
+	}
+	return o, nil
+}
 
 // ErrInvalid — документ не проходит валидацию.
 var ErrInvalid = errors.New("некорректная политика")

@@ -28,13 +28,15 @@ func (s *Store) CreateProject(ctx context.Context, name, repo string, checks []d
 
 // projectCols — колонки проекта в порядке scanProject.
 const projectCols = `id, name, checks, provider, base_url, repo_path, default_branch,
-	COALESCE(credential_id::text,''), COALESCE(webhook_secret,''), webhook_registered, created_at`
+	COALESCE(credential_id::text,''), COALESCE(webhook_secret,''), webhook_registered,
+	policy_source, policy_file_id, created_at`
 
 func scanProject(row pgx.Row) (domain.Project, error) {
 	var p domain.Project
 	var raw []byte
 	if err := row.Scan(&p.ID, &p.Name, &raw, &p.Provider, &p.BaseURL, &p.RepoPath,
-		&p.DefaultBranch, &p.CredentialID, &p.WebhookSecret, &p.WebhookRegistered, &p.Created); err != nil {
+		&p.DefaultBranch, &p.CredentialID, &p.WebhookSecret, &p.WebhookRegistered,
+		&p.PolicySource, &p.PolicyFileID, &p.Created); err != nil {
 		return p, err
 	}
 	return p, json.Unmarshal(raw, &p.Checks)
