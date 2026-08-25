@@ -16,12 +16,13 @@ import (
 // design implement-deployment). Инварианты очереди держит БД: partial
 // unique индексы «одна queued» и «одна активная» на окружение (0006).
 
-const envCols = `id::text, project_id::text, name, exec_type, trigger, config, paused, created_at`
+const envCols = `id::text, project_id::text, name, exec_type, trigger, config, paused, runner_caps, created_at`
 
 func scanEnv(row pgx.Row) (domain.Environment, error) {
 	var e domain.Environment
 	var cfg []byte
-	if err := row.Scan(&e.ID, &e.ProjectID, &e.Name, &e.ExecType, &e.Trigger, &cfg, &e.Paused, &e.Created); err != nil {
+	if err := row.Scan(&e.ID, &e.ProjectID, &e.Name, &e.ExecType, &e.Trigger, &cfg,
+		&e.Paused, &e.RunnerCaps, &e.Created); err != nil {
 		return e, err
 	}
 	return e, json.Unmarshal(cfg, &e.Config)
@@ -39,6 +40,14 @@ func scanDeployment(row pgx.Row) (domain.Deployment, error) {
 	return d, err
 }
 
+// orEmptyCaps — пустой список вместо nil: колонка NOT NULL.
+func orEmptyCaps(caps []string) []string {
+	if caps == nil {
+		return []string{}
+	}
+	return caps
+}
+
 // CreateEnvironment создаёт окружение; дубль имени в проекте — ErrConflict.
 func (s *Store) CreateEnvironment(ctx context.Context, e domain.Environment) (domain.Environment, error) {
 	cfg, err := json.Marshal(e.Config)
@@ -46,10 +55,10 @@ func (s *Store) CreateEnvironment(ctx context.Context, e domain.Environment) (do
 		return e, err
 	}
 	out, err := scanEnv(s.Pool.QueryRow(ctx, `
-		INSERT INTO environments (project_id, name, exec_type, trigger, config)
-		VALUES ($1,$2,$3,$4,$5)
+		INSERT INTO environments (project_id, name, exec_type, trigger, config, runner_caps)
+		VALUES ($1,$2,$3,$4,$5,$6)
 		ON CONFLICT (project_id, name) DO NOTHING
-		RETURNING `+envCols, e.ProjectID, e.Name, e.ExecType, e.Trigger, cfg))
+		RETURNING `+envCols, e.ProjectID, e.Name, e.ExecType, e.Trigger, cfg, orEmptyCaps(e.RunnerCaps)))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return out, fmt.Errorf("окружение %q: %w", e.Name, ErrConflict)
 	}
@@ -64,12 +73,12 @@ func (s *Store) UpdateEnvironment(ctx context.Context, e domain.Environment) (do
 		return e, err
 	}
 	out, err := scanEnv(s.Pool.QueryRow(ctx, `
-		UPDATE environments SET name=$2, trigger=$3, config=$4
+		UPDATE environments SET name=$2, trigger=$3, config=$4, runner_caps=$5
 		WHERE id=$1
 		  AND NOT EXISTS (SELECT 1 FROM deployments d
 		                  WHERE d.env_id = environments.id
 		                    AND d.status IN ('queued','deploying','verifying'))
-		RETURNING `+envCols, e.ID, e.Name, e.Trigger, cfg))
+		RETURNING `+envCols, e.ID, e.Name, e.Trigger, cfg, orEmptyCaps(e.RunnerCaps)))
 	if isUnique(err) {
 		return out, fmt.Errorf("окружение %q: %w", e.Name, ErrConflict)
 	}
@@ -133,7 +142,7 @@ func (s *Store) EnvironmentForViewer(ctx context.Context, envID, viewerID string
 
 func envColsPrefixed(a string) string {
 	return a + `.id::text, ` + a + `.project_id::text, ` + a + `.name, ` + a + `.exec_type, ` +
-		a + `.trigger, ` + a + `.config, ` + a + `.paused, ` + a + `.created_at`
+		a + `.trigger, ` + a + `.config, ` + a + `.paused, ` + a + `.runner_caps, ` + a + `.created_at`
 }
 
 // ListEnvironments — окружения проекта по имени.
@@ -250,12 +259,16 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 			SELECT d.id, d.env_id, r.id
 			FROM deployments d
 			JOIN environments e ON e.id = d.env_id AND NOT e.paused
-				AND e.exec_type = 'ssh'
+				AND e.exec_type IN ('ssh','k8s')
 			JOIN LATERAL (
 				SELECT r.id FROM runners r
 				WHERE r.status = 'idle' AND NOT r.draining
 				  AND r.capabilities @> ARRAY['deploy']
-				ORDER BY r.last_seen DESC
+				  AND r.capabilities @> e.runner_caps
+				-- Сначала самый «узкий» подходящий runner: иначе обычная
+				-- публикация заняла бы runner с редкими capability, и
+				-- публикация, которой он нужен, ждала бы зря.
+				ORDER BY cardinality(r.capabilities), r.last_seen DESC
 				FOR UPDATE OF r SKIP LOCKED
 				LIMIT 1
 			) r ON true
@@ -500,7 +513,7 @@ func (s *Store) FailDeployment(ctx context.Context, depID, runnerID, status, det
 // TimedOutDeployments — активные публикации старше дедлайна (watchdog):
 // runner жив, но джоба зависла или результат потерян.
 func (s *Store) TimedOutDeployments(ctx context.Context, olderThan time.Duration) ([]string, error) {
-	return s.timedOutDeployments(ctx, olderThan, "ssh")
+	return s.timedOutDeployments(ctx, olderThan, "ssh", "k8s")
 }
 
 // TimedOutExternalDeployments — зависшие публикации внешних окружений:
@@ -510,13 +523,13 @@ func (s *Store) TimedOutExternalDeployments(ctx context.Context, olderThan time.
 	return s.timedOutDeployments(ctx, olderThan, "pipeline")
 }
 
-func (s *Store) timedOutDeployments(ctx context.Context, olderThan time.Duration, execType string) ([]string, error) {
+func (s *Store) timedOutDeployments(ctx context.Context, olderThan time.Duration, execTypes ...string) ([]string, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT d.id FROM deployments d
-		JOIN environments e ON e.id = d.env_id AND e.exec_type = $2
+		JOIN environments e ON e.id = d.env_id AND e.exec_type = ANY($2)
 		WHERE d.status IN ('deploying','verifying')
 		  AND d.started_at < now() - make_interval(secs => $1)`,
-		int(olderThan.Seconds()), execType)
+		int(olderThan.Seconds()), execTypes)
 	if err != nil {
 		return nil, err
 	}

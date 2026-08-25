@@ -25,15 +25,19 @@ func (f *Fake) Diff(ctx context.Context, repo string, number int) (string, error
 	return "diff --git a/e2e b/e2e\n+e2e", nil
 }
 
-// Merge — no-op; sha синтетический, но стабильный по номеру PR
-// (auto-публикации в e2e получают осмысленную «версию»).
+// Merge — no-op: настоящего merge-коммита нет, поэтому версией служит
+// базовая ветка. Она существует в репозитории стенда, и доставка, которой
+// нужна рабочая копия версии (Kubernetes), на стенде работает.
 func (f *Fake) Merge(ctx context.Context, repo string, number int) (string, error) {
-	return fmt.Sprintf("fake-merge-%04d", number), nil
+	return "main", nil
 }
 
-// HeadSHA — синтетический sha «вершины» ветки (растёт с каждым запросом).
+// HeadSHA — «вершина» ветки: для стенда это сама ветка (см. Merge).
 func (f *Fake) HeadSHA(ctx context.Context, repo, branch string) (string, error) {
-	return fmt.Sprintf("fake-head-%04d", f.seq.Add(1)), nil
+	if branch == "" {
+		return "main", nil
+	}
+	return branch, nil
 }
 
 // Probe в fake-режиме всегда успешен: стенд не ходит на хостинг.

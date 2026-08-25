@@ -4,6 +4,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -12,6 +13,9 @@ import (
 )
 
 // environmentView — DTO Environment контракта.
+// capRe — имя capability runner'а.
+var capRe = regexp.MustCompile(`^[a-zA-Z0-9-]{1,40}$`)
+
 type environmentView struct {
 	ID             string           `json:"id"`
 	ProjectID      string           `json:"project_id"`
@@ -20,6 +24,7 @@ type environmentView struct {
 	Trigger        string           `json:"trigger"`
 	Config         domain.EnvConfig `json:"config"`
 	Paused         bool             `json:"paused"`
+	RunnerCaps     []string         `json:"runner_caps"`
 	LastDeployment *deploymentView  `json:"last_deployment"`
 	CreatedAt      time.Time        `json:"created_at"`
 }
@@ -56,7 +61,8 @@ func deploymentDTO(d domain.Deployment) deploymentView {
 func (s *Server) environmentDTO(r *http.Request, e domain.Environment) environmentView {
 	v := environmentView{
 		ID: e.ID, ProjectID: e.ProjectID, Name: e.Name, ExecType: e.ExecType,
-		Trigger: e.Trigger, Config: e.Config, Paused: e.Paused, CreatedAt: e.Created,
+		Trigger: e.Trigger, Config: e.Config, Paused: e.Paused,
+		RunnerCaps: e.RunnerCaps, CreatedAt: e.Created,
 	}
 	if d, err := s.St.LastDeployment(r.Context(), e.ID); err == nil {
 		dto := deploymentDTO(d)
@@ -70,6 +76,8 @@ type environmentInput struct {
 	ExecType string           `json:"exec_type"`
 	Trigger  string           `json:"trigger"`
 	Config   domain.EnvConfig `json:"config"`
+	// RunnerCaps — требуемые capability runner'а публикации помимо deploy.
+	RunnerCaps []string `json:"runner_caps"`
 }
 
 // execType — тип исполнения окружения; пустой считается ssh (поведение до
@@ -86,11 +94,18 @@ func (in environmentInput) validate() string {
 	if in.Name == "" {
 		return "нужно имя окружения"
 	}
-	if in.ExecType != "" && in.ExecType != domain.ExecSSH && in.ExecType != domain.ExecPipeline {
-		return "exec_type: ожидается ssh или pipeline"
+	switch in.execType() {
+	case domain.ExecSSH, domain.ExecPipeline, domain.ExecK8s:
+	default:
+		return "exec_type: ожидается ssh, k8s или pipeline"
 	}
 	if in.Trigger != "auto" && in.Trigger != "manual" {
 		return "trigger: ожидается auto или manual"
+	}
+	for _, c := range in.RunnerCaps {
+		if !capRe.MatchString(c) {
+			return "runner_caps: ожидаются имена capability (латиница, цифры, дефис)"
+		}
 	}
 	if err := in.Config.Validate(in.execType()); err != nil {
 		return err.Error()
@@ -135,7 +150,7 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 	}
 	env, err := s.St.CreateEnvironment(r.Context(), domain.Environment{
 		ProjectID: r.PathValue("id"), Name: in.Name, ExecType: in.execType(),
-		Trigger: in.Trigger, Config: in.Config,
+		Trigger: in.Trigger, Config: in.Config, RunnerCaps: in.RunnerCaps,
 	})
 	if err != nil {
 		writeErr(w, err)
@@ -158,9 +173,10 @@ func (s *Server) patchEnvironment(w http.ResponseWriter, r *http.Request) {
 	// config заменяется целиком (контракт: replace, не merge) — указатели
 	// отличают «поле не прислали» от «прислали новое значение».
 	var in struct {
-		Name    *string           `json:"name"`
-		Trigger *string           `json:"trigger"`
-		Config  *domain.EnvConfig `json:"config"`
+		Name       *string           `json:"name"`
+		Trigger    *string           `json:"trigger"`
+		Config     *domain.EnvConfig `json:"config"`
+		RunnerCaps *[]string         `json:"runner_caps"`
 	}
 	if err := decode(r, &in); err != nil {
 		unprocessable(w, "невалидный JSON")
@@ -179,7 +195,11 @@ func (s *Server) patchEnvironment(w http.ResponseWriter, r *http.Request) {
 		// проверкой и записью закрыто (ответ 409).
 		env.Config = *in.Config
 	}
-	full := environmentInput{Name: env.Name, ExecType: env.ExecType, Trigger: env.Trigger, Config: env.Config}
+	if in.RunnerCaps != nil {
+		env.RunnerCaps = *in.RunnerCaps
+	}
+	full := environmentInput{Name: env.Name, ExecType: env.ExecType, Trigger: env.Trigger,
+		Config: env.Config, RunnerCaps: env.RunnerCaps}
 	if msg := full.validate(); msg != "" {
 		unprocessable(w, msg)
 		return

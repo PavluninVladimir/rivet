@@ -1742,18 +1742,25 @@ func (x *PauseRunner) GetDrain() bool {
 // локально при пустом host. Откат — та же джоба с rollback=true и
 // version=prev (деплой идемпотентен по версии).
 type DeployJob struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DeploymentId  string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
-	EnvName       string                 `protobuf:"bytes,2,opt,name=env_name,json=envName,proto3" json:"env_name,omitempty"`
-	Repo          string                 `protobuf:"bytes,3,opt,name=repo,proto3" json:"repo,omitempty"`       // owner/name
-	Version       string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"` // sha публикуемого коммита
-	PrevVersion   string                 `protobuf:"bytes,5,opt,name=prev_version,json=prevVersion,proto3" json:"prev_version,omitempty"`
-	Rollback      bool                   `protobuf:"varint,6,opt,name=rollback,proto3" json:"rollback,omitempty"`
-	Host          string                 `protobuf:"bytes,7,opt,name=host,proto3" json:"host,omitempty"` // [user@]hostname[:port]; пусто — локальное исполнение
-	DeployCmd     string                 `protobuf:"bytes,8,opt,name=deploy_cmd,json=deployCmd,proto3" json:"deploy_cmd,omitempty"`
-	VerifyCmd     string                 `protobuf:"bytes,9,opt,name=verify_cmd,json=verifyCmd,proto3" json:"verify_cmd,omitempty"`
-	VerifyUrl     string                 `protobuf:"bytes,10,opt,name=verify_url,json=verifyUrl,proto3" json:"verify_url,omitempty"`
-	TimeoutS      int32                  `protobuf:"varint,11,opt,name=timeout_s,json=timeoutS,proto3" json:"timeout_s,omitempty"` // дедлайн джобы на runner'е
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	DeploymentId string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
+	EnvName      string                 `protobuf:"bytes,2,opt,name=env_name,json=envName,proto3" json:"env_name,omitempty"`
+	Repo         string                 `protobuf:"bytes,3,opt,name=repo,proto3" json:"repo,omitempty"`       // owner/name
+	Version      string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"` // sha публикуемого коммита
+	PrevVersion  string                 `protobuf:"bytes,5,opt,name=prev_version,json=prevVersion,proto3" json:"prev_version,omitempty"`
+	Rollback     bool                   `protobuf:"varint,6,opt,name=rollback,proto3" json:"rollback,omitempty"`
+	Host         string                 `protobuf:"bytes,7,opt,name=host,proto3" json:"host,omitempty"` // [user@]hostname[:port]; пусто — локальное исполнение
+	DeployCmd    string                 `protobuf:"bytes,8,opt,name=deploy_cmd,json=deployCmd,proto3" json:"deploy_cmd,omitempty"`
+	VerifyCmd    string                 `protobuf:"bytes,9,opt,name=verify_cmd,json=verifyCmd,proto3" json:"verify_cmd,omitempty"`
+	VerifyUrl    string                 `protobuf:"bytes,10,opt,name=verify_url,json=verifyUrl,proto3" json:"verify_url,omitempty"`
+	TimeoutS     int32                  `protobuf:"varint,11,opt,name=timeout_s,json=timeoutS,proto3" json:"timeout_s,omitempty"` // дедлайн джобы на runner'е
+	// Рабочая копия репозитория на версии публикации: нужна доставке,
+	// которая применяет файлы репозитория (манифесты Kubernetes, чарт).
+	// Пустой repo_url — команды исполняются в рабочем каталоге runner'а,
+	// как у доставки на Linux-хост.
+	Checkout      bool   `protobuf:"varint,12,opt,name=checkout,proto3" json:"checkout,omitempty"`
+	RepoUrl       string `protobuf:"bytes,13,opt,name=repo_url,json=repoUrl,proto3" json:"repo_url,omitempty"`
+	GitToken      string `protobuf:"bytes,14,opt,name=git_token,json=gitToken,proto3" json:"git_token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1863,6 +1870,27 @@ func (x *DeployJob) GetTimeoutS() int32 {
 		return x.TimeoutS
 	}
 	return 0
+}
+
+func (x *DeployJob) GetCheckout() bool {
+	if x != nil {
+		return x.Checkout
+	}
+	return false
+}
+
+func (x *DeployJob) GetRepoUrl() string {
+	if x != nil {
+		return x.RepoUrl
+	}
+	return ""
+}
+
+func (x *DeployJob) GetGitToken() string {
+	if x != nil {
+		return x.GitToken
+	}
+	return ""
 }
 
 // DeployResult — итог этапа публикации; чужой/stale deployment_id
@@ -2097,7 +2125,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"CancelTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\"#\n" +
 	"\vPauseRunner\x12\x14\n" +
-	"\x05drain\x18\x01 \x01(\bR\x05drain\"\xc6\x02\n" +
+	"\x05drain\x18\x01 \x01(\bR\x05drain\"\x9a\x03\n" +
 	"\tDeployJob\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12\x19\n" +
 	"\benv_name\x18\x02 \x01(\tR\aenvName\x12\x12\n" +
@@ -2113,7 +2141,10 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\n" +
 	"verify_url\x18\n" +
 	" \x01(\tR\tverifyUrl\x12\x1b\n" +
-	"\ttimeout_s\x18\v \x01(\x05R\btimeoutS\"\xe3\x01\n" +
+	"\ttimeout_s\x18\v \x01(\x05R\btimeoutS\x12\x1a\n" +
+	"\bcheckout\x18\f \x01(\bR\bcheckout\x12\x19\n" +
+	"\brepo_url\x18\r \x01(\tR\arepoUrl\x12\x1b\n" +
+	"\tgit_token\x18\x0e \x01(\tR\bgitToken\"\xe3\x01\n" +
 	"\fDeployResult\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x122\n" +
 	"\x05stage\x18\x02 \x01(\x0e2\x1c.rivet.v1.DeployResult.StageR\x05stage\x12\x0e\n" +
