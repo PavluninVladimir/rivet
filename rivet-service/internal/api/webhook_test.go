@@ -556,4 +556,11 @@ func TestWebhookGitLabNoteFromForeignMR(t *testing.T) {
 	if s := bodyStatus(t, resp); s != "ignored" {
 		t.Fatalf("комментарий чужого MR должен игнорироваться: %s", s)
 	}
+	// Ответ «ignored» сам по себе не доказывает, что конвейер не тронут.
+	if got := f.taskStatus(t); got != domain.TaskReview {
+		t.Fatalf("состояние не должно меняться: %s", got)
+	}
+	if evs := f.events(t, "task.review_external"); len(evs) != 0 {
+		t.Fatalf("событие чужого MR не должно записываться: %+v", evs)
+	}
 }
