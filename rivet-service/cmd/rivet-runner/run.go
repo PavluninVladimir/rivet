@@ -26,7 +26,13 @@ func run(args []string) error {
 	fs.StringVar(&cfg.AgentCmd, "cmd", envDef("RIVET_AGENT_CMD", runner.DefaultAgentCmd),
 		"команда агента для обёртки; путь к промпту приходит в $RIVET_PROMPT_FILE")
 	fs.StringVar(&cfg.Adapter, "adapter", os.Getenv("RIVET_ADAPTER"),
-		"адаптер агента: claude-code (нативный, полная глубина) или wrap (обёртка); пусто — по агенту")
+		"адаптер агента: claude-code (нативный), wrap (обёртка) или external (своя программа по контракту pkg/adapter); пусто — по агенту")
+	fs.StringVar(&cfg.AdapterCmd, "adapter-cmd", os.Getenv("RIVET_ADAPTER_CMD"),
+		"команда внешнего адаптера: задание стадии приходит ему на stdin, события — построчным JSON на stdout")
+	fs.StringVar(&cfg.AdapterDepth, "adapter-depth", envDef("RIVET_ADAPTER_DEPTH", "minimal"),
+		"глубина данных внешнего адаптера: full, partial или minimal")
+	fs.BoolVar(&cfg.AdapterContext, "adapter-context", os.Getenv("RIVET_ADAPTER_CONTEXT") == "1",
+		"внешний адаптер принимает контекст от Rivet (обратный канал)")
 	fs.StringVar(&cfg.ClaudeBin, "claude-bin", envDef("RIVET_CLAUDE_BIN", "claude"),
 		"бинарник Claude Code для нативного адаптера")
 	caps := fs.String("caps", envDef("RIVET_CAPS", "coding"), "capabilities через запятую")
@@ -40,8 +46,18 @@ func run(args []string) error {
 	case "":
 		cfg.Adapter = runner.DefaultAdapter(cfg.Agent, cfg.AgentCmd)
 	case runner.AdapterWrap, runner.AdapterClaudeCode:
+	case runner.AdapterExternal:
+		if strings.TrimSpace(cfg.AdapterCmd) == "" {
+			return fmt.Errorf("внешний адаптер требует -adapter-cmd")
+		}
+		switch cfg.AdapterDepth {
+		case "full", "partial", "minimal":
+		default:
+			return fmt.Errorf("неизвестная глубина адаптера %q: ожидается full, partial или minimal", cfg.AdapterDepth)
+		}
 	default:
-		return fmt.Errorf("неизвестный адаптер %q: ожидается %s или %s", cfg.Adapter, runner.AdapterClaudeCode, runner.AdapterWrap)
+		return fmt.Errorf("неизвестный адаптер %q: ожидается %s, %s или %s",
+			cfg.Adapter, runner.AdapterClaudeCode, runner.AdapterWrap, runner.AdapterExternal)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

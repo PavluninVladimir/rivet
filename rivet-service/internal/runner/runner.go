@@ -54,6 +54,12 @@ type Config struct {
 	// ClaudeBin — бинарник Claude Code для нативного адаптера (подмена в
 	// тестах и на стендах); пусто — «claude» из PATH.
 	ClaudeBin string
+	// AdapterCmd — команда внешнего адаптера (спека agent-integration
+	// «Открытый SDK адаптеров»); AdapterDepth — глубина данных, которую он
+	// даёт; AdapterContext — принимает ли он контекст от Rivet.
+	AdapterCmd     string
+	AdapterDepth   string
+	AdapterContext bool
 }
 
 func Run(ctx context.Context, cfg Config) error {
@@ -132,8 +138,8 @@ func (a *agent) session(ctx context.Context) error {
 	reg, err := a.client.Register(ctx, &pb.RegisterRequest{
 		RunnerId: a.cfg.ID, Agent: a.cfg.Agent, Model: a.cfg.Model,
 		Host: hostname(), Capabilities: a.cfg.Capabilities, ProtocolVersion: protocolVersion,
-		Adapter: a.cfg.Adapter, Depth: depthOf(a.cfg.Adapter),
-		ContextChannel: contextChannelOf(a.cfg.Adapter),
+		Adapter: a.cfg.Adapter, Depth: a.cfg.depth(),
+		ContextChannel: a.cfg.contextChannel(),
 	})
 	if err != nil {
 		return err
