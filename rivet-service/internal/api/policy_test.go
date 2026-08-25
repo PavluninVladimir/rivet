@@ -315,3 +315,21 @@ func TestProjectPolicySource(t *testing.T) {
 		map[string]any{"auto_merge": true})
 	mustStatus(t, resp, http.StatusOK, "правка после возврата")
 }
+
+// Правка политики несуществующего проекта отклоняется 404 ещё на проверке
+// роли. Сам отказ при ошибке чтения проекта внутри обработчика (обход
+// запрета «политика из репозитория меняется коммитом», ретро-ревью)
+// кодом выражен явно: GetProject → writeErr, без ветки «err == nil».
+func TestProjectPolicyWriteUnknownProject(t *testing.T) {
+	ctx := context.Background()
+	st, srv := testServer(t)
+	if err := st.Bootstrap(ctx, "root", "root-secret"); err != nil {
+		t.Fatal(err)
+	}
+	root := loginSession(t, srv, "root", "root-secret")
+	resp, _ := call(t, "PUT", srv.URL+"/api/v1/projects/00000000-0000-0000-0000-000000000000/policy",
+		root, "", map[string]any{"auto_merge": true})
+	// Ровно 404 от чтения проекта: любой другой код означал бы, что проверка
+	// источника пропущена или упала по пути.
+	mustStatus(t, resp, http.StatusNotFound, "правка политики несуществующего проекта")
+}

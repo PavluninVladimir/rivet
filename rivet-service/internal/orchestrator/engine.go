@@ -66,8 +66,11 @@ type Engine struct {
 	// факт; повтор после рестарта допустим (спека orchestration «Бюджет Epic»).
 	epicBudgetNotified map[string]bool
 	// policySyncedAt — когда последний раз читалась политика проектов из
-	// репозитория (git-провайдер).
+	// репозитория (git-провайдер); policyBroken — по каким проектам и с
+	// какой причиной уже написано, что файл политики сломан (событие раз
+	// на причину, а не каждую минуту; повтор после рестарта допустим).
 	policySyncedAt time.Time
+	policyBroken   map[string]string
 	// externalPolled — когда в последний раз опрашивался прогон внешней
 	// публикации: тик идёт секундами, пайплайны — минутами.
 	externalPolled map[string]time.Time
@@ -95,6 +98,7 @@ func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, hear
 		epicBudgetNotified: map[string]bool{},
 		policyDown:         map[string]bool{},
 		externalPolled:     map[string]time.Time{},
+		policyBroken:       map[string]string{},
 		Now:                time.Now,
 	}
 }

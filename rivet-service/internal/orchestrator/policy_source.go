@@ -37,6 +37,19 @@ func (e *Engine) syncGitPolicies(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Память о поломках держится только по живым git-проектам: удалённый
+	// проект или проект, вернувшийся к хранилищу, из неё уходит.
+	alive := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		alive[p.ID] = true
+	}
+	e.mu.Lock()
+	for id := range e.policyBroken {
+		if !alive[id] {
+			delete(e.policyBroken, id)
+		}
+	}
+	e.mu.Unlock()
 	for _, p := range projects {
 		if err := e.syncProjectPolicy(ctx, p); err != nil {
 			slog.Error("политика из репозитория", "project", p.ID, "err", err)
@@ -66,9 +79,11 @@ func (e *Engine) syncProjectPolicy(ctx context.Context, p domain.Project) error 
 		// действует последняя версия.
 		return err
 	}
-	// Содержимое не менялось — новой версии не нужно.
+	// Содержимое не менялось — новой версии не нужно, но эскалация
+	// «политика сломана» могла остаться от прошлого прохода, если её не
+	// удалось снять: снимаем ещё раз.
 	if file.FileID != "" && file.FileID == p.PolicyFileID {
-		return nil
+		return e.policySourceHealthy(ctx, p)
 	}
 	overrides, err := policy.ParseOverrides([]byte(file.Content))
 	if err != nil {
@@ -83,28 +98,51 @@ func (e *Engine) syncProjectPolicy(ctx context.Context, p domain.Project) error 
 		return err
 	}
 	if eff.Project != nil && eff.Project.Hash == policy.Hash(overrides) {
-		if err := e.St.SetProjectPolicyFileID(ctx, p.ID, file.FileID); err != nil {
+		if _, err := e.St.SetProjectPolicyFileID(ctx, p.ID, file.FileID); err != nil {
 			return err
 		}
-		return e.St.ResolveProjectEscalation(ctx, p.ID, domain.AttPolicySource)
+		return e.policySourceHealthy(ctx, p)
 	}
 	author := "git"
 	if file.FileID != "" {
 		author = "git:" + shortID(file.FileID)
 	}
-	if _, err := e.St.SaveProjectPolicy(ctx, p.ID, overrides, author); err != nil {
+	// Версия и идентификатор файла — одной транзакцией и только пока
+	// источник — git: сбой между ними плодил бы дубликаты версий, а
+	// переключение источника во время чтения — версию не из того источника.
+	if _, err := e.St.SaveProjectPolicyFromGit(ctx, p.ID, overrides, file.FileID, author); err != nil {
 		return err
 	}
-	if err := e.St.SetProjectPolicyFileID(ctx, p.ID, file.FileID); err != nil {
+	return e.policySourceHealthy(ctx, p)
+}
+
+// policySourceHealthy — файл политики валиден и применён: эскалация
+// «политика сломана» снимается, память о поломке сбрасывается, чтобы
+// следующая поломка снова дала событие. Сброс только здесь: проход,
+// закончившийся записью поломки, успехом не считается, даже если сама
+// запись прошла без ошибки.
+func (e *Engine) policySourceHealthy(ctx context.Context, p domain.Project) error {
+	if err := e.St.ResolveProjectEscalation(ctx, p.ID, domain.AttPolicySource); err != nil {
 		return err
 	}
-	// Файл снова читается — эскалация «политика сломана» больше не нужна.
-	return e.St.ResolveProjectEscalation(ctx, p.ID, domain.AttPolicySource)
+	e.mu.Lock()
+	delete(e.policyBroken, p.ID)
+	e.mu.Unlock()
+	return nil
 }
 
 // policySourceBroken фиксирует, что файл политики не применить: событие и
 // одна открытая эскалация на проект. Версия политики остаётся прежней.
+// Событие пишется один раз на причину: файл, который сломан неделю,
+// не должен давать запись в ленту каждую минуту.
 func (e *Engine) policySourceBroken(ctx context.Context, p domain.Project, ref, detail string) error {
+	e.mu.Lock()
+	seen := e.policyBroken[p.ID] == detail
+	e.mu.Unlock()
+	msg := "политика проекта в репозитории не применяется: " + detail
+	if seen {
+		return e.St.EscalateProjectOnce(ctx, p.ID, domain.AttPolicySource, msg)
+	}
 	if _, err := e.St.AppendEvent(ctx, store.EventInput{
 		ActorKind: domain.ActorSystem, Type: "policy.sync_failed", ProjectID: p.ID,
 		Text:    "политика из репозитория не применена: " + detail + " — действует последняя валидная версия",
@@ -112,6 +150,11 @@ func (e *Engine) policySourceBroken(ctx context.Context, p domain.Project, ref, 
 	}); err != nil {
 		return err
 	}
-	return e.St.EscalateProjectOnce(ctx, p.ID, domain.AttPolicySource,
-		"политика проекта в репозитории не применяется: "+detail)
+	// Причина запоминается только после записи события: иначе сбой
+	// записи потерял бы событие навсегда — следующий проход счёл бы его
+	// уже написанным.
+	e.mu.Lock()
+	e.policyBroken[p.ID] = detail
+	e.mu.Unlock()
+	return e.St.EscalateProjectOnce(ctx, p.ID, domain.AttPolicySource, msg)
 }
