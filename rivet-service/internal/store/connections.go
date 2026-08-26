@@ -327,9 +327,13 @@ func (s *Store) ConnectionRefs(ctx context.Context, id string) ([]Ref, error) {
 
 func (s *Store) DeleteConnection(ctx context.Context, id, actorLogin string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		// Ссылки читаются под блокировкой настройки: параллельный выбор этого
-		// подключения планировщиком не проскочит между проверкой и удалением.
-		pm, ok, err := plannerModelTx(ctx, tx, true)
+		// Ссылки читаются под общей блокировкой настройки планировщика:
+		// параллельный выбор этого подключения не проскочит между проверкой и
+		// удалением, а порядок захвата один у всех писателей (нет deadlock).
+		if err := lockPlanner(ctx, tx); err != nil {
+			return err
+		}
+		pm, ok, err := plannerModelTx(ctx, tx, false)
 		if err != nil {
 			return err
 		}
@@ -436,6 +440,9 @@ func (s *Store) SetConnectionModels(ctx context.Context, id string, models []dom
 	}
 	var out domain.ModelConnection
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := lockPlanner(ctx, tx); err != nil {
+			return err
+		}
 		var raw []byte
 		if err := tx.QueryRow(ctx, `SELECT models FROM model_connections WHERE id=$1 FOR UPDATE`, id).Scan(&raw); err != nil {
 			return nf(err)
@@ -547,6 +554,14 @@ type querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// lockPlanner — транзакционная advisory-блокировка настройки планировщика:
+// один порядок захвата у удаления подключения, правки списка моделей и
+// выбора модели, независимо от того, есть ли строка настройки.
+func lockPlanner(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext('planner_model'))`)
+	return err
+}
+
 // plannerModelTx читает настройку; lock — с блокировкой строки внутри транзакции.
 func plannerModelTx(ctx context.Context, q querier, lock bool) (domain.PlannerModel, bool, error) {
 	sql := `SELECT value FROM installation_settings WHERE key='planner_model'`
@@ -575,6 +590,9 @@ func (s *Store) SetPlannerModel(ctx context.Context, pm *domain.PlannerModel, ac
 		return &FieldError{Field: "model", Msg: "укажите подключение и модель"}
 	}
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := lockPlanner(ctx, tx); err != nil {
+			return err
+		}
 		if pm != nil {
 			// Строка подключения под разделяемой блокировкой: параллельная
 			// правка списка или удаление дождётся записи настройки.
