@@ -31,27 +31,34 @@ func (s *Server) ReloadPlanner(ctx context.Context) error {
 	if s.Planner == nil {
 		s.Planner = &planner.Holder{}
 	}
-	p, key, err := s.St.ActiveLLMProvider(ctx, s.Secrets)
-	switch {
-	case err == nil:
-		pl, berr := planner.Build(p.Provider, key, p.Model)
-		if berr != nil {
-			return berr
+	pm, ok, err := s.St.PlannerModel(ctx)
+	if err != nil {
+		return err
+	}
+	if ok {
+		cl, c, err := s.St.ConnectionClient(ctx, pm.ConnectionID, s.Secrets)
+		st := planner.Status{Source: planner.SourceCatalog, ConnectionID: pm.ConnectionID, Model: pm.Model}
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			st.State, st.Detail = "invalid", "подключение "+pm.ConnectionID+" удалено"
+			s.Planner.Set(nil, st)
+		case errors.Is(err, store.ErrSecret), errors.Is(err, secretbox.ErrNoKey):
+			// Ключ в базе есть, но его не расшифровать (сменили или сняли
+			// RIVET_SECRET_KEY): декомпозиция отказывает с причиной, а не падает.
+			st.State, st.Detail = "invalid", err.Error()
+			s.Planner.Set(nil, st)
+		case err != nil:
+			return err
+		case !c.Enabled:
+			st.State, st.Detail = "invalid", "подключение "+c.ID+" отключено"
+			s.Planner.Set(nil, st)
+		case c.State == domain.LLMStateInvalid:
+			st.State, st.Detail = "invalid", "ключ подключения "+c.ID+" отклонён: "+c.CheckDetail
+			s.Planner.Set(nil, st)
+		default:
+			st.State, st.Detail = string(c.State), c.CheckDetail
+			s.Planner.Set(planner.FromClient(cl, pm.Model), st)
 		}
-		model := p.Model
-		if model == "" {
-			model = planner.DefaultModel(p.Provider)
-		}
-		s.Planner.Set(pl, planner.Status{
-			Source: planner.SourceDB, Provider: p.Provider, Model: model,
-			State: string(p.State), Detail: p.CheckDetail,
-		})
-		return nil
-	case errors.Is(err, store.ErrNotFound):
-	default:
-		// Ключ в базе есть, но его не расшифровать (сменили RIVET_SECRET_KEY):
-		// декомпозиция отказывает с причиной, а не падает.
-		s.Planner.Set(nil, planner.Status{Source: planner.SourceDB, State: "invalid", Detail: err.Error()})
 		return nil
 	}
 	if s.EnvPlanner.Provider != "" && s.EnvPlanner.Key != "" {
@@ -63,7 +70,7 @@ func (s *Server) ReloadPlanner(ctx context.Context) error {
 		if model == "" {
 			model = planner.DefaultModel(s.EnvPlanner.Provider)
 		}
-		s.Planner.Set(pl, planner.Status{Source: planner.SourceEnv, Provider: s.EnvPlanner.Provider, Model: model, State: "unchecked"})
+		s.Planner.Set(pl, planner.Status{Source: planner.SourceEnv, ConnectionID: s.EnvPlanner.Provider, Model: model, State: "unchecked"})
 		return nil
 	}
 	s.Planner.Set(nil, planner.Status{Source: planner.SourceNone, State: "unchecked"})
@@ -128,16 +135,16 @@ func (s *Server) systemStatus(w http.ResponseWriter, r *http.Request) {
 
 	pl := componentView{Name: "planner", Status: "ok"}
 	_, st := s.plannerStatus()
-	pl.Data = map[string]any{"source": string(st.Source), "provider": st.Provider, "model": st.Model}
+	pl.Data = map[string]any{"source": string(st.Source), "connection_id": st.ConnectionID, "model": st.Model}
 	switch {
 	case st.Source == planner.SourceNone:
 		pl.Status, pl.Detail = "degraded", "модель для декомпозиции не настроена"
 	case st.State == string(domain.LLMStateInvalid):
-		pl.Status, pl.Detail = "degraded", "ключ модели отклонён провайдером: "+st.Detail
+		pl.Status, pl.Detail = "degraded", "модель декомпозиции недоступна: "+st.Detail
 	case st.Source == planner.SourceEnv:
-		pl.Detail = "модель из окружения установки (" + st.Provider + ")"
+		pl.Detail = "модель из окружения установки (" + st.ConnectionID + ")"
 	default:
-		pl.Detail = "модель настроена (" + st.Provider + ")"
+		pl.Detail = "модель из каталога (" + st.ConnectionID + "/" + st.Model + ")"
 	}
 	comps = append(comps, pl)
 
@@ -266,159 +273,6 @@ func (s *Server) revokeRunnerToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.St.RevokeRunnerToken(r.Context(), r.PathValue("id"), currentUser(r).Login); err != nil {
-		writeErr(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// ─── провайдеры модели ────────────────────────────────────────────────────
-
-type llmProviderView struct {
-	Provider    string     `json:"provider"`
-	KeyPrefix   string     `json:"key_prefix"`
-	Model       string     `json:"model"`
-	Active      bool       `json:"active"`
-	State       string     `json:"state"`
-	CheckedAt   *time.Time `json:"checked_at"`
-	CheckDetail string     `json:"check_detail"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	UpdatedBy   string     `json:"updated_by"`
-}
-
-func llmDTO(p domain.LLMProvider) llmProviderView {
-	return llmProviderView{
-		Provider: p.Provider, KeyPrefix: p.KeyPrefix, Model: p.Model, Active: p.Active,
-		State: string(p.State), CheckedAt: p.CheckedAt, CheckDetail: p.CheckDetail,
-		UpdatedAt: p.UpdatedAt, UpdatedBy: p.UpdatedBy,
-	}
-}
-
-func (s *Server) listModels(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	list, err := s.St.ListLLMProviders(r.Context())
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	out := make([]llmProviderView, 0, len(list))
-	for _, p := range list {
-		out = append(out, llmDTO(p))
-	}
-	_, st := s.plannerStatus()
-	writeJSON(w, http.StatusOK, map[string]any{"source": string(st.Source), "providers": out})
-}
-
-// probeKey переводит результат проверки в состояние (design: сеть ≠ отказ).
-func probeKey(ctx context.Context, provider, key string) (domain.LLMProviderState, string) {
-	// Probe — вызов внешнего провайдера; в тестах подменяется.
-	err := probe(ctx, provider, key)
-	switch {
-	case err == nil:
-		return domain.LLMStateOK, ""
-	case errors.Is(err, planner.ErrKeyRejected):
-		return domain.LLMStateInvalid, err.Error()
-	default:
-		return domain.LLMStateUnchecked, "проверка не дошла до провайдера: " + err.Error()
-	}
-}
-
-var probe = planner.Probe
-
-func (s *Server) noSecretKey(w http.ResponseWriter) {
-	writeJSON(w, http.StatusServiceUnavailable, map[string]apiError{"error": {
-		Code: "no_secret_key", Message: "ключ шифрования не настроен: ключ модели не сохранить"}})
-}
-
-func (s *Server) putModel(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	var in struct {
-		Key    *string `json:"key"`
-		Model  *string `json:"model"`
-		Active *bool   `json:"active"`
-	}
-	if err := decode(r, &in); err != nil || (in.Key == nil && in.Model == nil && in.Active == nil) {
-		unprocessable(w, "нужно хотя бы одно поле: key, model, active")
-		return
-	}
-	if in.Key != nil && *in.Key == "" {
-		unprocessable(w, "ключ не может быть пустым")
-		return
-	}
-	if in.Key != nil && !s.Secrets.Enabled() {
-		s.noSecretKey(w)
-		return
-	}
-	provider := r.PathValue("provider")
-	inp := store.LLMProviderInput{Provider: provider, Key: in.Key, Model: in.Model, Active: in.Active}
-	if in.Key != nil {
-		inp.State, inp.CheckDetail = probeKey(r.Context(), provider, *in.Key)
-	}
-	u := currentUser(r)
-	p, err := s.St.UpsertLLMProvider(r.Context(), inp, s.Secrets, u.ID, u.Login)
-	if err != nil {
-		if errors.Is(err, store.ErrUnknownProvider) {
-			writeErr(w, store.ErrNotFound)
-			return
-		}
-		if errors.Is(err, store.ErrInvalid) {
-			unprocessable(w, "первое сохранение провайдера требует ключ")
-			return
-		}
-		if errors.Is(err, secretbox.ErrNoKey) {
-			s.noSecretKey(w)
-			return
-		}
-		writeErr(w, err)
-		return
-	}
-	if err := s.ReloadPlanner(r.Context()); err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, llmDTO(p))
-}
-
-func (s *Server) checkModel(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	provider := r.PathValue("provider")
-	key, err := s.St.LLMProviderKey(r.Context(), provider, s.Secrets)
-	if err != nil {
-		if errors.Is(err, secretbox.ErrNoKey) {
-			s.noSecretKey(w)
-			return
-		}
-		writeErr(w, err)
-		return
-	}
-	state, detail := probeKey(r.Context(), provider, key)
-	p, err := s.St.SetLLMProviderCheck(r.Context(), provider, state, detail)
-	if err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := s.ReloadPlanner(r.Context()); err != nil {
-		writeErr(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, llmDTO(p))
-}
-
-func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	if err := s.St.DeleteLLMProvider(r.Context(), r.PathValue("provider"), currentUser(r).Login); err != nil {
-		writeErr(w, err)
-		return
-	}
-	if err := s.ReloadPlanner(r.Context()); err != nil {
 		writeErr(w, err)
 		return
 	}

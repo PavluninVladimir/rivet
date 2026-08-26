@@ -32,10 +32,20 @@ git init -b main -q "$SEED"
 rm -rf "$SERVICE_DIR/internal/webui/dist"
 cp -r "$SERVICE_DIR/../rivet-web/dist" "$SERVICE_DIR/internal/webui/dist"
 (cd "$SERVICE_DIR" && go build -o "$STAND_DIR/rivetd" ./cmd/rivetd \
-  && go build -o "$STAND_DIR/rivet-runner" ./cmd/rivet-runner)
+  && go build -o "$STAND_DIR/rivet-runner" ./cmd/rivet-runner \
+  && go build -o "$STAND_DIR/fake-llm" ./cmd/fake-llm)
 
 cleanup() { kill 0 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
+
+# Fake-провайдер моделей (add-model-connections): консоль создаёт к нему
+# подключение с ключом fake-key, планировщик декомпозирует его планом.
+LLM_PORT=${E2E_LLM_PORT:-8283}
+"$STAND_DIR/fake-llm" -addr ":$LLM_PORT" &
+for _ in $(seq 1 50); do
+  curl -s "http://localhost:$LLM_PORT/v1/models" >/dev/null 2>&1 && break
+  sleep 0.1
+done
 
 # Идентичность стенда: bootstrap-админ (см. ниже env rivetd), PAT для
 # CLI/скриптов в $STAND_DIR/token и токен регистрации runner'ов. Runner'ы
