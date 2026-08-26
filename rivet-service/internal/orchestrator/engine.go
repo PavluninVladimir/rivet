@@ -181,6 +181,9 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err := e.markWaiting(ctx); err != nil {
 		return err
 	}
+	if err := e.reconcileSteps(ctx); err != nil {
+		return err
+	}
 	return e.tickDeployments(ctx)
 }
 

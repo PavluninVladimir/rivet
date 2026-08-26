@@ -125,6 +125,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/environments/{id}/deployments", s.envDeployments)
 	mux.HandleFunc("GET /api/v1/deployments/{id}/log", s.deploymentLog)
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
+	mux.HandleFunc("GET /api/v1/me/steps", s.mySteps)
+	mux.HandleFunc("POST /api/v1/tasks/{id}/runs/{run}/verdict", s.runVerdict)
 	mux.HandleFunc("PATCH /api/v1/tasks/{id}", s.patchTask)
 	mux.HandleFunc("DELETE /api/v1/tasks/{id}", s.deleteTask)
 	mux.HandleFunc("GET /api/v1/tasks/{id}/sessions", s.listTaskSessions)
@@ -725,7 +727,12 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"task": t, "timeline": timeline})
+	runs, err := s.St.CurrentStepRuns(r.Context(), t)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"task": t, "timeline": timeline, "step_runs": runViews(runs)})
 }
 
 // patchTask — правка задачи участником проекта: лимит попыток

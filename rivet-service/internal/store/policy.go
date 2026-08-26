@@ -156,6 +156,9 @@ func (s *Store) SaveProjectPolicy(ctx context.Context, projectID string, o polic
 	if err := o.Validate(); err != nil {
 		return PolicyVersion{}, err
 	}
+	if err := s.ValidateProcessMembers(ctx, projectID, o); err != nil {
+		return PolicyVersion{}, err
+	}
 	return s.savePolicyVersion(ctx, PolicyScopeProject, projectID, o, login)
 }
 
@@ -212,6 +215,9 @@ func (s *Store) SetProjectPolicyFileID(ctx context.Context, projectID, fileID st
 // пока источник — git; false — источник переключили, пока файл читался.
 func (s *Store) SaveProjectPolicyFromGit(ctx context.Context, projectID string, o policy.Overrides, fileID, login string) (bool, error) {
 	if err := o.Validate(); err != nil {
+		return false, err
+	}
+	if err := s.ValidateProcessMembers(ctx, projectID, o); err != nil {
 		return false, err
 	}
 	raw, err := json.Marshal(o)

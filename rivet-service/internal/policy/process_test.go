@@ -91,7 +91,9 @@ func TestProcessValidation(t *testing.T) {
 		{"дубликат id", func(p *Process) { p.Steps[1].ID = "code" }, "повторяется"},
 		{"неизвестный тип", func(p *Process) { p.Steps[0].Kind = "lint" }, "неизвестный тип"},
 		{"без участников", func(p *Process) { p.Steps[2].Participants = nil }, "хотя бы один участник"},
-		{"участник-человек", func(p *Process) { p.Steps[2].Participants = []Participant{{User: &UserRef{Login: "vladimir"}}} }, "участники-люди"},
+		{"человек без логина и роли", func(p *Process) { p.Steps[2].Participants = []Participant{{User: &UserRef{}}} }, "без логина и роли"},
+		{"человек с логином и ролью", func(p *Process) { p.Steps[2].Participants = []Participant{{User: &UserRef{Login: "v", Role: "owner"}}} }, "либо логином, либо ролью"},
+		{"неизвестная роль", func(p *Process) { p.Steps[2].Participants = []Participant{{User: &UserRef{Role: "admin"}}} }, "роль"},
 		{"агент и человек", func(p *Process) {
 			p.Steps[2].Participants = []Participant{{Agent: &AgentRef{}, User: &UserRef{Role: "owner"}}}
 		}, "либо агентом, либо человеком"},
@@ -169,5 +171,27 @@ func TestEffectiveProcessOverride(t *testing.T) {
 	}
 	if len(Defaults().EffectiveProcess().Steps) != 5 {
 		t.Fatal("без документа действует процесс по умолчанию")
+	}
+}
+
+// Участники-люди принимаются документом: логин или роль; в установке —
+// только роль.
+func TestUserParticipants(t *testing.T) {
+	p := DefaultProcess()
+	p.Steps[2].Participants = []Participant{{Agent: &AgentRef{}}, {User: &UserRef{Role: RoleOwner}}, {User: &UserRef{Login: "vladimir"}}}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	r := Resolve(p, Defaults())
+	if !r.Steps[2].Participants[1].IsUser() || r.Steps[2].Participants[2].User.Login != "vladimir" || r.Steps[2].Participants[0].IsUser() {
+		t.Fatalf("участники: %+v", r.Steps[2].Participants)
+	}
+	if logins := p.UserLogins(); logins["vladimir"] != "review" {
+		t.Fatalf("логины: %v", logins)
+	}
+	inst := Defaults()
+	inst.Process = &p
+	if err := inst.Validate(); err == nil || !strings.Contains(err.Error(), "политике установки") {
+		t.Fatalf("установка с участником по логину: %v", err)
 	}
 }

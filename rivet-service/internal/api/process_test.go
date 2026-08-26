@@ -50,15 +50,22 @@ func TestProjectProcessAPI(t *testing.T) {
 		t.Fatalf("422 должен указывать шаг и поле: %s", body)
 	}
 
-	// Участник-человек принимается схемой, но отклоняется с сообщением.
+	// Участник-человек по логину участника проекта принимается
+	// (add-process-humans); без логина и роли — отклоняется.
 	human := map[string]any{"process": map[string]any{"steps": []map[string]any{
 		{"id": "code", "kind": "code", "participants": []map[string]any{{"user": map[string]any{"login": "alice"}}}},
 		{"id": "merge", "kind": "merge"},
 	}}}
-	resp, body = call(t, "PUT", url, alice, "", human)
-	mustStatus(t, resp, http.StatusUnprocessableEntity, "участник-человек")
-	if !jsonContains(body, "участники-люди") {
-		t.Fatalf("сообщение про участников-людей: %s", body)
+	resp, _ = call(t, "PUT", url, alice, "", human)
+	mustStatus(t, resp, http.StatusOK, "участник-человек")
+	empty := map[string]any{"process": map[string]any{"steps": []map[string]any{
+		{"id": "code", "kind": "code", "participants": []map[string]any{{"user": map[string]any{}}}},
+		{"id": "merge", "kind": "merge"},
+	}}}
+	resp, body = call(t, "PUT", url, alice, "", empty)
+	mustStatus(t, resp, http.StatusUnprocessableEntity, "человек без логина и роли")
+	if !jsonContains(body, "без логина и роли") {
+		t.Fatalf("сообщение: %s", body)
 	}
 
 	// Валидный процесс с двумя ревьюерами сохраняется новой версией.
