@@ -135,6 +135,10 @@ type agent struct {
 	cancel map[string]context.CancelFunc // отмена стадий по task_id
 }
 
+// supportedStages — стадии, которые исполняет этот runner (спека
+// agent-integration «Стадия PROMPT»).
+var supportedStages = []string{"CODING", "TESTING", "REVIEW", "FIXING", "PROMPT"}
+
 // models — объявляемый список моделей: явный список, иначе модель по
 // умолчанию как список из одного элемента.
 func (c Config) models() []string {
@@ -161,7 +165,8 @@ func (a *agent) session(ctx context.Context) error {
 	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+a.cfg.Token)
 	reg, err := a.client.Register(ctx, &pb.RegisterRequest{
 		RunnerId: a.cfg.ID, Agent: a.cfg.Agent, Model: a.cfg.Model, Models: a.cfg.models(),
-		Host: hostname(), Capabilities: a.cfg.Capabilities, ProtocolVersion: protocolVersion,
+		Stages: supportedStages,
+		Host:   hostname(), Capabilities: a.cfg.Capabilities, ProtocolVersion: protocolVersion,
 		Adapter: a.cfg.Adapter, Depth: a.cfg.depth(),
 		ContextChannel: a.cfg.contextChannel(),
 	})

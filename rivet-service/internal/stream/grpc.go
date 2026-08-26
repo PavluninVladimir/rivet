@@ -204,7 +204,7 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 	// «Регистрация фиксируется»).
 	token := tokenFromContext(ctx)
 	err := s.St.RegisterRunner(ctx, domain.Runner{
-		ID: req.RunnerId, Agent: req.Agent, Model: req.Model, Models: req.Models,
+		ID: req.RunnerId, Agent: req.Agent, Model: req.Model, Models: req.Models, Stages: req.Stages,
 		Host: req.Host, Capabilities: req.Capabilities,
 		Adapter: req.Adapter, Depth: domain.SessionDepth(req.Depth),
 		ContextChannel: req.ContextChannel,

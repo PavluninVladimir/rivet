@@ -17,6 +17,9 @@ const (
 	StepReview = "review"
 	StepMerge  = "merge"
 	StepDeploy = "deploy"
+	// StepPrompt — произвольный шаг для агента с текстом задания
+	// (add-process-editor): исполняется в ветке задачи, вердикт маркером.
+	StepPrompt = "prompt"
 )
 
 // Режимы работы участников и правила агрегации вердиктов.
@@ -59,6 +62,8 @@ type Step struct {
 	Require      string        `json:"require,omitempty"`
 	Attempts     *int          `json:"attempts,omitempty"`
 	On           *Transitions  `json:"on,omitempty"`
+	// Prompt — текст задания для шага prompt.
+	Prompt string `json:"prompt,omitempty"`
 }
 
 // Participant — участник шага: агент или человек (ровно одно поле).
@@ -132,16 +137,16 @@ var stepIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 func validKind(k string) bool {
 	switch k {
-	case StepCode, StepTest, StepReview, StepMerge, StepDeploy:
+	case StepCode, StepTest, StepReview, StepMerge, StepDeploy, StepPrompt:
 		return true
 	}
 	return false
 }
 
-// hasParticipants — шаг исполняется участниками (агентами); merge и deploy
+// hasParticipants — шаг исполняется участниками; merge и deploy
 // исполняет control plane.
 func hasParticipants(kind string) bool {
-	return kind == StepCode || kind == StepTest || kind == StepReview
+	return kind == StepCode || kind == StepTest || kind == StepReview || kind == StepPrompt
 }
 
 func (s Step) enabled() bool { return s.Enabled == nil || *s.Enabled }
@@ -163,7 +168,13 @@ func (p Process) Validate() error {
 		}
 		byID[s.ID] = s
 		if !validKind(s.Kind) {
-			return perr(s.ID, "kind", "неизвестный тип шага %q (допустимы code, test, review, merge, deploy)", s.Kind)
+			return perr(s.ID, "kind", "неизвестный тип шага %q (допустимы code, test, review, merge, deploy, prompt)", s.Kind)
+		}
+		if s.Kind == StepPrompt && strings.TrimSpace(s.Prompt) == "" {
+			return perr(s.ID, "prompt", "у шага prompt нужен текст задания")
+		}
+		if s.Kind != StepPrompt && s.Prompt != "" {
+			return perr(s.ID, "prompt", "текст задания есть только у шага prompt")
 		}
 		if strings.ContainsFunc(s.Title, promptBreaking) {
 			return perr(s.ID, "title", "название содержит управляющий символ")
@@ -306,6 +317,7 @@ type ResolvedStep struct {
 	ID           string                `json:"id"`
 	Kind         string                `json:"kind"`
 	Title        string                `json:"title"`
+	Prompt       string                `json:"prompt,omitempty"`
 	Capabilities []string              `json:"capabilities"`
 	Participants []ResolvedParticipant `json:"participants"`
 	Mode         string                `json:"mode"`
@@ -341,7 +353,7 @@ func Resolve(p Process, presets Presets) Resolved {
 		}
 	}
 	for i, s := range enabled {
-		rs := ResolvedStep{ID: s.ID, Kind: s.Kind, Title: s.Title, Mode: s.Mode, Require: s.Require}
+		rs := ResolvedStep{ID: s.ID, Kind: s.Kind, Title: s.Title, Mode: s.Mode, Require: s.Require, Prompt: strings.TrimSpace(s.Prompt)}
 		if rs.Title == "" {
 			rs.Title = defaultTitle(s.Kind)
 		}
@@ -424,8 +436,86 @@ func defaultTitle(kind string) string {
 		return "Merge"
 	case StepDeploy:
 		return "Публикация"
+	case StepPrompt:
+		return "Задание агенту"
 	}
 	return kind
+}
+
+// ─── ограничения установки на процесс ────────────────────────────────────
+
+// ProcessLocks — ограничения установки на процессы проектов (спека process
+// «Ограничения установки на процесс»): метаправило в коде, политикой проекта
+// не отключается.
+type ProcessLocks struct {
+	RequiredKinds   []string       `json:"required_kinds,omitempty"`
+	MinParticipants map[string]int `json:"min_participants,omitempty"`
+	HumanReview     bool           `json:"human_review,omitempty"`
+}
+
+// Validate проверяет форму ограничений.
+func (l ProcessLocks) Validate() error {
+	for _, k := range l.RequiredKinds {
+		if !validKind(k) || !hasParticipants(k) {
+			return fmt.Errorf("%w: ограничение required_kinds: неизвестный тип шага %q", ErrInvalid, k)
+		}
+	}
+	for k, n := range l.MinParticipants {
+		if !validKind(k) || !hasParticipants(k) {
+			return fmt.Errorf("%w: ограничение min_participants: неизвестный тип шага %q", ErrInvalid, k)
+		}
+		if n < 1 {
+			return fmt.Errorf("%w: ограничение min_participants[%s] должно быть не меньше 1", ErrInvalid, k)
+		}
+	}
+	return nil
+}
+
+// Empty — ограничений нет.
+func (l ProcessLocks) Empty() bool {
+	return len(l.RequiredKinds) == 0 && len(l.MinParticipants) == 0 && !l.HumanReview
+}
+
+// CheckLocks проверяет процесс против ограничений установки: ошибка с
+// шагом (первым нарушающим или пустым) и полем locks.
+func CheckLocks(l ProcessLocks, p Process) error {
+	enabled := map[string][]Step{}
+	for _, s := range p.Steps {
+		if s.enabled() {
+			enabled[s.Kind] = append(enabled[s.Kind], s)
+		}
+	}
+	for _, k := range l.RequiredKinds {
+		if len(enabled[k]) == 0 {
+			return &ProcessError{Field: "locks", Msg: fmt.Sprintf("установка требует включённый шаг типа %s", k)}
+		}
+	}
+	for k, n := range l.MinParticipants {
+		for _, s := range enabled[k] {
+			if len(s.Participants) < n {
+				return &ProcessError{Step: s.ID, Field: "locks",
+					Msg: fmt.Sprintf("установка требует не меньше %d участников на шаге типа %s", n, k)}
+			}
+		}
+	}
+	if l.HumanReview {
+		found := false
+		for _, s := range enabled[StepReview] {
+			for _, part := range s.Participants {
+				if part.User != nil {
+					found = true
+				}
+			}
+		}
+		if !found {
+			step := ""
+			if len(enabled[StepReview]) > 0 {
+				step = enabled[StepReview][0].ID
+			}
+			return &ProcessError{Step: step, Field: "locks", Msg: "установка требует участника-человека на шаге review"}
+		}
+	}
+	return nil
 }
 
 // Step возвращает шаг по идентификатору; ok=false — шага нет (например,

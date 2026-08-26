@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
@@ -51,7 +52,16 @@ func (s *Server) putInstallationPolicy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"version": v, "presets": p.Normalize()})
+	// Проекты, чьи процессы не соответствуют новым ограничениям
+	// (спека process «Ограничение ужесточили позже»): информативно.
+	// Политика уже сохранена: сбой подсчёта нарушений не делает ответ
+	// ошибкой, список остаётся пустым, причина в логе.
+	violations, err := s.St.LockViolations(r.Context(), p.Locks())
+	if err != nil {
+		slog.Error("нарушения ограничений процесса", "err", err)
+		violations = []store.LockViolation{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"version": v, "presets": p.Normalize(), "violations": violations})
 }
 
 func (s *Server) listInstallationPolicyVersions(w http.ResponseWriter, r *http.Request) {

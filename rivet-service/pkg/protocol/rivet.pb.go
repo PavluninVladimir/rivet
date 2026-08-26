@@ -34,6 +34,7 @@ const (
 	StageResult_TESTING           StageResult_Stage = 2 // проверки прошли/упали
 	StageResult_REVIEW            StageResult_Stage = 3 // вердикт независимого ревьюера
 	StageResult_FIXING            StageResult_Stage = 4 // исправление готово
+	StageResult_PROMPT            StageResult_Stage = 5 // шаг prompt: задание из процесса, вердикт маркером
 )
 
 // Enum value maps for StageResult_Stage.
@@ -44,6 +45,7 @@ var (
 		2: "TESTING",
 		3: "REVIEW",
 		4: "FIXING",
+		5: "PROMPT",
 	}
 	StageResult_Stage_value = map[string]int32{
 		"STAGE_UNSPECIFIED": 0,
@@ -51,6 +53,7 @@ var (
 		"TESTING":           2,
 		"REVIEW":            3,
 		"FIXING":            4,
+		"PROMPT":            5,
 	}
 )
 
@@ -151,7 +154,10 @@ type RegisterRequest struct {
 	// Поддерживаемые модели (протокол v11, спека runners «Регистрация»):
 	// модель сессии приходит в Assignment.model. Пустой список — control plane
 	// берёт model как список из одного элемента (runner'ы v10).
-	Models        []string `protobuf:"bytes,10,rep,name=models,proto3" json:"models,omitempty"`
+	Models []string `protobuf:"bytes,10,rep,name=models,proto3" json:"models,omitempty"`
+	// Стадии, которые runner исполняет (add-process-editor): пустой список
+	// у старых runner'ов означает четыре стадии без PROMPT.
+	Stages        []string `protobuf:"bytes,11,rep,name=stages,proto3" json:"stages,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -252,6 +258,13 @@ func (x *RegisterRequest) GetContextChannel() bool {
 func (x *RegisterRequest) GetModels() []string {
 	if x != nil {
 		return x.Models
+	}
+	return nil
+}
+
+func (x *RegisterRequest) GetStages() []string {
+	if x != nil {
+		return x.Stages
 	}
 	return nil
 }
@@ -885,8 +898,10 @@ type StageResult struct {
 	SessionId  string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`    // сессия стадии из Assignment
 	PolicyHash string                 `protobuf:"bytes,7,opt,name=policy_hash,json=policyHash,proto3" json:"policy_hash,omitempty"` // эхо Assignment.policy.hash: итог стадии привязан к версии
 	// Эхо шага процесса и участника из Assignment (change add-process-model).
-	StepId        string `protobuf:"bytes,8,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
-	Participant   string `protobuf:"bytes,9,opt,name=participant,proto3" json:"participant,omitempty"`
+	StepId      string `protobuf:"bytes,8,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	Participant string `protobuf:"bytes,9,opt,name=participant,proto3" json:"participant,omitempty"`
+	// Вердикт шага prompt: ok | changes | fail (пусто для остальных стадий).
+	Verdict       string `protobuf:"bytes,10,opt,name=verdict,proto3" json:"verdict,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -980,6 +995,13 @@ func (x *StageResult) GetStepId() string {
 func (x *StageResult) GetParticipant() string {
 	if x != nil {
 		return x.Participant
+	}
+	return ""
+}
+
+func (x *StageResult) GetVerdict() string {
+	if x != nil {
+		return x.Verdict
 	}
 	return ""
 }
@@ -1366,9 +1388,11 @@ type Assignment struct {
 	// Процесс проекта (change add-process-model, спека process): модель, с
 	// которой агент запускает сессию (пусто — модель runner'а по умолчанию),
 	// шаг и участник, которые runner возвращает эхом в StageResult.
-	Model         string `protobuf:"bytes,17,opt,name=model,proto3" json:"model,omitempty"`
-	StepId        string `protobuf:"bytes,18,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
-	Participant   string `protobuf:"bytes,19,opt,name=participant,proto3" json:"participant,omitempty"`
+	Model       string `protobuf:"bytes,17,opt,name=model,proto3" json:"model,omitempty"`
+	StepId      string `protobuf:"bytes,18,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	Participant string `protobuf:"bytes,19,opt,name=participant,proto3" json:"participant,omitempty"`
+	// Текст задания шага prompt (add-process-editor).
+	StepPrompt    string `protobuf:"bytes,20,opt,name=step_prompt,json=stepPrompt,proto3" json:"step_prompt,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1532,6 +1556,13 @@ func (x *Assignment) GetStepId() string {
 func (x *Assignment) GetParticipant() string {
 	if x != nil {
 		return x.Participant
+	}
+	return ""
+}
+
+func (x *Assignment) GetStepPrompt() string {
+	if x != nil {
+		return x.StepPrompt
 	}
 	return ""
 }
@@ -2030,7 +2061,7 @@ var File_pkg_protocol_rivet_proto protoreflect.FileDescriptor
 
 const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\n" +
-	"\x18pkg/protocol/rivet.proto\x12\brivet.v1\"\xae\x02\n" +
+	"\x18pkg/protocol/rivet.proto\x12\brivet.v1\"\xc6\x02\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x14\n" +
 	"\x05agent\x18\x02 \x01(\tR\x05agent\x12\x14\n" +
@@ -2042,7 +2073,8 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x05depth\x18\b \x01(\tR\x05depth\x12'\n" +
 	"\x0fcontext_channel\x18\t \x01(\bR\x0econtextChannel\x12\x16\n" +
 	"\x06models\x18\n" +
-	" \x03(\tR\x06models\"z\n" +
+	" \x03(\tR\x06models\x12\x16\n" +
+	"\x06stages\x18\v \x03(\tR\x06stages\"z\n" +
 	"\x10RegisterResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x120\n" +
@@ -2101,7 +2133,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\v_tokens_outB\v\n" +
 	"\t_cost_usdB\n" +
 	"\n" +
-	"\b_ctx_pct\"\xe4\x02\n" +
+	"\b_ctx_pct\"\x8a\x03\n" +
 	"\vStageResult\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x121\n" +
 	"\x05stage\x18\x02 \x01(\x0e2\x1b.rivet.v1.StageResult.StageR\x05stage\x12\x0e\n" +
@@ -2113,7 +2145,9 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\vpolicy_hash\x18\a \x01(\tR\n" +
 	"policyHash\x12\x17\n" +
 	"\astep_id\x18\b \x01(\tR\x06stepId\x12 \n" +
-	"\vparticipant\x18\t \x01(\tR\vparticipant\"O\n" +
+	"\vparticipant\x18\t \x01(\tR\vparticipant\x12\x18\n" +
+	"\averdict\x18\n" +
+	" \x01(\tR\averdict\"[\n" +
 	"\x05Stage\x12\x15\n" +
 	"\x11STAGE_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -2122,7 +2156,9 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\n" +
 	"\x06REVIEW\x10\x03\x12\n" +
 	"\n" +
-	"\x06FIXING\x10\x04\"e\n" +
+	"\x06FIXING\x10\x04\x12\n" +
+	"\n" +
+	"\x06PROMPT\x10\x05\"e\n" +
 	"\x0fBlockedQuestion\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1a\n" +
 	"\bquestion\x18\x02 \x01(\tR\bquestion\x12\x1d\n" +
@@ -2146,7 +2182,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x04text\x18\x04 \x01(\tR\x04text\"'\n" +
 	"\x03Ack\x12 \n" +
 	"\facked_msg_id\x18\x01 \x01(\tR\n" +
-	"ackedMsgId\"\xd5\x04\n" +
+	"ackedMsgId\"\xf6\x04\n" +
 	"\n" +
 	"Assignment\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
@@ -2171,7 +2207,9 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x06policy\x18\x10 \x01(\v2\x10.rivet.v1.PolicyR\x06policy\x12\x14\n" +
 	"\x05model\x18\x11 \x01(\tR\x05model\x12\x17\n" +
 	"\astep_id\x18\x12 \x01(\tR\x06stepId\x12 \n" +
-	"\vparticipant\x18\x13 \x01(\tR\vparticipant\"i\n" +
+	"\vparticipant\x18\x13 \x01(\tR\vparticipant\x12\x1f\n" +
+	"\vstep_prompt\x18\x14 \x01(\tR\n" +
+	"stepPrompt\"i\n" +
 	"\x06Policy\x12\x12\n" +
 	"\x04hash\x18\x01 \x01(\tR\x04hash\x12,\n" +
 	"\x12human_review_paths\x18\x02 \x03(\tR\x10humanReviewPaths\x12\x1d\n" +

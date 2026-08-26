@@ -481,6 +481,7 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 			RepoUrl: repoURL, GitToken: gitToken, BaseBranch: p.DefaultBranch,
 			UserPrompt: spec.userPrompt, Policy: assignPolicy,
 			Model: run.Model, StepId: step.ID, Participant: run.Participant,
+			StepPrompt: step.Prompt,
 		}},
 	}
 	if !e.Out.Send(runner.ID, msg) {
@@ -653,7 +654,7 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 	if !ok {
 		return fmt.Errorf("шаг %q запуска не найден в снимке процесса задачи %s", run.StepID, task.ID)
 	}
-	verdict := verdictOf(step.Kind, sr.Ok)
+	verdict := verdictOf(step.Kind, sr.Ok, sr.Verdict)
 	// Runner остаётся за задачей, если следующий шаг можно отдать ему же
 	// (тот же worktree: code → test, провал проверок → исправление).
 	// С шага review runner не переиспользуется: ревьюер не должен

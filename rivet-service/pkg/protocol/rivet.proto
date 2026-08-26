@@ -37,6 +37,9 @@ message RegisterRequest {
   // модель сессии приходит в Assignment.model. Пустой список — control plane
   // берёт model как список из одного элемента (runner'ы v10).
   repeated string models = 10;
+  // Стадии, которые runner исполняет (add-process-editor): пустой список
+  // у старых runner'ов означает четыре стадии без PROMPT.
+  repeated string stages = 11;
 }
 
 message RegisterResponse {
@@ -124,7 +127,10 @@ message StageResult {
     TESTING = 2; // проверки прошли/упали
     REVIEW = 3;  // вердикт независимого ревьюера
     FIXING = 4;  // исправление готово
+    PROMPT = 5;  // шаг prompt: задание из процесса, вердикт маркером
   }
+  // Вердикт шага prompt: ok | changes | fail (пусто для остальных стадий).
+  string verdict = 10;
 }
 
 // BlockedQuestion — агент не может продолжить без человека.
@@ -199,6 +205,8 @@ message Assignment {
   string model = 17;
   string step_id = 18;
   string participant = 19;
+  // Текст задания шага prompt (add-process-editor).
+  string step_prompt = 20;
 }
 
 // Policy — часть политики, которая что-то значит для агента стадии.

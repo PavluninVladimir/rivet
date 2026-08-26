@@ -494,9 +494,10 @@ func (s *Store) AssignRun(ctx context.Context, excludedProjects, excludedEpics [
 			JOIN LATERAL (
 				SELECT x.id FROM runners x
 				WHERE x.status = 'idle' AND NOT x.draining
-				  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test') THEN t.capabilities ELSE '{}'::text[] END)
+				  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)
 				  AND (r.agent_kind = '' OR x.agent = r.agent_kind)
 				  AND (r.model = '' OR r.model = ANY(x.models))
+				  AND (r.step_kind <> 'prompt' OR 'PROMPT' = ANY(x.stages))
 				  AND (r.step_kind <> 'review' OR x.id IS DISTINCT FROM t.runner_id)
 				-- беречь специалистов: из подходящих берём наименее «богатого» по
 				-- capabilities и моделям, чтобы runner с редкой моделью достался
@@ -586,8 +587,8 @@ func (s *Store) AssignRun(ctx context.Context, excludedProjects, excludedEpics [
 func (s *Store) GetRunner(ctx context.Context, id string) (domain.Runner, error) {
 	var r domain.Runner
 	err := s.Pool.QueryRow(ctx, `
-		SELECT id, agent, model, models, host, capabilities, status, COALESCE(task_id::text,''), ctx_pct, draining, last_seen, adapter, depth, context_channel
-		FROM runners WHERE id=$1`, id).Scan(&r.ID, &r.Agent, &r.Model, &r.Models, &r.Host, &r.Capabilities,
+		SELECT id, agent, model, models, stages, host, capabilities, status, COALESCE(task_id::text,''), ctx_pct, draining, last_seen, adapter, depth, context_channel
+		FROM runners WHERE id=$1`, id).Scan(&r.ID, &r.Agent, &r.Model, &r.Models, &r.Stages, &r.Host, &r.Capabilities,
 		&r.Status, &r.TaskID, &r.CtxPct, &r.Draining, &r.LastSeen, &r.Adapter, &r.Depth, &r.ContextChannel)
 	return r, nf(err)
 }
@@ -604,9 +605,10 @@ func (s *Store) WaitingRuns(ctx context.Context) ([]StepRun, error) {
 		  AND NOT EXISTS (
 			SELECT 1 FROM runners x
 			WHERE x.status <> 'offline' AND NOT x.draining
-			  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test') THEN t.capabilities ELSE '{}'::text[] END)
+			  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)
 			  AND (r.agent_kind = '' OR x.agent = r.agent_kind)
-			  AND (r.model = '' OR r.model = ANY(x.models)))
+			  AND (r.model = '' OR r.model = ANY(x.models))
+			  AND (r.step_kind <> 'prompt' OR 'PROMPT' = ANY(x.stages)))
 		ORDER BY r.id`)
 	if err != nil {
 		return nil, err
