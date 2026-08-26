@@ -337,7 +337,7 @@ func freeRunner(ctx context.Context, tx pgx.Tx, taskID string) error {
 // (лимит исчерпан) — failed + эскалация с причиной reason.
 // keepRunner оставляет задачу за текущим runner'ом (исправление после провала
 // тестов в том же worktree); иначе исполнитель освобождается и задачу в fixing
-// назначит AssignFixing.
+// назначит планировщик (AssignRun).
 // reviewLimit — лимит отказов review из действующей политики (спека
 // orchestration «Лимит попыток»): отказ review увеличивает отдельный
 // счётчик review_rejections, и при его достижении задача проваливается с

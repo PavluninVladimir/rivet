@@ -22,6 +22,12 @@ import (
 
 // testServer поднимает API поверх изолированной БД (паттерн store/testStore).
 func testServer(t *testing.T) (*store.Store, *httptest.Server) {
+	st, srv, _ := testServerEngine(t)
+	return st, srv
+}
+
+// testServerEngine — то же с движком: тесты, которым нужен тик планировщика.
+func testServerEngine(t *testing.T) (*store.Store, *httptest.Server, *orchestrator.Engine) {
 	t.Helper()
 	base := os.Getenv("RIVET_DATABASE_URL")
 	if base == "" {
@@ -56,7 +62,7 @@ func testServer(t *testing.T) (*store.Store, *httptest.Server) {
 	engine := orchestrator.New(st, scm.NewFake(), nil, nopSender{}, 90*time.Second)
 	srv := httptest.NewServer((&Server{St: st, Engine: engine}).Handler())
 	t.Cleanup(srv.Close)
-	return st, srv
+	return st, srv, engine
 }
 
 // call — запрос с опциональными cookie сессии и bearer-токеном.

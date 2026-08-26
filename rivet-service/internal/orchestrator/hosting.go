@@ -2,9 +2,11 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
@@ -90,12 +92,29 @@ func (e *Engine) OnExternalReview(ctx context.Context, task domain.Task, state, 
 	}); err != nil {
 		return false, err
 	}
-	if state != "changes_requested" || task.Status != domain.TaskReview {
+	if task.Status != domain.TaskReview || (state != "changes_requested" && state != "approved") {
 		return false, nil
 	}
 	detail := "Замечания ревьюера " + author
 	if body != "" {
 		detail += ":\n" + body
+	}
+	// Участник-человек на текущем шаге review: review с хостинга — его
+	// вердикт (спека process «Review с хостинга как вердикт участника»).
+	if run, found, err := e.St.OpenUserRun(ctx, task, author); err != nil {
+		return false, err
+	} else if found {
+		verdict := policy.OutcomeChanges
+		if state == "approved" {
+			verdict, detail = policy.OutcomeOk, body
+		}
+		if err := e.ApplyVerdict(ctx, task, run, verdict, detail, author); err != nil && !errors.Is(err, ErrRunClosed) {
+			return false, err
+		}
+		return true, nil
+	}
+	if state != "changes_requested" {
+		return false, nil
 	}
 	if err := e.externalChanges(ctx, task, domain.AttReviewLimit, detail); err != nil {
 		return false, err

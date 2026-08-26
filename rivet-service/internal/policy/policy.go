@@ -123,7 +123,14 @@ func (p Presets) Validate() error {
 		return err
 	}
 	if p.Process != nil {
-		return p.Process.Validate()
+		if err := p.Process.Validate(); err != nil {
+			return err
+		}
+		// Установка не знает проектов: участники-люди только по роли.
+		for login, step := range p.Process.UserLogins() {
+			return &ProcessError{Step: step, Field: "participants",
+				Msg: fmt.Sprintf("участник по логину %q не поддерживается в политике установки, укажите роль", login)}
+		}
 	}
 	return nil
 }

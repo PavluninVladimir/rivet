@@ -219,6 +219,9 @@ func verdictOf(kind string, ok bool) string {
 // runnerFits — подходит ли runner участнику шага (тип агента, модель,
 // capabilities шага и задачи).
 func runnerFits(r domain.Runner, task domain.Task, step policy.ResolvedStep, p policy.ResolvedParticipant) bool {
+	if p.IsUser() {
+		return false
+	}
 	if p.Agent.Kind != "" && r.Agent != p.Agent.Kind {
 		return false
 	}
@@ -341,9 +344,13 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 	}
 	verdicts := make([]map[string]any, 0, len(runs))
 	for _, r := range runs {
-		verdicts = append(verdicts, map[string]any{
+		v := map[string]any{
 			"participant": r.Participant, "runner": r.RunnerID, "model": r.Model, "verdict": r.Verdict,
-		})
+		}
+		if r.IsUser() {
+			v["user"] = r.VerdictBy
+		}
+		verdicts = append(verdicts, v)
 	}
 	detail := strings.Join(remarks, "\n\n")
 	if outcome == policy.OutcomeOk && len(runs) == 1 {
@@ -355,7 +362,10 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 // remark — блок замечаний участника с указанием автора.
 func remark(step policy.ResolvedStep, r store.StepRun) string {
 	who := r.Participant
-	if r.AgentKind != "" || r.Model != "" {
+	switch {
+	case r.VerdictBy != "":
+		who += " (" + r.VerdictBy + ")"
+	case r.AgentKind != "" || r.Model != "":
 		who += " (" + strings.TrimSuffix(r.AgentKind+"/"+r.Model, "/") + ")"
 	}
 	if len(step.Participants) == 1 {
@@ -738,4 +748,83 @@ func (e *Engine) markWaiting(ctx context.Context) error {
 func payloadMap(p any) map[string]any {
 	m, _ := p.(map[string]any)
 	return m
+}
+
+// ApplyVerdict — вердикт человека по запуску (очередь «мои шаги», review с
+// хостинга): запуск закрывается от имени пользователя, событие task.verdict,
+// исход шага теми же правилами, что у агентов. ErrRunClosed — запуск уже
+// закрыт (второй владелец при участнике по роли).
+func (e *Engine) ApplyVerdict(ctx context.Context, task domain.Task, run store.StepRun, verdict, detail, login string) error {
+	claimed, err := e.St.RecordUserVerdict(ctx, run.ID, login, verdict, detail)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return ErrRunClosed
+	}
+	p, epic, err := e.projectOf(ctx, task)
+	if err != nil {
+		return err
+	}
+	if _, err := e.St.AppendEvent(ctx, store.EventInput{
+		ActorKind: domain.ActorUser, ActorID: login, Type: "task.verdict",
+		ProjectID: p.ID, EpicID: epic.ID, TaskID: task.ID,
+		Text: fmt.Sprintf("вердикт участника %s на шаге %s: %s", login, run.StepID, verdict),
+		Payload: map[string]any{"run": run.ID, "step": run.StepID, "participant": run.Participant,
+			"verdict": verdict, "detail": detail},
+	}); err != nil {
+		return err
+	}
+	proc, hash, err := e.processFor(ctx, task)
+	if err != nil {
+		return err
+	}
+	step, ok := proc.Step(run.StepID)
+	if !ok {
+		return fmt.Errorf("шаг %q запуска не найден в снимке процесса задачи %s", run.StepID, task.ID)
+	}
+	return e.evaluateStep(ctx, task, proc, hash, step, run.Pass, "", "", "")
+}
+
+// ErrRunClosed — запуск уже закрыт другим вердиктом.
+var ErrRunClosed = errors.New("запуск уже закрыт")
+
+// reconcileSteps дожимает шаги, у которых все запуски входа закрыты, а
+// исход не применён: вердикт записался, а продвижение упало (БД, хостинг).
+// Идемпотентно благодаря ClaimStepOutcome.
+func (e *Engine) reconcileSteps(ctx context.Context) error {
+	tasks, err := e.St.StepsToReconcile(ctx)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		proc, hash, err := e.processFor(ctx, task)
+		if err != nil {
+			slog.Error("reconcile: process", "task", task.ID, "err", err)
+			continue
+		}
+		step, ok := proc.Step(task.StepID)
+		if !ok {
+			continue
+		}
+		// Заблокированные и прерванные входы решаются другим путём.
+		runs, err := e.St.StepRuns(ctx, task.ID, step.ID, task.StepGen)
+		if err != nil {
+			return err
+		}
+		skip := false
+		for _, r := range runs {
+			if r.Verdict == policy.OutcomeBlocked || r.Verdict == "cancelled" {
+				skip = true
+			}
+		}
+		if skip {
+			continue
+		}
+		slog.Warn("reconcile: дожимаем исход шага", "task", task.ID, "step", step.ID)
+		if err := e.evaluateStep(ctx, task, proc, hash, step, task.StepGen, "", "", ""); err != nil {
+			slog.Error("reconcile: evaluate", "task", task.ID, "step", step.ID, "err", err)
+		}
+	}
+	return nil
 }

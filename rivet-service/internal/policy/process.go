@@ -241,13 +241,30 @@ func (p Process) validateTarget(byID map[string]Step, s Step, name, target strin
 	return nil
 }
 
+// Роли участника-человека (роли проекта).
+const (
+	RoleOwner  = "owner"
+	RoleMember = "member"
+)
+
 func (part Participant) validate(stepID string, i int) error {
 	field := fmt.Sprintf("participants[%d]", i)
 	switch {
 	case part.Agent != nil && part.User != nil:
 		return perr(stepID, field, "участник задаётся либо агентом, либо человеком")
 	case part.User != nil:
-		return perr(stepID, field, "участники-люди появятся в следующем изменении (add-process-humans)")
+		u := part.User
+		switch {
+		case u.Login != "" && u.Role != "":
+			return perr(stepID, field, "участник-человек задаётся либо логином, либо ролью")
+		case u.Login == "" && u.Role == "":
+			return perr(stepID, field, "участник-человек без логина и роли не поддерживается")
+		case u.Role != "" && u.Role != RoleOwner && u.Role != RoleMember:
+			return perr(stepID, field+".role", "роль %q не поддерживается: допустимы owner и member", u.Role)
+		case strings.ContainsFunc(u.Login, promptBreaking) || strings.ContainsAny(u.Login, " \t"):
+			return perr(stepID, field+".login", "логин %q содержит недопустимые символы", u.Login)
+		}
+		return nil
 	case part.Agent == nil:
 		return perr(stepID, field, "у участника не указан ни агент, ни человек")
 	}
@@ -257,6 +274,21 @@ func (part Participant) validate(stepID string, i int) error {
 		}
 	}
 	return nil
+}
+
+// UserLogins — логины участников-людей документа с шагом (проверка
+// членства при сохранении политики проекта; в политике установки логины
+// не поддерживаются, потому что установка не знает проектов).
+func (p Process) UserLogins() map[string]string {
+	out := map[string]string{}
+	for _, s := range p.Steps {
+		for _, part := range s.Participants {
+			if part.User != nil && part.User.Login != "" {
+				out[part.User.Login] = s.ID
+			}
+		}
+	}
+	return out
 }
 
 // ─── разрешённая форма ───────────────────────────────────────────────────
@@ -282,11 +314,16 @@ type ResolvedStep struct {
 	On           Transitions           `json:"on"`
 }
 
-// ResolvedParticipant — участник с порядковым идентификатором (p1, p2, …).
+// ResolvedParticipant — участник с порядковым идентификатором (p1, p2, …):
+// агент (Agent) или человек (User с логином или ролью).
 type ResolvedParticipant struct {
 	ID    string   `json:"id"`
 	Agent AgentRef `json:"agent"`
+	User  UserRef  `json:"user,omitempty"`
 }
+
+// IsUser — участник-человек (add-process-humans).
+func (p ResolvedParticipant) IsUser() bool { return p.User.Login != "" || p.User.Role != "" }
 
 // Resolve раскрывает значения по умолчанию: переходы (ok — следующий
 // включённый шаг, changes — ближайший предыдущий включённый шаг code,
@@ -332,6 +369,9 @@ func Resolve(p Process, presets Presets) Resolved {
 			rp := ResolvedParticipant{ID: fmt.Sprintf("p%d", j+1)}
 			if part.Agent != nil {
 				rp.Agent = *part.Agent
+			}
+			if part.User != nil {
+				rp.User = *part.User
 			}
 			rs.Participants = append(rs.Participants, rp)
 		}

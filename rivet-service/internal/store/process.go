@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -30,27 +31,40 @@ type StepRun struct {
 	AgentKind    string
 	Model        string
 	Capabilities []string
-	RunnerID     string
-	SessionID    string
-	Verdict      string
-	Detail       string
-	CreatedAt    time.Time
-	FinishedAt   *time.Time
+	// UserLogin и UserRole — участник-человек (add-process-humans); у
+	// агента пусты. VerdictBy — логин человека, давшего вердикт.
+	UserLogin  string
+	UserRole   string
+	RunnerID   string
+	SessionID  string
+	Verdict    string
+	VerdictBy  string
+	Detail     string
+	CreatedAt  time.Time
+	FinishedAt *time.Time
 }
+
+// IsUser — запуск участника-человека.
+func (r StepRun) IsUser() bool { return r.UserLogin != "" || r.UserRole != "" }
 
 // Open — запуск ещё не завершён (ожидает или идёт).
 func (r StepRun) Open() bool { return r.Verdict == "" }
 
 const runCols = `r.id, r.task_id::text, r.step_id, r.step_kind, r.pass, r.participant, r.agent_kind, r.model,
-	r.capabilities, COALESCE(r.runner_id,''), COALESCE(r.session_id::text,''), COALESCE(r.verdict,''),
-	r.detail, r.created_at, r.finished_at`
+	r.capabilities, r.user_login, r.user_role, COALESCE(r.runner_id,''), COALESCE(r.session_id::text,''), COALESCE(r.verdict,''),
+	r.verdict_by, r.detail, r.created_at, r.finished_at`
 
 func scanRun(row pgx.Row) (StepRun, error) {
 	var r StepRun
 	err := row.Scan(&r.ID, &r.TaskID, &r.StepID, &r.StepKind, &r.Pass, &r.Participant, &r.AgentKind, &r.Model,
-		&r.Capabilities, &r.RunnerID, &r.SessionID, &r.Verdict, &r.Detail, &r.CreatedAt, &r.FinishedAt)
+		&r.Capabilities, &r.UserLogin, &r.UserRole, &r.RunnerID, &r.SessionID, &r.Verdict, &r.VerdictBy,
+		&r.Detail, &r.CreatedAt, &r.FinishedAt)
 	return r, err
 }
+
+// agentRunsOnly — условие запросов планировщика: запуски людей runner'ов не
+// получают.
+const agentRunsOnly = `r.user_login = '' AND r.user_role = ''`
 
 // StepStatus — статус задачи как проекция типа шага и входа на него
 // (спека process «Версия процесса на задаче»): code с начала — running
@@ -140,9 +154,10 @@ func (s *Store) EnterStep(ctx context.Context, in EnterStep) ([]StepRun, error) 
 			}
 		}
 		to := from
-		// Из ready статус выставит назначение первого запуска; шаги без
-		// участников (merge, deploy) исполняет control plane — проекция сразу.
-		if from != domain.TaskReady || in.ReuseRunner != "" || len(in.Step.Participants) == 0 {
+		// Из ready статус выставит назначение первого запуска агента; шаги
+		// без агентов (merge, deploy, только люди) runner'а не ждут —
+		// проекция сразу.
+		if from != domain.TaskReady || in.ReuseRunner != "" || !hasAgentParticipants(in.Step) {
 			to = StepStatus(in.Step.Kind, in.Entry)
 		}
 		if to != from && !from.CanTransition(to) {
@@ -152,6 +167,14 @@ func (s *Store) EnterStep(ctx context.Context, in EnterStep) ([]StepRun, error) 
 			UPDATE tasks SET step_id=$2, step_entry=$3, status=$4, step_gen=$5, wait_reason='', updated_at=now() WHERE id=$1`,
 			in.TaskID, in.Step.ID, in.Entry, to, gen); err != nil {
 			return err
+		}
+		// Ветка задачи появляется на первом шаге code: человеку-исполнителю
+		// она нужна сразу, агентам следующих шагов — в Assignment.
+		if in.Step.Kind == policy.StepCode {
+			if _, err := tx.Exec(ctx, `
+				UPDATE tasks SET branch = 'agent/task-' || num WHERE id=$1 AND COALESCE(branch,'') = ''`, in.TaskID); err != nil {
+				return err
+			}
 		}
 		// Новый вход на review — новые ревьюеры: прежний reviewer_id не
 		// должен пережить шаг.
@@ -204,6 +227,16 @@ func (s *Store) EnterStep(ctx context.Context, in EnterStep) ([]StepRun, error) 
 	return runs, err
 }
 
+// hasAgentParticipants — есть ли на шаге участники-агенты (им нужен runner).
+func hasAgentParticipants(step policy.ResolvedStep) bool {
+	for _, p := range step.Participants {
+		if !p.IsUser() {
+			return true
+		}
+	}
+	return false
+}
+
 func insertRun(ctx context.Context, tx pgx.Tx, taskID string, step policy.ResolvedStep, pass int, p policy.ResolvedParticipant, runner string) (StepRun, error) {
 	caps := step.Capabilities
 	if caps == nil {
@@ -214,9 +247,9 @@ func insertRun(ctx context.Context, tx pgx.Tx, taskID string, step policy.Resolv
 		runnerArg = &runner
 	}
 	return scanRun(tx.QueryRow(ctx, `
-		INSERT INTO task_step_runs AS r (task_id, step_id, step_kind, pass, participant, agent_kind, model, capabilities, runner_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		RETURNING `+runCols, taskID, step.ID, step.Kind, pass, p.ID, p.Agent.Kind, p.Agent.Model, caps, runnerArg))
+		INSERT INTO task_step_runs AS r (task_id, step_id, step_kind, pass, participant, agent_kind, model, capabilities, runner_id, user_login, user_role)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		RETURNING `+runCols, taskID, step.ID, step.Kind, pass, p.ID, p.Agent.Kind, p.Agent.Model, caps, runnerArg, p.User.Login, p.User.Role))
 }
 
 // bindRunner привязывает runner к задаче на шаге: статус runner'а по типу
@@ -353,12 +386,30 @@ func (s *Store) AddSequentialRun(ctx context.Context, taskID string, step policy
 // (кроме keepRunner: тот же runner продолжит следующий шаг). Возвращает
 // false, если запуск уже закрыт (поздний результат).
 func (s *Store) RecordVerdict(ctx context.Context, runID int64, verdict, detail string, keepRunner bool) (bool, error) {
+	return s.recordVerdict(ctx, runID, verdict, detail, "", keepRunner)
+}
+
+// RecordUserVerdict — вердикт человека с его логином; повторный вердикт
+// (второй владелец при участнике по роли) не проходит: false.
+func (s *Store) RecordUserVerdict(ctx context.Context, runID int64, login, verdict, detail string) (bool, error) {
+	return s.recordVerdict(ctx, runID, verdict, detail, login, false)
+}
+
+func (s *Store) recordVerdict(ctx context.Context, runID int64, verdict, detail, by string, keepRunner bool) (bool, error) {
 	var claimed bool
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var runnerID, taskID string
+		// Адресат проверяется в том же UPDATE: между проверкой снаружи и
+		// вердиктом роль или членство могли измениться.
 		err := tx.QueryRow(ctx, `
-			UPDATE task_step_runs SET verdict=$2, detail=$3, finished_at=now()
-			WHERE id=$1 AND verdict IS NULL RETURNING COALESCE(runner_id,''), task_id::text`, runID, verdict, detail).
+			UPDATE task_step_runs r SET verdict=$2, detail=$3, verdict_by=$4, finished_at=now()
+			WHERE r.id=$1 AND r.verdict IS NULL
+			  AND ($4 = '' OR r.user_login = $4 OR (r.user_role <> '' AND EXISTS (
+					SELECT 1 FROM tasks t JOIN epics e ON e.id = t.epic_id
+					JOIN project_members m ON m.project_id = e.project_id
+					JOIN users u ON u.id = m.user_id
+					WHERE t.id = r.task_id AND u.login = $4 AND m.role = r.user_role)))
+			RETURNING COALESCE(r.runner_id,''), r.task_id::text`, runID, verdict, detail, by).
 			Scan(&runnerID, &taskID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
@@ -454,7 +505,7 @@ func (s *Store) AssignRun(ctx context.Context, excludedProjects, excludedEpics [
 				FOR UPDATE OF x SKIP LOCKED
 				LIMIT 1
 			) x ON true
-			WHERE r.runner_id IS NULL AND r.verdict IS NULL
+			WHERE r.runner_id IS NULL AND r.verdict IS NULL AND `+agentRunsOnly+`
 			  AND t.status IN ('ready','running','fixing','testing','review')
 			ORDER BY t.num, r.id
 			FOR UPDATE OF t, r SKIP LOCKED
@@ -549,7 +600,7 @@ func (s *Store) WaitingRuns(ctx context.Context) ([]StepRun, error) {
 		SELECT `+runCols+` FROM task_step_runs r
 		JOIN tasks t ON t.id=r.task_id
 		JOIN epics e ON e.id=t.epic_id AND e.status='running'
-		WHERE r.runner_id IS NULL AND r.verdict IS NULL AND t.wait_reason=''
+		WHERE r.runner_id IS NULL AND r.verdict IS NULL AND t.wait_reason='' AND `+agentRunsOnly+`
 		  AND NOT EXISTS (
 			SELECT 1 FROM runners x
 			WHERE x.status <> 'offline' AND NOT x.draining
@@ -683,4 +734,231 @@ func TaskProcess(t domain.Task) *policy.Resolved {
 		return nil
 	}
 	return &r
+}
+
+// ─── участники-люди (add-process-humans) ─────────────────────────────────
+
+// StepItem — элемент очереди «мои шаги» (api-contract).
+type StepItem struct {
+	Run       StepRun
+	Task      domain.Task
+	ProjectID string
+	Project   string
+	EpicID    string
+	Epic      string
+	Addressed string
+	Context   string
+}
+
+// MySteps — открытые запуски людей, адресованные пользователю: по его
+// логину или роли в проекте задачи; только работающие Epic'и.
+func (s *Store) MySteps(ctx context.Context, userID, login string) ([]StepItem, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT `+runCols+`, `+taskCols+`, p.id::text, p.name, e.id::text, e.title
+		FROM task_step_runs r
+		JOIN tasks t ON t.id = r.task_id
+		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+		JOIN projects p ON p.id = e.project_id
+		JOIN project_members m ON m.project_id = p.id AND m.user_id = $1::uuid
+		WHERE r.verdict IS NULL AND (r.user_login = $2 OR (r.user_role <> '' AND r.user_role = m.role))
+		ORDER BY r.created_at, r.id`, userID, login)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []StepItem{}
+	for rows.Next() {
+		var it StepItem
+		var r StepRun
+		var t domain.Task
+		var crit, proc, rej []byte
+		if err := rows.Scan(&r.ID, &r.TaskID, &r.StepID, &r.StepKind, &r.Pass, &r.Participant, &r.AgentKind, &r.Model,
+			&r.Capabilities, &r.UserLogin, &r.UserRole, &r.RunnerID, &r.SessionID, &r.Verdict, &r.VerdictBy,
+			&r.Detail, &r.CreatedAt, &r.FinishedAt,
+			&t.ID, &t.EpicID, &t.Num, &t.Title, &t.Description, &t.Status, &t.Estimate,
+			&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit, &t.ReviewRejections,
+			&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,
+			&t.StepID, &t.StepEntry, &proc, &t.ProcessHash, &rej, &t.WaitReason, &t.StepGen, &t.Created, &t.Updated,
+			&it.ProjectID, &it.Project, &it.EpicID, &it.Epic); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(crit, &t.Criteria)
+		it.Run, it.Task = r, t
+		it.Addressed = r.UserLogin
+		if r.UserRole != "" {
+			it.Addressed = "role:" + r.UserRole
+		}
+		out = append(out, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Контекст входа: вердикты уже закрытых участников того же входа.
+	for i := range out {
+		out[i].Context, _ = s.stepContext(ctx, out[i].Run)
+	}
+	return out, nil
+}
+
+// stepContext — замечания и отчёты участников текущего входа на шаг.
+func (s *Store) stepContext(ctx context.Context, run StepRun) (string, error) {
+	runs, err := s.StepRuns(ctx, run.TaskID, run.StepID, run.Pass)
+	if err != nil {
+		return "", err
+	}
+	var parts []string
+	for _, r := range runs {
+		if r.ID == run.ID || r.Verdict == "" || r.Detail == "" {
+			continue
+		}
+		who := r.Participant
+		if r.VerdictBy != "" {
+			who += " (" + r.VerdictBy + ")"
+		} else if r.AgentKind != "" || r.Model != "" {
+			who += " (" + strings.TrimSuffix(r.AgentKind+"/"+r.Model, "/") + ")"
+		}
+		parts = append(parts, who+": "+r.Verdict+"\n"+r.Detail)
+	}
+	return strings.Join(parts, "\n\n"), nil
+}
+
+// ErrNotAddressed — вердикт не от адресата запуска.
+var ErrNotAddressed = errors.New("запуск адресован другому участнику")
+
+// RunForVerdict — открытый запуск человека по задаче, если он адресован
+// пользователю (логином или его ролью в проекте задачи).
+func (s *Store) RunForVerdict(ctx context.Context, taskID string, runID int64, userID, login string) (StepRun, error) {
+	r, err := scanRun(s.Pool.QueryRow(ctx, `SELECT `+runCols+` FROM task_step_runs r WHERE r.id=$1 AND r.task_id=$2`, runID, taskID))
+	if err != nil {
+		return StepRun{}, nf(err)
+	}
+	if !r.IsUser() {
+		return r, ErrNotAddressed
+	}
+	if r.UserLogin != "" {
+		if r.UserLogin != login {
+			return r, ErrNotAddressed
+		}
+		return r, nil
+	}
+	var role string
+	if err := s.Pool.QueryRow(ctx, `
+		SELECT m.role FROM project_members m JOIN epics e ON e.project_id = m.project_id
+		JOIN tasks t ON t.epic_id = e.id WHERE t.id=$1 AND m.user_id=$2::uuid`, taskID, userID).Scan(&role); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return r, ErrNotAddressed
+		}
+		return r, err
+	}
+	if role != r.UserRole {
+		return r, ErrNotAddressed
+	}
+	return r, nil
+}
+
+// OpenUserRun — открытый запуск человека на текущем входе задачи,
+// адресованный автору review с хостинга: по его логину либо по роли,
+// которую он имеет в проекте задачи. Автор не из проекта запуск не
+// получает: чужой ревьюер на хостинге не должен закрывать шаг человека.
+func (s *Store) OpenUserRun(ctx context.Context, task domain.Task, login string) (StepRun, bool, error) {
+	if login == "" {
+		return StepRun{}, false, nil
+	}
+	runs, err := s.StepRuns(ctx, task.ID, task.StepID, task.StepGen)
+	if err != nil {
+		return StepRun{}, false, err
+	}
+	var role string
+	if err := s.Pool.QueryRow(ctx, `
+		SELECT m.role FROM tasks t JOIN epics e ON e.id = t.epic_id
+		JOIN project_members m ON m.project_id = e.project_id
+		JOIN users u ON u.id = m.user_id
+		WHERE t.id=$1 AND u.login=$2`, task.ID, login).Scan(&role); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return StepRun{}, false, err
+	}
+	var byRole *StepRun
+	for i := range runs {
+		r := runs[i]
+		if !r.IsUser() || r.Verdict != "" {
+			continue
+		}
+		if r.UserLogin != "" && r.UserLogin == login {
+			return r, true, nil
+		}
+		if r.UserRole != "" && role != "" && r.UserRole == role && byRole == nil {
+			byRole = &runs[i]
+		}
+	}
+	if byRole != nil {
+		return *byRole, true, nil
+	}
+	return StepRun{}, false, nil
+}
+
+// CurrentStepRuns — запуски текущего входа задачи, а если у него нет
+// участников (merge, deploy) — последнего входа с запусками: деталка
+// показывает вердикты review, пока задача ждёт merge.
+func (s *Store) CurrentStepRuns(ctx context.Context, task domain.Task) ([]StepRun, error) {
+	if task.StepID == "" {
+		return nil, nil
+	}
+	runs, err := s.StepRuns(ctx, task.ID, task.StepID, task.StepGen)
+	if err != nil || len(runs) > 0 {
+		return runs, err
+	}
+	rows, err := s.Pool.Query(ctx, `SELECT `+runCols+` FROM task_step_runs r
+		WHERE r.task_id=$1 AND r.pass = (SELECT max(pass) FROM task_step_runs WHERE task_id=$1)
+		ORDER BY r.id`, task.ID)
+	if err != nil {
+		return nil, err
+	}
+	return collectRuns(rows)
+}
+
+// ValidateProcessMembers проверяет, что участники-люди по логину состоят
+// в проекте (спека process «Логин не в проекте»).
+func (s *Store) ValidateProcessMembers(ctx context.Context, projectID string, o policy.Overrides) error {
+	if o.Process == nil {
+		return nil
+	}
+	for login, step := range o.Process.UserLogins() {
+		var n int
+		if err := s.Pool.QueryRow(ctx, `
+			SELECT count(*) FROM project_members m JOIN users u ON u.id = m.user_id
+			WHERE m.project_id=$1 AND u.login=$2`, projectID, login).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			return &policy.ProcessError{Step: step, Field: "participants",
+				Msg: fmt.Sprintf("участник %q не состоит в проекте", login)}
+		}
+	}
+	return nil
+}
+
+// StepsToReconcile — задачи, у которых все запуски текущего входа закрыты,
+// а исход шага ещё не применён (сбой между вердиктом и продвижением):
+// движок дожимает их на тике.
+func (s *Store) StepsToReconcile(ctx context.Context) ([]domain.Task, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT `+taskCols+` FROM tasks t
+		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+		WHERE t.status IN ('ready','running','fixing','testing','review')
+		  AND t.step_gen > t.step_closed_gen
+		  AND EXISTS (SELECT 1 FROM task_step_runs r WHERE r.task_id = t.id AND r.pass = t.step_gen)
+		  AND NOT EXISTS (SELECT 1 FROM task_step_runs r WHERE r.task_id = t.id AND r.pass = t.step_gen AND r.verdict IS NULL)
+		ORDER BY t.num`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
