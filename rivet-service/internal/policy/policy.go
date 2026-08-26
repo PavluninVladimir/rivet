@@ -32,6 +32,9 @@ type Presets struct {
 	// Process — процесс задачи (спека backend/process). nil — процесс по
 	// умолчанию; omitempty, чтобы хэши версий без процесса не менялись.
 	Process *Process `json:"process,omitempty"`
+	// ProcessLocks — ограничения установки на процессы проектов
+	// (add-process-editor); в переопределениях проекта их нет.
+	ProcessLocks *ProcessLocks `json:"process_locks,omitempty"`
 }
 
 // Overrides — документ проекта: каждое поле nil означает «наследуется от
@@ -122,6 +125,11 @@ func (p Presets) Validate() error {
 	if err := validatePatterns(p.HumanReviewPaths); err != nil {
 		return err
 	}
+	if p.ProcessLocks != nil {
+		if err := p.ProcessLocks.Validate(); err != nil {
+			return err
+		}
+	}
 	if p.Process != nil {
 		if err := p.Process.Validate(); err != nil {
 			return err
@@ -133,6 +141,14 @@ func (p Presets) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Locks — ограничения установки (пустые, если не заданы).
+func (p Presets) Locks() ProcessLocks {
+	if p.ProcessLocks == nil {
+		return ProcessLocks{}
+	}
+	return *p.ProcessLocks
 }
 
 // EffectiveProcess — разрешённый процесс действующей политики: документ
@@ -227,6 +243,7 @@ func Effective(installation Presets, o Overrides) Presets {
 		cp.Steps = append([]Step{}, o.Process.Steps...)
 		eff.Process = &cp
 	}
+	// Ограничения установки проектом не переопределяются: остаются как есть.
 	return eff
 }
 

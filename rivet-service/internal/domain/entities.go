@@ -131,8 +131,11 @@ type Runner struct {
 	Agent string
 	// Model — модель по умолчанию (первая в Models); Models — все
 	// поддерживаемые (спека runners «Регистрация runner'а», протокол v11).
-	Model        string
-	Models       []string
+	Model  string
+	Models []string
+	// Stages — стадии протокола, которые runner исполняет (add-process-editor);
+	// пусто — четыре стадии без PROMPT.
+	Stages       []string
 	Host         string
 	Capabilities []string
 	Status       RunnerStatus

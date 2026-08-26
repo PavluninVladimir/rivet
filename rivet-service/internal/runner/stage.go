@@ -77,11 +77,13 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 				TokensIn:  report.TokensIn, TokensOut: report.TokensOut,
 				CostUsd: report.CostUSD, CtxPct: report.CtxPct}}})
 	}
+	// Вердикт шага prompt (ok | changes | fail), пусто у остальных стадий.
+	promptVerdict := ""
 	result := func(ok bool, detail string) {
 		emitUsage()
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_StageResult{
 			StageResult: &pb.StageResult{TaskId: as.TaskId, SessionId: as.SessionId,
-				StepId: as.StepId, Participant: as.Participant,
+				StepId: as.StepId, Participant: as.Participant, Verdict: promptVerdict,
 				Stage: as.Stage, Ok: ok, Detail: tail(detail, 8000),
 				// Эхо доставленной версии: итог стадии привязан к политике,
 				// по которой работал агент (спека access-policy).
@@ -159,6 +161,39 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		}
 		approved, verdict := parseVerdict(run.FinalText)
 		result(approved, verdict)
+
+	case pb.StageResult_PROMPT:
+		// Шаг prompt (спека agent-integration «Стадия PROMPT»): задание из
+		// процесса в ветке задачи, изменения коммитятся, вердикт — маркером;
+		// без маркера успешный выход агента даёт ok.
+		step("задание процесса: " + firstLine(as.StepPrompt))
+		run, err := stageAdapter.Run(sctx, ws, promptStepPrompt(as), sink)
+		noteUsage(run)
+		out := run.FinalText
+		if q, blocked := parseBlocked(out); blocked && err == nil {
+			emitUsage()
+			emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Blocked{
+				Blocked: &pb.BlockedQuestion{TaskId: as.TaskId, SessionId: as.SessionId, Question: q}}})
+			return
+		}
+		if err != nil {
+			result(false, fmt.Sprintf("агент завершился с ошибкой: %v\n%s", err, out))
+			return
+		}
+		gitEnv, gitCleanup, err := a.gitCredentials(as)
+		if err != nil {
+			result(false, "git credentials: "+err.Error())
+			return
+		}
+		defer gitCleanup()
+		if err := gitCommitPush(sctx, ws, as.Branch, gitEnv,
+			fmt.Sprintf("task-%d: %s (%s)", as.TaskNum, as.Title, as.StepId)); err != nil {
+			result(false, "git: "+err.Error())
+			return
+		}
+		verdict, detail := parsePromptVerdict(out)
+		promptVerdict = verdict
+		result(verdict != "fail", detail)
 
 	default:
 		result(false, "неизвестная стадия")
@@ -420,6 +455,55 @@ func stagePrompt(as *pb.Assignment) string {
 		"Если не можешь однозначно понять ожидаемое поведение — не гадай: выведи строку " +
 		"«BLOCKED: <конкретный вопрос>» и остановись.\n")
 	return b.String()
+}
+
+// promptStepPrompt — промпт шага prompt: задание из процесса, контекст
+// задачи, политика, правила маркеров.
+func promptStepPrompt(as *pb.Assignment) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Ты работаешь над задачей task-%d в ветке %s.\n\n", as.TaskNum, as.Branch)
+	fmt.Fprintf(&b, "# Задание шага процесса\n\n%s\n\n", as.StepPrompt)
+	fmt.Fprintf(&b, "# Контекст задачи: %s\n\n%s\n\n", as.Title, as.Description)
+	if as.ExtraContext != "" {
+		b.WriteString("# Дополнительный контекст\n" + as.ExtraContext + "\n\n")
+	}
+	b.WriteString(policyPrompt(as.GetPolicy()))
+	b.WriteString("Работай в текущем каталоге. Не коммить и не пушь — это сделает оркестратор. " +
+		"В конце выведи одну строку с вердиктом: «VERDICT: OK» если задание выполнено или замечаний нет, " +
+		"«VERDICT: CHANGES: <что нужно исправить>» если нашёл проблемы для исправления, " +
+		"«VERDICT: FAIL: <причина>» если задание выполнить нельзя. " +
+		"Если не можешь однозначно понять задание — выведи «BLOCKED: <конкретный вопрос>» и остановись.\n")
+	return b.String()
+}
+
+// parsePromptVerdict — вердикт шага prompt по маркеру; без маркера — ok.
+func parsePromptVerdict(out string) (verdict, detail string) {
+	rest, found := lastSentinelLine(out, "VERDICT:")
+	if !found {
+		return "ok", "задание выполнено (маркера вердикта нет)"
+	}
+	rest = strings.TrimSpace(rest)
+	upper := strings.ToUpper(rest)
+	for _, m := range []struct{ word, verdict string }{
+		{"APPROVED", "ok"}, {"OK", "ok"}, {"CHANGES", "changes"}, {"FAIL", "fail"},
+	} {
+		// Граница слова: «OKAY» или «APPROVEDLY» маркером не считаются.
+		if strings.HasPrefix(upper, m.word) && (len(upper) == len(m.word) || upper[len(m.word)] == ':' || upper[len(m.word)] == ' ') {
+			return m.verdict, strings.TrimSpace(strings.TrimLeft(rest[len(m.word):], ": "))
+		}
+	}
+	return "changes", rest
+}
+
+// firstLine — первая строка текста для шага транскрипта.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len([]rune(s)) > 80 {
+		s = string([]rune(s)[:80]) + "…"
+	}
+	return s
 }
 
 func codingPrompt(as *pb.Assignment) string {

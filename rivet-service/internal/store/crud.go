@@ -253,10 +253,10 @@ func (s *Store) ListEpicTasks(ctx context.Context, epicID string) ([]domain.Task
 // занятость целиком, и задачу, и публикацию (активную публикацию перед этим
 // проваливает вызывающий — Register). $6 — токен регистрации (RegisterRunner).
 const upsertRunnerSQL = `
-		INSERT INTO runners (id, agent, model, host, capabilities, adapter, depth, context_channel, models, status, last_seen, token_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$9,$10,'idle',now(),$8)
+		INSERT INTO runners (id, agent, model, host, capabilities, adapter, depth, context_channel, models, stages, status, last_seen, token_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$9,$10,$11,'idle',now(),$8)
 		ON CONFLICT (id) DO UPDATE SET agent=$2, model=$3, host=$4, capabilities=$5,
-			adapter=$6, depth=$7, context_channel=$9, models=$10,
+			adapter=$6, depth=$7, context_channel=$9, models=$10, stages=$11,
 			status='idle', task_id=NULL, deployment_id=NULL, ctx_pct=NULL, last_seen=now()`
 
 // runnerModels — список моделей runner'а: объявленный или одиночная
@@ -269,6 +269,15 @@ func runnerModels(r domain.Runner) []string {
 		return []string{r.Model}
 	}
 	return []string{}
+}
+
+// runnerStages — объявленные стадии; пусто у старых runner'ов означает
+// четыре стадии без PROMPT (design add-process-editor).
+func runnerStages(r domain.Runner) []string {
+	if len(r.Stages) > 0 {
+		return r.Stages
+	}
+	return []string{"CODING", "TESTING", "REVIEW", "FIXING"}
 }
 
 // normalizeAdapter — значения адаптера и глубины по умолчанию для
@@ -290,7 +299,7 @@ func normalizeAdapter(r domain.Runner) domain.Runner {
 func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
 	r = normalizeAdapter(r)
 	_, err := s.Pool.Exec(ctx, upsertRunnerSQL, r.ID, r.Agent, r.Model, r.Host, r.Capabilities,
-		r.Adapter, r.Depth, nil, r.ContextChannel, runnerModels(r))
+		r.Adapter, r.Depth, nil, r.ContextChannel, runnerModels(r), runnerStages(r))
 	return err
 }
 
@@ -303,7 +312,7 @@ func (s *Store) TouchRunner(ctx context.Context, id string, ctxPct *int) error {
 
 func (s *Store) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, agent, model, models, host, capabilities, status, COALESCE(task_id::text,''), ctx_pct, draining, last_seen, adapter, depth, context_channel
+		SELECT id, agent, model, models, stages, host, capabilities, status, COALESCE(task_id::text,''), ctx_pct, draining, last_seen, adapter, depth, context_channel
 		FROM runners ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -312,7 +321,7 @@ func (s *Store) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	var out []domain.Runner
 	for rows.Next() {
 		var r domain.Runner
-		if err := rows.Scan(&r.ID, &r.Agent, &r.Model, &r.Models, &r.Host, &r.Capabilities,
+		if err := rows.Scan(&r.ID, &r.Agent, &r.Model, &r.Models, &r.Stages, &r.Host, &r.Capabilities,
 			&r.Status, &r.TaskID, &r.CtxPct, &r.Draining, &r.LastSeen, &r.Adapter, &r.Depth,
 			&r.ContextChannel); err != nil {
 			return nil, err

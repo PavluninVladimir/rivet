@@ -14,6 +14,17 @@ usage() {
 }
 
 case "$PROMPT" in
+*"Задание шага процесса"*)
+  # Шаг prompt (add-process-editor): по метке [e2e-changes] в задании —
+  # замечания, иначе выполнено.
+  echo "Выполняю задание шага."
+  usage
+  case "$PROMPT" in
+  *"[e2e-changes]"*) echo "VERDICT: CHANGES: e2e-агент просит поправить"; ;;
+  *) echo "VERDICT: OK"; ;;
+  esac
+  exit 0
+  ;;
 *"независимый ревьюер"*|*"VERDICT"*)
   echo "Просмотрел изменения, замечаний нет."
   usage

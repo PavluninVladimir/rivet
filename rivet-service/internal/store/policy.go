@@ -150,6 +150,67 @@ func (s *Store) SaveInstallationPolicy(ctx context.Context, p policy.Presets, lo
 	return s.savePolicyVersion(ctx, PolicyScopeInstallation, "", p, login)
 }
 
+// LockViolation — проект, чей действующий процесс не соответствует
+// ограничениям установки (спека process «Ограничение ужесточили позже»).
+type LockViolation struct {
+	ProjectID string `json:"project_id"`
+	Project   string `json:"project"`
+	Reason    string `json:"reason"`
+}
+
+// LockViolations — проекты с процессами, нарушающими ограничения:
+// информативно после сохранения ограничений установки.
+func (s *Store) LockViolations(ctx context.Context, locks policy.ProcessLocks) ([]LockViolation, error) {
+	out := []LockViolation{}
+	if locks.Empty() {
+		return out, nil
+	}
+	rows, err := s.Pool.Query(ctx, `SELECT id::text, name FROM projects ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type proj struct{ id, name string }
+	var projects []proj
+	for rows.Next() {
+		var p proj
+		if err := rows.Scan(&p.id, &p.name); err != nil {
+			return nil, err
+		}
+		projects = append(projects, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, p := range projects {
+		eff, err := s.EffectivePolicy(ctx, p.id)
+		if err != nil {
+			return nil, err
+		}
+		doc := policy.DefaultProcess()
+		if eff.Presets.Process != nil {
+			doc = *eff.Presets.Process
+		}
+		if err := policy.CheckLocks(locks, doc); err != nil {
+			out = append(out, LockViolation{ProjectID: p.id, Project: p.name, Reason: err.Error()})
+		}
+	}
+	return out, nil
+}
+
+// checkProjectLocks проверяет процесс проекта против ограничений установки
+// (метаправило в коде: проект их не переопределяет).
+func (s *Store) checkProjectLocks(ctx context.Context, o policy.Overrides) error {
+	if o.Process == nil {
+		return nil
+	}
+	inst, _, err := s.InstallationPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	return policy.CheckLocks(inst.Locks(), *o.Process)
+}
+
 // SaveProjectPolicy создаёт новую версию переопределений проекта и пишет
 // событие policy.activated проекта.
 func (s *Store) SaveProjectPolicy(ctx context.Context, projectID string, o policy.Overrides, login string) (PolicyVersion, error) {
@@ -157,6 +218,9 @@ func (s *Store) SaveProjectPolicy(ctx context.Context, projectID string, o polic
 		return PolicyVersion{}, err
 	}
 	if err := s.ValidateProcessMembers(ctx, projectID, o); err != nil {
+		return PolicyVersion{}, err
+	}
+	if err := s.checkProjectLocks(ctx, o); err != nil {
 		return PolicyVersion{}, err
 	}
 	return s.savePolicyVersion(ctx, PolicyScopeProject, projectID, o, login)
@@ -218,6 +282,9 @@ func (s *Store) SaveProjectPolicyFromGit(ctx context.Context, projectID string, 
 		return false, err
 	}
 	if err := s.ValidateProcessMembers(ctx, projectID, o); err != nil {
+		return false, err
+	}
+	if err := s.checkProjectLocks(ctx, o); err != nil {
 		return false, err
 	}
 	raw, err := json.Marshal(o)

@@ -46,6 +46,8 @@ func stageFor(kind, entry string) pb.StageResult_Stage {
 		return pb.StageResult_TESTING
 	case policy.StepReview:
 		return pb.StageResult_REVIEW
+	case policy.StepPrompt:
+		return pb.StageResult_PROMPT
 	}
 	if entry == policy.OutcomeChanges {
 		return pb.StageResult_FIXING
@@ -205,8 +207,16 @@ func (e *Engine) setStageContext(taskID, text string) {
 }
 
 // verdictOf — вердикт участника по результату стадии: неуспех code —
-// невосстановимая ошибка (fail), неуспех test и review — замечания (changes).
-func verdictOf(kind string, ok bool) string {
+// невосстановимая ошибка (fail), неуспех test и review — замечания
+// (changes); у шага prompt вердикт называет runner (маркер агента), без
+// него — по признаку успеха.
+func verdictOf(kind string, ok bool, explicit string) string {
+	if kind == policy.StepPrompt {
+		switch explicit {
+		case policy.OutcomeOk, policy.OutcomeChanges, policy.OutcomeFail:
+			return explicit
+		}
+	}
 	if ok {
 		return policy.OutcomeOk
 	}
@@ -228,8 +238,11 @@ func runnerFits(r domain.Runner, task domain.Task, step policy.ResolvedStep, p p
 	if p.Agent.Model != "" && !contains(r.Models, p.Agent.Model) && r.Model != p.Agent.Model {
 		return false
 	}
+	if step.Kind == policy.StepPrompt && !contains(r.Stages, "PROMPT") {
+		return false
+	}
 	need := append([]string{}, step.Capabilities...)
-	if step.Kind == policy.StepCode || step.Kind == policy.StepTest {
+	if step.Kind == policy.StepCode || step.Kind == policy.StepTest || step.Kind == policy.StepPrompt {
 		need = append(need, task.Capabilities...)
 	}
 	for _, c := range need {
@@ -253,7 +266,7 @@ func contains(list []string, v string) bool {
 // переназначения (code → test, провал проверок → исправление): шаг типа
 // code или test с единственным участником, которому runner подходит.
 func (e *Engine) reuseTarget(ctx context.Context, task domain.Task, next policy.ResolvedStep, runnerID string) bool {
-	if runnerID == "" || (next.Kind != policy.StepCode && next.Kind != policy.StepTest) || len(next.Participants) != 1 {
+	if runnerID == "" || (next.Kind != policy.StepCode && next.Kind != policy.StepTest && next.Kind != policy.StepPrompt) || len(next.Participants) != 1 {
 		return false
 	}
 	r, err := e.St.GetRunner(ctx, runnerID)
@@ -724,6 +737,9 @@ func (e *Engine) markWaiting(ctx context.Context) error {
 		reason := "нет runner'а с capabilities " + strings.Join(r.Capabilities, ", ")
 		if want != "" {
 			reason = "нет runner'а " + want
+		}
+		if r.StepKind == policy.StepPrompt {
+			reason += " со стадией PROMPT"
 		}
 		if err := e.St.SetTaskWaitReason(ctx, r.TaskID, reason); err != nil {
 			return err

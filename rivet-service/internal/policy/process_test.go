@@ -195,3 +195,54 @@ func TestUserParticipants(t *testing.T) {
 		t.Fatalf("установка с участником по логину: %v", err)
 	}
 }
+
+// Шаг prompt: текст обязателен, только у prompt; ограничения установки.
+func TestPromptStepAndLocks(t *testing.T) {
+	p := DefaultProcess()
+	p.Steps = append(p.Steps[:3], append([]Step{{ID: "migrations", Kind: StepPrompt, Prompt: "проверь миграции",
+		Participants: []Participant{{Agent: &AgentRef{}}}}}, p.Steps[3:]...)...)
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	r := Resolve(p, Defaults())
+	s, _ := r.Step("migrations")
+	if s.Prompt != "проверь миграции" || s.On.Ok != "merge" || s.On.Changes != "code" || s.Title != "Задание агенту" {
+		t.Fatalf("prompt: %+v", s)
+	}
+	bad := p
+	bad.Steps = append([]Step{}, p.Steps...)
+	bad.Steps[3].Prompt = "  "
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "текст задания") {
+		t.Fatalf("prompt без текста: %v", err)
+	}
+	bad.Steps[3].Prompt = "x"
+	bad.Steps[0].Prompt = "лишний"
+	if err := bad.Validate(); err == nil || !strings.Contains(err.Error(), "только у шага prompt") {
+		t.Fatalf("prompt у code: %v", err)
+	}
+
+	locks := ProcessLocks{RequiredKinds: []string{StepReview}, MinParticipants: map[string]int{StepReview: 2}, HumanReview: true}
+	if err := locks.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckLocks(locks, DefaultProcess()); err == nil || !strings.Contains(err.Error(), "не меньше 2") {
+		t.Fatalf("минимум участников: %v", err)
+	}
+	two := DefaultProcess()
+	two.Steps[2].Participants = []Participant{{Agent: &AgentRef{}}, {Agent: &AgentRef{Kind: "codex"}}}
+	if err := CheckLocks(locks, two); err == nil || !strings.Contains(err.Error(), "человека") {
+		t.Fatalf("человек на review: %v", err)
+	}
+	two.Steps[2].Participants[1] = Participant{User: &UserRef{Role: RoleOwner}}
+	if err := CheckLocks(locks, two); err != nil {
+		t.Fatalf("процесс соответствует ограничениям: %v", err)
+	}
+	off := false
+	two.Steps[2].Enabled = &off
+	if err := CheckLocks(locks, two); err == nil || !strings.Contains(err.Error(), "включённый шаг типа review") {
+		t.Fatalf("обязательный review: %v", err)
+	}
+	if err := (ProcessLocks{RequiredKinds: []string{"merge"}}).Validate(); err == nil {
+		t.Fatal("merge как обязательный тип с участниками не имеет смысла")
+	}
+}
