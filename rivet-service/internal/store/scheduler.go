@@ -501,7 +501,12 @@ func endOpenSessions(ctx context.Context, tx pgx.Tx, taskID string) error {
 			        WHERE u.task_id = s.task_id AND u.ts >= s.started_at
 			          AND (u.tokens_in IS NOT NULL OR u.tokens_out IS NOT NULL))
 		WHERE s.task_id=$1 AND s.ended_at IS NULL`, taskID)
-	return err
+	if err != nil {
+		return err
+	}
+	// Запуски участников шага заканчиваются вместе с сессиями: задача
+	// покидает шаг внешним путём, новые запуски создаст вход на шаг.
+	return cancelOpenRuns(ctx, tx, taskID)
 }
 
 // ResolveTask — решение человека по blocked/failed задаче: ответ дополняет
@@ -540,7 +545,7 @@ func (s *Store) ResolveTask(ctx context.Context, taskID, answer, userID string, 
 			}
 		} else {
 			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET status='queued', attempt_used=0, review_rejections=0,
+				UPDATE tasks SET status='queued', attempt_used=0, review_rejections=0, step_rejections='{}'::jsonb,
 					block_reason=NULL, blocked_by=NULL, runner_id=NULL, reviewer_id=NULL,
 					description = description || CASE WHEN $2 <> '' THEN E'\n\nУточнение человека: ' || $2 ELSE '' END,
 					updated_at=now()

@@ -148,8 +148,12 @@ type RegisterRequest struct {
 	// runner'ам control plane контекст не шлёт (спека agent-integration
 	// «Обратный канал контекста»).
 	ContextChannel bool `protobuf:"varint,9,opt,name=context_channel,json=contextChannel,proto3" json:"context_channel,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Поддерживаемые модели (протокол v11, спека runners «Регистрация»):
+	// модель сессии приходит в Assignment.model. Пустой список — control plane
+	// берёт model как список из одного элемента (runner'ы v10).
+	Models        []string `protobuf:"bytes,10,rep,name=models,proto3" json:"models,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RegisterRequest) Reset() {
@@ -243,6 +247,13 @@ func (x *RegisterRequest) GetContextChannel() bool {
 		return x.ContextChannel
 	}
 	return false
+}
+
+func (x *RegisterRequest) GetModels() []string {
+	if x != nil {
+		return x.Models
+	}
+	return nil
 }
 
 type RegisterResponse struct {
@@ -865,14 +876,17 @@ func (x *Usage) GetCtxPct() int32 {
 
 // StageResult — детерминированный итог этапа конвейера.
 type StageResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	Stage         StageResult_Stage      `protobuf:"varint,2,opt,name=stage,proto3,enum=rivet.v1.StageResult_Stage" json:"stage,omitempty"`
-	Ok            bool                   `protobuf:"varint,3,opt,name=ok,proto3" json:"ok,omitempty"`
-	Detail        string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`                           // вывод тестов, вердикт review, url PR
-	PrUrl         string                 `protobuf:"bytes,5,opt,name=pr_url,json=prUrl,proto3" json:"pr_url,omitempty"`                // для stage=CODING при создании PR
-	SessionId     string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`    // сессия стадии из Assignment
-	PolicyHash    string                 `protobuf:"bytes,7,opt,name=policy_hash,json=policyHash,proto3" json:"policy_hash,omitempty"` // эхо Assignment.policy.hash: итог стадии привязан к версии
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	TaskId     string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	Stage      StageResult_Stage      `protobuf:"varint,2,opt,name=stage,proto3,enum=rivet.v1.StageResult_Stage" json:"stage,omitempty"`
+	Ok         bool                   `protobuf:"varint,3,opt,name=ok,proto3" json:"ok,omitempty"`
+	Detail     string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`                           // вывод тестов, вердикт review, url PR
+	PrUrl      string                 `protobuf:"bytes,5,opt,name=pr_url,json=prUrl,proto3" json:"pr_url,omitempty"`                // для stage=CODING при создании PR
+	SessionId  string                 `protobuf:"bytes,6,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`    // сессия стадии из Assignment
+	PolicyHash string                 `protobuf:"bytes,7,opt,name=policy_hash,json=policyHash,proto3" json:"policy_hash,omitempty"` // эхо Assignment.policy.hash: итог стадии привязан к версии
+	// Эхо шага процесса и участника из Assignment (change add-process-model).
+	StepId        string `protobuf:"bytes,8,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	Participant   string `protobuf:"bytes,9,opt,name=participant,proto3" json:"participant,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -952,6 +966,20 @@ func (x *StageResult) GetSessionId() string {
 func (x *StageResult) GetPolicyHash() string {
 	if x != nil {
 		return x.PolicyHash
+	}
+	return ""
+}
+
+func (x *StageResult) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
+}
+
+func (x *StageResult) GetParticipant() string {
+	if x != nil {
+		return x.Participant
 	}
 	return ""
 }
@@ -1334,7 +1362,13 @@ type Assignment struct {
 	// политику из рабочей копии. Поле пустое, только если политику не удалось
 	// прочитать: у проекта без своих версий действуют значения установки, и
 	// хэш у них тоже есть.
-	Policy        *Policy `protobuf:"bytes,16,opt,name=policy,proto3" json:"policy,omitempty"`
+	Policy *Policy `protobuf:"bytes,16,opt,name=policy,proto3" json:"policy,omitempty"`
+	// Процесс проекта (change add-process-model, спека process): модель, с
+	// которой агент запускает сессию (пусто — модель runner'а по умолчанию),
+	// шаг и участник, которые runner возвращает эхом в StageResult.
+	Model         string `protobuf:"bytes,17,opt,name=model,proto3" json:"model,omitempty"`
+	StepId        string `protobuf:"bytes,18,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
+	Participant   string `protobuf:"bytes,19,opt,name=participant,proto3" json:"participant,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1479,6 +1513,27 @@ func (x *Assignment) GetPolicy() *Policy {
 		return x.Policy
 	}
 	return nil
+}
+
+func (x *Assignment) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *Assignment) GetStepId() string {
+	if x != nil {
+		return x.StepId
+	}
+	return ""
+}
+
+func (x *Assignment) GetParticipant() string {
+	if x != nil {
+		return x.Participant
+	}
+	return ""
 }
 
 // Policy — часть политики, которая что-то значит для агента стадии.
@@ -1975,7 +2030,7 @@ var File_pkg_protocol_rivet_proto protoreflect.FileDescriptor
 
 const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\n" +
-	"\x18pkg/protocol/rivet.proto\x12\brivet.v1\"\x96\x02\n" +
+	"\x18pkg/protocol/rivet.proto\x12\brivet.v1\"\xae\x02\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x14\n" +
 	"\x05agent\x18\x02 \x01(\tR\x05agent\x12\x14\n" +
@@ -1985,7 +2040,9 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x10protocol_version\x18\x06 \x01(\tR\x0fprotocolVersion\x12\x18\n" +
 	"\aadapter\x18\a \x01(\tR\aadapter\x12\x14\n" +
 	"\x05depth\x18\b \x01(\tR\x05depth\x12'\n" +
-	"\x0fcontext_channel\x18\t \x01(\bR\x0econtextChannel\"z\n" +
+	"\x0fcontext_channel\x18\t \x01(\bR\x0econtextChannel\x12\x16\n" +
+	"\x06models\x18\n" +
+	" \x03(\tR\x06models\"z\n" +
 	"\x10RegisterResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x120\n" +
@@ -2044,7 +2101,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\v_tokens_outB\v\n" +
 	"\t_cost_usdB\n" +
 	"\n" +
-	"\b_ctx_pct\"\xa9\x02\n" +
+	"\b_ctx_pct\"\xe4\x02\n" +
 	"\vStageResult\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x121\n" +
 	"\x05stage\x18\x02 \x01(\x0e2\x1b.rivet.v1.StageResult.StageR\x05stage\x12\x0e\n" +
@@ -2054,7 +2111,9 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\n" +
 	"session_id\x18\x06 \x01(\tR\tsessionId\x12\x1f\n" +
 	"\vpolicy_hash\x18\a \x01(\tR\n" +
-	"policyHash\"O\n" +
+	"policyHash\x12\x17\n" +
+	"\astep_id\x18\b \x01(\tR\x06stepId\x12 \n" +
+	"\vparticipant\x18\t \x01(\tR\vparticipant\"O\n" +
 	"\x05Stage\x12\x15\n" +
 	"\x11STAGE_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -2087,7 +2146,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x04text\x18\x04 \x01(\tR\x04text\"'\n" +
 	"\x03Ack\x12 \n" +
 	"\facked_msg_id\x18\x01 \x01(\tR\n" +
-	"ackedMsgId\"\x84\x04\n" +
+	"ackedMsgId\"\xd5\x04\n" +
 	"\n" +
 	"Assignment\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
@@ -2109,7 +2168,10 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"baseBranch\x12\x1f\n" +
 	"\vuser_prompt\x18\x0f \x01(\tR\n" +
 	"userPrompt\x12(\n" +
-	"\x06policy\x18\x10 \x01(\v2\x10.rivet.v1.PolicyR\x06policy\"i\n" +
+	"\x06policy\x18\x10 \x01(\v2\x10.rivet.v1.PolicyR\x06policy\x12\x14\n" +
+	"\x05model\x18\x11 \x01(\tR\x05model\x12\x17\n" +
+	"\astep_id\x18\x12 \x01(\tR\x06stepId\x12 \n" +
+	"\vparticipant\x18\x13 \x01(\tR\vparticipant\"i\n" +
 	"\x06Policy\x12\x12\n" +
 	"\x04hash\x18\x01 \x01(\tR\x04hash\x12,\n" +
 	"\x12human_review_paths\x18\x02 \x03(\tR\x10humanReviewPaths\x12\x1d\n" +

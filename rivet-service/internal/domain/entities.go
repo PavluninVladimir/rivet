@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
 	"net/url"
 	"regexp"
@@ -111,14 +112,27 @@ type Task struct {
 	PRURL            string
 	BlockReason      string
 	BlockedBy        string // id задачи-первопричины при каскадной блокировке
-	Created          time.Time
-	Updated          time.Time
+	// Процесс (спека backend/process): текущий шаг, вход на него (ok —
+	// с начала, changes — исправление), снимок разрешённого процесса и хэш
+	// версии политики, отказы по шагам, причина ожидания runner'а.
+	StepID         string          `json:"Step"`
+	StepEntry      string          `json:"StepEntry"`
+	Process        json.RawMessage `json:"-"`
+	ProcessHash    string          `json:"ProcessHash"`
+	StepRejections map[string]int  `json:"StepAttempts"`
+	WaitReason     string          `json:"WaitReason"`
+	StepGen        int             `json:"-"`
+	Created        time.Time
+	Updated        time.Time
 }
 
 type Runner struct {
-	ID           string
-	Agent        string
+	ID    string
+	Agent string
+	// Model — модель по умолчанию (первая в Models); Models — все
+	// поддерживаемые (спека runners «Регистрация runner'а», протокол v11).
 	Model        string
+	Models       []string
 	Host         string
 	Capabilities []string
 	Status       RunnerStatus
@@ -186,6 +200,10 @@ type Session struct {
 	// привязан к ней независимо от того, чем стадия закончилась
 	// (спека access-policy «Доставка политик runner'ам»).
 	PolicyHash string
+	// StepID и Participant — шаг процесса и участник, чью сессию это
+	// (спека process); пусто у сессий до процесса.
+	StepID      string
+	Participant string
 	// Tokens — итог токенов сессии; nil = источник не сообщил (не ноль),
 	// колонка nullable с миграции 0004 (спека observability «Учёт usage»).
 	Tokens  *int64

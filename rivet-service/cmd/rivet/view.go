@@ -99,9 +99,13 @@ func cmdTasks(args []string) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(output, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tTITLE\tSTATUS\tATTEMPTS")
+	fmt.Fprintln(tw, "ID\tTITLE\tSTATUS\tSTEP\tATTEMPTS")
 	for _, t := range epic.Tasks {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d/%d\n", t.ID, t.Title, t.Status, t.AttemptUsed, t.AttemptLimit)
+		step := t.StepID
+		if t.WaitReason != "" {
+			step += " (" + t.WaitReason + ")"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d/%d\n", t.ID, t.Title, t.Status, step, t.AttemptUsed, t.AttemptLimit)
 	}
 	return tw.Flush()
 }

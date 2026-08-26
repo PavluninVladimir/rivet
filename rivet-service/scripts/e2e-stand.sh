@@ -73,8 +73,14 @@ AGENT_CMD="sh $SERVICE_DIR/scripts/fake-agent.sh"
     "$STAND_DIR/rivet-runner" -id e2e-worker2 -agent claude-code -caps coding \
     -adapter claude-code -claude-bin "$SERVICE_DIR/scripts/fake-claude.sh" -workdir "$STAND_DIR/rw-worker2" &
   RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
-    "$STAND_DIR/rivet-runner" -id e2e-reviewer -agent fake -caps review \
+    "$STAND_DIR/rivet-runner" -id e2e-reviewer -agent fake -caps review -models fake-small \
     -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-reviewer" &
+  # Второй ревьюер с другой моделью: процесс проекта с двумя агентами на
+  # шаге review (change add-process-model).
+  mkdir -p "$STAND_DIR/rw-reviewer2"
+  RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
+    "$STAND_DIR/rivet-runner" -id e2e-reviewer2 -agent fake -caps review -models fake-large,fake-small \
+    -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-reviewer2" &
   # Деплой-runner: окружения e2e исполняют команды локально (пустой host).
   mkdir -p "$STAND_DIR/rw-deployer"
   RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \

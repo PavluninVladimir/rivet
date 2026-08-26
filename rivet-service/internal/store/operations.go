@@ -142,7 +142,7 @@ func (s *Store) RegisterRunner(ctx context.Context, r domain.Runner, token domai
 		r = normalizeAdapter(r)
 		if _, err := tx.Exec(ctx, upsertRunnerSQL+`, token_id=$8`,
 			r.ID, r.Agent, r.Model, r.Host, r.Capabilities, r.Adapter, r.Depth,
-			tokenID(token), r.ContextChannel); err != nil {
+			tokenID(token), r.ContextChannel, runnerModels(r)); err != nil {
 			return err
 		}
 		_, err := appendEvent(ctx, tx, EventInput{

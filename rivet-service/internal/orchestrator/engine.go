@@ -5,7 +5,6 @@ package orchestrator
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -48,11 +47,12 @@ type Engine struct {
 	BaseBranch       string
 
 	mu sync.Mutex
-	// контекст для следующего назначения стадии (вывод тестов, вердикт review)
+	// контекст следующего шага задачи (вывод тестов, замечания review)
 	stageContext map[string]string
-	// транскрипт текущей стадии задачи
+	// транскрипты открытых сессий по session_id
 	transcripts map[string][]byte
-	// открытая сессия стадии задачи
+	// открытые сессии: session_id → task_id (у задачи может идти несколько
+	// сессий сразу — параллельные участники шага)
 	sessions map[string]string
 	// публикации: лог и владелец (runner); фаза отката — durable в БД
 	deployLogs  map[string][]byte
@@ -163,62 +163,23 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("epic budget: %w", err)
 	}
-	// Назначения: кодирование, исправления, review — до исчерпания кандидатов.
-	for {
-		a, ok, err := e.St.AssignNext(ctx, excluded, excludedEpics)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			break
-		}
-		e.dispatch(ctx, a, pb.StageResult_CODING, "")
+	// Ready-задачи входят на шаг процесса, ожидающие запуски участников
+	// назначаются runner'ам по агенту, модели и capabilities.
+	if err := e.enterReady(ctx, excluded, excludedEpics); err != nil {
+		return err
 	}
 	for {
-		a, ok, err := e.St.AssignFixing(ctx, excluded, excludedEpics)
+		a, ok, err := e.St.AssignRun(ctx, excluded, excludedEpics)
 		if err != nil {
 			return err
 		}
 		if !ok {
 			break
 		}
-		e.dispatch(ctx, a, pb.StageResult_FIXING, e.takeStageContext(a.Task.ID))
+		e.dispatchAssigned(ctx, a)
 	}
-	for {
-		a, ok, err := e.St.AssignTesting(ctx, excluded, excludedEpics)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			break
-		}
-		e.dispatch(ctx, a, pb.StageResult_TESTING, "")
-	}
-	for {
-		a, ok, err := e.St.AssignReview(ctx, excluded, excludedEpics)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			break
-		}
-		// Контекст ревьюера: diff PR + отчёт автопроверок.
-		extra := e.takeStageContext(a.Task.ID)
-		if a.Task.PRURL != "" {
-			d, err := e.diffForTask(ctx, a.Task)
-			if errors.Is(err, scm.ErrDiffTruncated) {
-				// Ревьюеру начало diff'а полезнее, чем ничего.
-				d, err = d+"\n…[diff обрезан: превышен лимит чтения]\n", nil
-			}
-			if err != nil {
-				slog.Error("diff for review", "task", a.Task.ID, "err", err)
-			} else if extra != "" {
-				extra = d + "\n\n" + extra
-			} else {
-				extra = d
-			}
-		}
-		e.dispatch(ctx, a, pb.StageResult_REVIEW, extra)
+	if err := e.markWaiting(ctx); err != nil {
+		return err
 	}
 	return e.tickDeployments(ctx)
 }
@@ -355,14 +316,6 @@ func (e *Engine) epicBudgetExclusions(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-func (e *Engine) takeStageContext(taskID string) string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	c := e.stageContext[taskID]
-	delete(e.stageContext, taskID)
-	return c
-}
-
 // SCMFor — адаптер хостинга проекта: провайдер, инстанс и учётные данные
 // живут у проекта (design add-repo-onboarding, решение 5). Проект без
 // собственных учётных данных работает на запасном адаптере установки.
@@ -394,26 +347,40 @@ type sessionSpec struct {
 	private    bool
 }
 
-// dispatch отправляет Assignment runner'у и открывает сессию стадии.
-func (e *Engine) dispatch(ctx context.Context, a store.Assignment, stage pb.StageResult_Stage, extra string) {
-	_, _ = e.dispatchWith(ctx, a, stage, extra, nil)
-}
-
-// dispatchWith возвращает id созданной сессии (пусто, если стадию не
-// удалось запустить) и признак доставки Assignment runner'у.
-func (e *Engine) dispatchWith(ctx context.Context, a store.Assignment, stage pb.StageResult_Stage, extra string, spec *sessionSpec) (string, bool) {
-	p, _, err := e.projectOf(ctx, a.Task)
+// dispatchRun открывает сессию запуска участника и отправляет Assignment
+// runner'у. Возвращает id сессии (пусто, если стадию не удалось
+// запустить) и признак доставки. spec — переопределение сессии (сессия
+// доработки); nil — обычная scheduler-сессия со снимком задачи.
+func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.StepRun, runner domain.Runner,
+	step policy.ResolvedStep, entry string, spec *sessionSpec) (string, bool) {
+	stage := stageFor(step.Kind, entry)
+	p, _, err := e.projectOf(ctx, task)
 	if err != nil {
-		slog.Error("dispatch: project", "task", a.Task.ID, "err", err)
+		slog.Error("dispatch: project", "task", task.ID, "err", err)
 		return "", false
 	}
-	criteria := make([]string, 0, len(a.Task.Criteria))
-	for _, c := range a.Task.Criteria {
+	if runner.Agent == "" {
+		if r, err := e.St.GetRunner(ctx, runner.ID); err == nil {
+			runner = r
+		}
+	}
+	criteria := make([]string, 0, len(task.Criteria))
+	for _, c := range task.Criteria {
 		criteria = append(criteria, c.Text)
 	}
 	checks := make([]*pb.Check, 0, len(p.Checks))
 	for _, c := range p.Checks {
 		checks = append(checks, &pb.Check{Name: c.Name, Cmd: c.Cmd})
+	}
+	// Контекст стадии: замечания при исправлении, diff и отчёт проверок
+	// ревьюеру. Читается без удаления: параллельным участникам нужен один
+	// и тот же контекст, сбрасывает его исход шага.
+	extra := ""
+	switch {
+	case step.Kind == policy.StepReview:
+		extra = e.reviewContext(ctx, task)
+	case step.Kind == policy.StepCode && entry == policy.OutcomeChanges:
+		extra = e.peekStageContext(task.ID)
 	}
 	// Политика проекта едет вместе с назначением: у runner'а нет другого
 	// источника, рабочая копия на исполнение не влияет (спека access-policy
@@ -428,14 +395,17 @@ func (e *Engine) dispatchWith(ctx context.Context, a store.Assignment, stage pb.
 			PolicyDir: policy.PolicyDir,
 		}
 	}
-
-	runnerID := a.Runner.ID
 	// Глубина сессии — глубина адаптера runner'а (спека agent-integration
 	// «Глубина объявлена runner'ом»).
-	depth, err := e.St.RunnerDepth(ctx, runnerID)
+	depth, err := e.St.RunnerDepth(ctx, runner.ID)
 	if err != nil {
-		slog.Error("dispatch: runner depth", "runner", runnerID, "err", err)
+		slog.Error("dispatch: runner depth", "runner", runner.ID, "err", err)
 		depth = domain.DepthMinimal
+	}
+	// Модель сессии — из участника, иначе модель runner'а по умолчанию.
+	model := run.Model
+	if model == "" {
+		model = runner.Model
 	}
 	// Сессия создаётся до отправки Assignment: runner повторяет session_id
 	// во всех сообщениях стадии, сообщения без него отбрасываются (design,
@@ -444,26 +414,40 @@ func (e *Engine) dispatchWith(ctx context.Context, a store.Assignment, stage pb.
 	if spec == nil {
 		// Запрос сессии — снимок задачи на момент запуска (история и поиск,
 		// спека team-visibility): описание задачи меняется ответами человека.
-		prompt := a.Task.Title
-		if a.Task.Description != "" {
-			prompt += "\n" + a.Task.Description
+		prompt := task.Title
+		if task.Description != "" {
+			prompt += "\n" + task.Description
 		}
 		spec = &sessionSpec{driverKind: "scheduler", prompt: prompt}
 	}
 	sessionID, err := e.St.CreateSession(ctx, domain.Session{
-		TaskID: a.Task.ID, Attempt: a.Task.AttemptUsed + 1,
+		TaskID: task.ID, Attempt: task.AttemptUsed + 1,
 		DriverKind: spec.driverKind, DriverID: spec.driverID,
-		Agent: a.Runner.Agent, Model: a.Runner.Model,
+		Agent: runner.Agent, Model: model,
 		Depth: depth, Scope: stage.String(), Prompt: spec.prompt, Private: spec.private,
-		PolicyHash: assignPolicy.GetHash(),
+		PolicyHash: assignPolicy.GetHash(), StepID: step.ID, Participant: run.Participant,
 	})
 	if err != nil {
-		slog.Error("dispatch: session", "task", a.Task.ID, "err", err)
+		slog.Error("dispatch: session", "task", task.ID, "err", err)
+		return "", false
+	}
+	// Запуск мог быть отменён другим участником шага (any, blocked) между
+	// назначением и отправкой: тогда сессия закрывается, стадия не стартует.
+	bound, err := e.St.SetRunSession(ctx, run.ID, sessionID)
+	if err != nil || !bound {
+		if err != nil {
+			slog.Error("dispatch: run session", "task", task.ID, "err", err)
+		} else {
+			slog.Info("dispatch: запуск отменён до отправки, стадия не запускается", "task", task.ID, "run", run.ID)
+		}
+		if _, cerr := e.St.EndSession(ctx, sessionID, "", "стадия не запущена: запуск отменён"); cerr != nil {
+			slog.Error("dispatch: end unbound session", "session", sessionID, "err", cerr)
+		}
 		return "", false
 	}
 	e.mu.Lock()
-	e.sessions[a.Task.ID] = sessionID
-	delete(e.transcripts, a.Task.ID)
+	e.sessions[sessionID] = task.ID
+	delete(e.transcripts, sessionID)
 	e.mu.Unlock()
 	// Репозиторий проекта: адрес клонирования и токен доступа (design
 	// решение 8). Токен уедет в git через askpass, не в аргументы команд.
@@ -475,7 +459,7 @@ func (e *Engine) dispatchWith(ctx context.Context, a store.Assignment, stage pb.
 		if _, cerr := e.St.EndSession(ctx, sessionID, "", "стадия не запущена: учётные данные проекта недоступны"); cerr != nil {
 			slog.Error("dispatch: end ghost session", "session", sessionID, "err", cerr)
 		}
-		e.DropSession(a.Task.ID)
+		e.dropSessionID(sessionID)
 		return "", false
 	}
 	// У fake-провайдера (e2e-стенд) настоящего адреса нет: клонирование
@@ -485,19 +469,20 @@ func (e *Engine) dispatchWith(ctx context.Context, a store.Assignment, stage pb.
 		repoURL, gitToken = "", ""
 	}
 	msg := &pb.PlaneMsg{
-		MsgId: fmt.Sprintf("assign-%s-%s-%d", a.Task.ID, stage, time.Now().UnixNano()),
+		MsgId: fmt.Sprintf("assign-%s-%s-%d", task.ID, stage, time.Now().UnixNano()),
 		Kind: &pb.PlaneMsg_Assign{Assign: &pb.Assignment{
-			TaskId: a.Task.ID, TaskNum: a.Task.Num, Stage: stage,
-			Title: a.Task.Title, Description: a.Task.Description,
-			Criteria: criteria, Repo: p.Repo(), Branch: a.Task.Branch,
+			TaskId: task.ID, TaskNum: task.Num, Stage: stage,
+			Title: task.Title, Description: task.Description,
+			Criteria: criteria, Repo: p.Repo(), Branch: task.Branch,
 			Checks: checks, ExtraContext: extra, SessionId: sessionID,
 			RepoUrl: repoURL, GitToken: gitToken, BaseBranch: p.DefaultBranch,
 			UserPrompt: spec.userPrompt, Policy: assignPolicy,
+			Model: run.Model, StepId: step.ID, Participant: run.Participant,
 		}},
 	}
-	if !e.Out.Send(runnerID, msg) {
+	if !e.Out.Send(runner.ID, msg) {
 		slog.Warn("dispatch: runner недоступен, задачу вернёт heartbeat-таймаут",
-			"runner", runnerID, "task", a.Task.ID)
+			"runner", runner.ID, "task", task.ID)
 		return sessionID, false
 	}
 	return sessionID, true
@@ -510,55 +495,67 @@ const transcriptCap = 4 << 20
 
 var truncMarker = []byte("\n…[транскрипт обрезан: превышен лимит 4 МБ]\n")
 
-// SessionMatches — принадлежит ли сообщение текущей сессии задачи.
-// После рестарта rivetd карта сессий пуста: открытая сессия задачи
-// поднимается из БД, чтобы не терять результаты стадий, назначенных
-// до рестарта (доставка at-least-once переживает рестарт plane).
+// SessionMatches — открыта ли сессия задачи. После рестарта rivetd карта
+// сессий пуста: открытая сессия поднимается из БД, чтобы не терять
+// результаты стадий, назначенных до рестарта (доставка at-least-once
+// переживает рестарт plane).
 func (e *Engine) SessionMatches(ctx context.Context, taskID, sessionID string) bool {
 	if sessionID == "" {
 		return false
 	}
 	e.mu.Lock()
-	cur, known := e.sessions[taskID]
+	owner, known := e.sessions[sessionID]
 	e.mu.Unlock()
 	if known {
-		return cur == sessionID
+		return owner == taskID
 	}
-	open, err := e.St.OpenSession(ctx, taskID)
-	if err != nil || open == "" || open != sessionID {
+	open, err := e.St.IsSessionOpen(ctx, taskID, sessionID)
+	if err != nil || !open {
 		return false
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if cur, known := e.sessions[taskID]; known {
-		return cur == sessionID
+	if owner, known := e.sessions[sessionID]; known {
+		return owner == taskID
 	}
-	e.sessions[taskID] = sessionID
+	e.sessions[sessionID] = taskID
 	return true
 }
 
-// DropSession инвалидирует память о сессии задачи. Вызывается там, где
-// сессия закрывается в БД мимо StageResult/Blocked (отмена, потеря
+// DropSession инвалидирует память обо всех сессиях задачи. Вызывается там,
+// где сессии закрываются в БД мимо StageResult/Blocked (отмена, потеря
 // runner'а): иначе SessionMatches продолжил бы принимать поздние сообщения
 // закрытой сессии из кеша (например, CreatePR после отмены).
 func (e *Engine) DropSession(taskID string) {
 	e.mu.Lock()
-	delete(e.sessions, taskID)
-	delete(e.transcripts, taskID)
+	defer e.mu.Unlock()
+	for sid, tid := range e.sessions {
+		if tid == taskID {
+			delete(e.sessions, sid)
+			delete(e.transcripts, sid)
+		}
+	}
+}
+
+// dropSessionID забывает одну сессию (прерван один участник шага).
+func (e *Engine) dropSessionID(sessionID string) {
+	e.mu.Lock()
+	delete(e.sessions, sessionID)
+	delete(e.transcripts, sessionID)
 	e.mu.Unlock()
 }
 
-// OnTranscript накапливает чанки транскрипта текущей стадии. Чанки чужой
-// сессии отбрасываются; принадлежность проверяет вызывающий через
-// SessionMatches (он же поднимает сессию из БД после рестарта), здесь —
-// только сверка с картой под общим замком.
+// OnTranscript накапливает чанки транскрипта сессии. Чанки чужой сессии
+// отбрасываются; принадлежность проверяет вызывающий через SessionMatches
+// (он же поднимает сессию из БД после рестарта), здесь — только сверка с
+// картой под общим замком.
 func (e *Engine) OnTranscript(taskID, sessionID string, data []byte) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if sessionID == "" || e.sessions[taskID] != sessionID {
+	if sessionID == "" || e.sessions[sessionID] != taskID {
 		return
 	}
-	buf := e.transcripts[taskID]
+	buf := e.transcripts[sessionID]
 	if len(buf) >= transcriptCap {
 		return
 	}
@@ -570,10 +567,10 @@ func (e *Engine) OnTranscript(taskID, sessionID string, data []byte) {
 		} else {
 			buf = append(buf, data[:keep-len(buf)]...)
 		}
-		e.transcripts[taskID] = append(buf, truncMarker...)
+		e.transcripts[sessionID] = append(buf, truncMarker...)
 		return
 	}
-	e.transcripts[taskID] = append(buf, data...)
+	e.transcripts[sessionID] = append(buf, data...)
 }
 
 // flushTranscript закрывает сессию стадии и уводит транскрипт в blob.
@@ -587,13 +584,13 @@ func (e *Engine) OnTranscript(taskID, sessionID string, data []byte) {
 // это безвредный мусор.
 func (e *Engine) flushTranscript(ctx context.Context, task domain.Task, stage, sessionID, outcome string) bool {
 	e.mu.Lock()
-	if sessionID == "" || e.sessions[task.ID] != sessionID {
+	if sessionID == "" || e.sessions[sessionID] != task.ID {
 		e.mu.Unlock()
 		return false
 	}
-	buf := e.transcripts[task.ID]
-	delete(e.transcripts, task.ID)
-	delete(e.sessions, task.ID)
+	buf := e.transcripts[sessionID]
+	delete(e.transcripts, sessionID)
+	delete(e.sessions, sessionID)
 	e.mu.Unlock()
 	ref := ""
 	if len(buf) > 0 && e.Blob != nil {
@@ -615,10 +612,10 @@ func (e *Engine) flushTranscript(ctx context.Context, task domain.Task, stage, s
 	return claimed
 }
 
-// OnStageResult — детерминированные реакции конвейера (спека task-pipeline).
-// Результат чужой сессии (replay после reconnect) отбрасывается; Detail —
-// runner-controlled текст, идущий в event log и контекст следующей стадии,
-// поэтому маскируется на входе.
+// OnStageResult — результат стадии как вердикт участника шага (спека
+// process «Агрегация вердиктов и переходы»). Результат чужой сессии (replay
+// после reconnect) отбрасывается; Detail — runner-controlled текст, идущий
+// в event log и контекст следующего шага, поэтому маскируется на входе.
 func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.StageResult) error {
 	if !e.SessionMatches(ctx, sr.TaskId, sr.SessionId) {
 		slog.Warn("stage result чужой сессии отброшен",
@@ -641,137 +638,37 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 		slog.Warn("stage result закрытой сессии отброшен", "task", sr.TaskId, "session", sr.SessionId)
 		return nil
 	}
-	ev := store.EventInput{ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "task.status"}
-	// Итог стадии привязан к версии политики, по которой работал агент:
-	// runner возвращает доставленный хэш эхом (спека access-policy
-	// «Доставка политик runner'ам»).
-	payload := func(m map[string]any) map[string]any {
-		if sr.PolicyHash != "" {
-			m["policy_hash"] = sr.PolicyHash
-		}
-		return m
+	run, err := e.St.RunBySession(ctx, sr.SessionId)
+	if err != nil {
+		return fmt.Errorf("запуск сессии %s: %w", sr.SessionId, err)
 	}
-
-	switch sr.Stage {
-	case pb.StageResult_CODING, pb.StageResult_FIXING:
-		if !sr.Ok {
-			// Текст ошибки приватной сессии не раскрывается в публичных
-			// событии и эскалации; полный текст — в итоге сессии (автору).
-			detail := sr.Detail
-			if private, _, perr := e.St.SessionPrivacy(ctx, sr.SessionId); perr == nil && private {
-				detail = "ошибка приватной сессии — подробности доступны её автору в итоге сессии"
-			}
-			return e.failTask(ctx, task, "Невосстановимая ошибка этапа: "+detail, runnerID, payload(map[string]any{}))
-		}
-		ev.Text = "реализация готова — запуск проверок"
-		ev.Payload = payload(map[string]any{"status": "testing"})
-		if err := e.St.TransitionTask(ctx, task.ID, domain.TaskTesting, ev, nil); err != nil {
-			return err
-		}
-		if e.epicPaused(ctx, task) {
-			// Пауза Epic: безопасная точка — граница стадии. Проверки не
-			// запускаем, runner освобождаем; resume подхватит AssignTesting.
-			return e.St.ReleaseTaskRunner(ctx, task.ID)
-		}
-		a := store.Assignment{Task: task, Runner: domain.Runner{ID: runnerID}}
-		e.dispatch(ctx, a, pb.StageResult_TESTING, "")
-		return nil
-
-	case pb.StageResult_TESTING:
-		if !sr.Ok {
-			// Провал проверок расходует попытку (спека orchestration).
-			// Вне паузы исправление идёт тем же runner'ом в том же worktree;
-			// на паузе runner освобождается, fixing подхватит AssignFixing.
-			// Вывод проверок кладётся до перехода в fixing: сразу после
-			// коммита resume может назначить FIXING, контекст уже должен лежать.
-			e.mu.Lock()
-			e.stageContext[task.ID] = "Вывод проверок:\n" + sr.Detail
-			e.mu.Unlock()
-			paused := e.epicPaused(ctx, task)
-			failed, err := e.St.ConsumeAttempt(ctx, task.ID, domain.AttTestFailed, sr.Detail, !paused, 0, sr.PolicyHash)
-			if err != nil || failed {
-				e.takeStageContext(task.ID)
-				return err
-			}
-			if paused {
-				return nil
-			}
-			a := store.Assignment{Task: task, Runner: domain.Runner{ID: runnerID}}
-			e.dispatch(ctx, a, pb.StageResult_FIXING, e.takeStageContext(task.ID))
-			return nil
-		}
-		// Отчёт автопроверок сохраняется для ревьюера (спека task-pipeline:
-		// ревьюер получает diff, критерии и результаты проверок).
-		if sr.Detail != "" {
-			e.mu.Lock()
-			e.stageContext[task.ID] = "Результаты автопроверок:\n" + sr.Detail
-			e.mu.Unlock()
-		}
-		// Тесты прошли: PR (если ещё нет) → review, исполнитель освобождается.
-		if task.PRURL == "" {
-			p, _, err := e.projectOf(ctx, task)
-			if err != nil {
-				return err
-			}
-			adapter, err := e.SCMFor(ctx, p)
-			if err != nil {
-				return err
-			}
-			pr, err := adapter.CreatePR(ctx, p.RepoPath, task.Branch, p.DefaultBranch,
-				fmt.Sprintf("task-%d: %s", task.Num, task.Title), task.Description)
-			if err != nil {
-				return fmt.Errorf("create PR: %w", err)
-			}
-			if err := e.St.SetTaskPR(ctx, task.ID, pr.URL); err != nil {
-				return err
-			}
-			if sr.PrUrl == "" {
-				sr.PrUrl = pr.URL
-			}
-		}
-		ev.Text = "проверки прошли, PR создан — ожидание review"
-		ev.Payload = payload(map[string]any{"status": "review", "pr": sr.PrUrl})
-		return e.St.TransitionWithRunnerRelease(ctx, task.ID, domain.TaskReview, ev)
-
-	case pb.StageResult_REVIEW:
-		p, _, err := e.projectOf(ctx, task)
-		if err != nil {
-			return err
-		}
-		eff, err := e.St.EffectivePolicy(ctx, p.ID)
-		if err != nil {
-			return fmt.Errorf("policy: %w", err)
-		}
-		if sr.Ok {
-			// Освобождаем runner-ревьюера, но reviewer_id на задаче сохраняем:
-			// он же признак «review выполнен» — иначе планировщик назначит review заново.
-			if err := e.St.FreeReviewerRunner(ctx, task.ID); err != nil {
-				return err
-			}
-			if _, err := e.St.AppendEvent(ctx, store.EventInput{
-				ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "task.review_passed",
-				ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
-				Text:    "review пройден — ожидание подтверждения merge",
-				Payload: payload(map[string]any{}),
-			}); err != nil {
-				return err
-			}
-			// Авто-merge — гейт политики (спека task-pipeline «Merge после
-			// успешной проверки»). Решает движок, а не пресет напрямую:
-			// во внешнем режиме локальные пресеты вообще не главные.
-			return e.autoMerge(ctx, task, p, eff)
-		}
-		// Ревьюера освобождает ConsumeAttempt в той же транзакции, что и
-		// переход в fixing: без окна, где Tick назначил бы review повторно.
-		e.mu.Lock()
-		e.stageContext[task.ID] = "Замечания review:\n" + sr.Detail
-		e.mu.Unlock()
-		_, err = e.St.ConsumeAttempt(ctx, task.ID, domain.AttReviewLimit, sr.Detail, false, eff.Presets.ReviewLimit, sr.PolicyHash)
+	proc, hash, err := e.processFor(ctx, task)
+	if err != nil {
 		return err
-
-	default:
-		return fmt.Errorf("неизвестная стадия %v", sr.Stage)
 	}
+	step, ok := proc.Step(run.StepID)
+	if !ok {
+		return fmt.Errorf("шаг %q запуска не найден в снимке процесса задачи %s", run.StepID, task.ID)
+	}
+	verdict := verdictOf(step.Kind, sr.Ok)
+	// Runner остаётся за задачей, если следующий шаг можно отдать ему же
+	// (тот же worktree: code → test, провал проверок → исправление).
+	// С шага review runner не переиспользуется: ревьюер не должен
+	// исправлять по собственным замечаниям (спека task-pipeline
+	// «Независимое review»).
+	keep := false
+	if next, found := proc.Step(step.Target(verdict)); found && step.Kind != policy.StepReview && !e.epicPaused(ctx, task) {
+		keep = e.reuseTarget(ctx, task, next, runnerID)
+	}
+	claimed, err := e.St.RecordVerdict(ctx, run.ID, verdict, sr.Detail, keep)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		slog.Warn("stage result закрытого запуска отброшен", "task", sr.TaskId, "run", run.ID)
+		return nil
+	}
+	return e.evaluateStep(ctx, task, proc, hash, step, run.Pass, runnerID, sr.PolicyHash, sr.PrUrl)
 }
 
 // epicPaused — Epic задачи не выполняется (пауза и т.п.): конвейер задачи
@@ -828,6 +725,19 @@ func (e *Engine) OnBlocked(ctx context.Context, runnerID string, b *pb.BlockedQu
 		slog.Warn("blocked закрытой сессии отброшен", "task", b.TaskId, "session", b.SessionId)
 		return nil
 	}
+	// Вопрос одного участника блокирует задачу целиком: остальные запуски
+	// шага прерываются, ответ человека вернёт задачу на тот же шаг.
+	if run, err := e.St.RunBySession(ctx, b.SessionId); err == nil {
+		if _, err := e.St.RecordVerdict(ctx, run.ID, policy.OutcomeBlocked, b.Question, false); err != nil {
+			return err
+		}
+		e.cancelOpenRuns(ctx, task, run.ID)
+	} else {
+		// Сессия без запуска (до процесса): остальные запуски всё равно
+		// прерываются, задача блокируется целиком.
+		e.cancelOpenRuns(ctx, task, 0)
+	}
+	e.setStageContext(task.ID, "")
 	// Вопрос приватной сессии — её содержимое: в публичные block_reason,
 	// событие и эскалацию идёт заглушка, полный вопрос остаётся в итоге
 	// сессии (виден автору). Спека team-visibility «Видимость и приватность».
@@ -851,20 +761,48 @@ func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login str
 	// Кеш сессий обязан забыть прежнюю: StartUserSession закрыл её в БД
 	// (иначе поздний StageResult прежней стадии прошёл бы по памяти).
 	e.DropSession(taskID)
-	sessionID, delivered := e.dispatchWith(ctx, a, pb.StageResult_FIXING, "", &sessionSpec{
+	// Сессия доработки — исправление на ближайшем шаге code процесса.
+	proc, hash, err := e.processFor(ctx, a.Task)
+	if err != nil {
+		return "", err
+	}
+	codeID := nearestCodeBefore(proc, a.Task.StepID)
+	if codeID == policy.TargetEscalate {
+		codeID = nearestCodeBefore(proc, mergeStepID(proc))
+	}
+	step, ok := proc.Step(codeID)
+	if !ok {
+		return "", fmt.Errorf("в процессе проекта нет шага code для доработки")
+	}
+	in := store.EnterStep{TaskID: taskID, Step: step, Entry: policy.OutcomeChanges,
+		ReuseRunner: a.Runner.ID, Silent: true}
+	if len(a.Task.Process) == 0 {
+		in.Process, in.ProcessHash = proc, hash
+	}
+	runs, err := e.St.EnterStep(ctx, in)
+	if err != nil || len(runs) == 0 {
+		return "", fmt.Errorf("сессию не удалось запустить: %v", err)
+	}
+	a.Task.StepID, a.Task.StepEntry = step.ID, policy.OutcomeChanges
+	sessionID, delivered := e.dispatchRun(ctx, a.Task, runs[0], a.Runner, step, policy.OutcomeChanges, &sessionSpec{
 		driverKind: "user", driverID: login, prompt: prompt,
 		userPrompt: prompt, private: private,
 	})
 	if sessionID == "" || !delivered {
 		// Стадию не удалось запустить или Assignment не доставлен: сессия
 		// закрывается, runner освобождается, задача остаётся в fixing без
-		// runner'а — её подхватит AssignFixing обычным промптом.
+		// runner'а — её подхватит планировщик обычным промптом.
 		// Пользователь видит отказ, а не 200 без запуска.
 		if sessionID != "" {
 			if _, cerr := e.St.EndSession(ctx, sessionID, "", "сессия не запущена: runner недоступен"); cerr != nil {
 				slog.Error("user session: end undelivered session", "session", sessionID, "err", cerr)
 			}
 			e.DropSession(taskID)
+		}
+		// Запуск остаётся ожидающим без runner'а: его подхватит планировщик
+		// обычным промптом исправления.
+		if rerr := e.St.UnbindRun(ctx, runs[0].ID); rerr != nil {
+			slog.Error("user session: unbind run", "task", taskID, "err", rerr)
 		}
 		if rerr := e.St.ReleaseTaskRunner(ctx, taskID); rerr != nil {
 			slog.Error("user session: release after dispatch failure", "task", taskID, "err", rerr)
@@ -1052,6 +990,17 @@ func (e *Engine) mergeTask(ctx context.Context, task domain.Task, p domain.Proje
 	}
 	if err := e.St.RecomputeEpic(ctx, task.EpicID); err != nil {
 		return err
+	}
+	// Шаг deploy отключён в процессе проекта — автопубликация не ставится.
+	if proc, _, err := e.processFor(ctx, task); err == nil && !proc.HasKind(policy.StepDeploy) {
+		if _, err := e.St.AppendEvent(ctx, store.EventInput{
+			ActorKind: domain.ActorSystem, Type: "deploy.deferred", ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
+			Text:    "публикация не запускается: шаг deploy отключён в процессе проекта",
+			Payload: map[string]any{"reason": "step_disabled"},
+		}); err != nil {
+			slog.Error("deploy step disabled event", "task", task.ID, "err", err)
+		}
+		return nil
 	}
 	e.enqueueAutoDeploys(ctx, p.ID, mergeSHA)
 	return nil

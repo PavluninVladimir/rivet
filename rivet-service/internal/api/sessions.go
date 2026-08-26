@@ -37,6 +37,9 @@ type sessionView struct {
 	// PolicyHash — версия политики, по которой работала стадия
 	// (api-contract add-policy-delivery); пусто, если политика не доезжала.
 	PolicyHash string `json:"policy_hash"`
+	// Step и Participant — шаг процесса и участник сессии (add-process-model).
+	Step        string `json:"step"`
+	Participant string `json:"participant"`
 }
 
 // stageName нормализует внутреннее представление стадии (protobuf-enum в
@@ -77,6 +80,7 @@ func (s *Server) listTaskSessions(w http.ResponseWriter, r *http.Request) {
 			Prompt: v.Prompt, Outcome: v.Outcome, LastStep: v.LastStep,
 			Tokens: v.Tokens, StartedAt: v.Started, EndedAt: v.Ended,
 			HasTranscript: v.TranscriptRef != "", PolicyHash: v.PolicyHash,
+			Step: v.StepID, Participant: v.Participant,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

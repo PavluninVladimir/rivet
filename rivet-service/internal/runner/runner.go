@@ -28,7 +28,7 @@ import (
 // v6 — адаптер и глубина данных; v5 — токены регистрации, v4 —
 // репозиторий проекта, v3 — деплой-джобы, v2 — session_id. Runner'ы
 // младших версий отклоняются при Register.
-const protocolVersion = "10"
+const protocolVersion = "11"
 
 type Config struct {
 	PlaneAddr string
@@ -38,11 +38,14 @@ type Config struct {
 	// TLS — подключаться к control plane по TLS; TLSCA — корневой сертификат
 	// (пусто — системные корни). Без TLS токен идёт открытым текстом и порт
 	// протокола обязан быть закрыт периметром.
-	TLS          bool
-	TLSCA        string
-	ID           string
-	Agent        string
+	TLS   bool
+	TLSCA string
+	ID    string
+	Agent string
+	// Model — модель по умолчанию; Models — все поддерживаемые (протокол
+	// v11): модель сессии приходит в Assignment.model и передаётся агенту.
 	Model        string
+	Models       []string
 	AgentCmd     string
 	Capabilities []string
 	Workdir      string
@@ -132,11 +135,32 @@ type agent struct {
 	cancel map[string]context.CancelFunc // отмена стадий по task_id
 }
 
+// models — объявляемый список моделей: явный список, иначе модель по
+// умолчанию как список из одного элемента.
+func (c Config) models() []string {
+	if len(c.Models) > 0 {
+		return c.Models
+	}
+	if c.Model != "" {
+		return []string{c.Model}
+	}
+	return nil
+}
+
+// forModel — конфигурация адаптера под модель назначения: пустая модель
+// в назначении означает модель runner'а по умолчанию.
+func (c Config) forModel(model string) Config {
+	if model != "" {
+		c.Model = model
+	}
+	return c
+}
+
 func (a *agent) session(ctx context.Context) error {
 	// Токен регистрации — на обоих RPC (api-contract, протокол v5).
 	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+a.cfg.Token)
 	reg, err := a.client.Register(ctx, &pb.RegisterRequest{
-		RunnerId: a.cfg.ID, Agent: a.cfg.Agent, Model: a.cfg.Model,
+		RunnerId: a.cfg.ID, Agent: a.cfg.Agent, Model: a.cfg.Model, Models: a.cfg.models(),
 		Host: hostname(), Capabilities: a.cfg.Capabilities, ProtocolVersion: protocolVersion,
 		Adapter: a.cfg.Adapter, Depth: a.cfg.depth(),
 		ContextChannel: a.cfg.contextChannel(),
