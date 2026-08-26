@@ -253,12 +253,16 @@ func (s *Store) SessionProjectEpic(ctx context.Context, sessionID string) (proje
 // Пустой runnerID — стадия завершилась или сессия уже закрыта: доставлять
 // контекст некому.
 func (s *Store) SessionRunner(ctx context.Context, sessionID string) (runnerID string, contextChannel bool, err error) {
+	// Запуск участника знает свой runner точно (несколько сессий на задачу);
+	// сессии до процесса — по исполнителю или ревьюеру задачи.
 	err = nf(s.Pool.QueryRow(ctx, `
 		SELECT COALESCE(stage.runner_id, ''), COALESCE(r.context_channel, false)
 		FROM sessions ss
 		JOIN tasks t ON t.id = ss.task_id
 		CROSS JOIN LATERAL (
-			SELECT CASE WHEN ss.scope = 'REVIEW' THEN t.reviewer_id ELSE t.runner_id END AS runner_id
+			SELECT COALESCE(
+				(SELECT sr.runner_id FROM task_step_runs sr WHERE sr.session_id = ss.id AND sr.verdict IS NULL),
+				CASE WHEN ss.scope = 'REVIEW' THEN t.reviewer_id ELSE t.runner_id END) AS runner_id
 		) stage
 		LEFT JOIN runners r ON r.id = stage.runner_id
 		WHERE ss.id = $1 AND ss.ended_at IS NULL`, sessionID).Scan(&runnerID, &contextChannel))
@@ -319,7 +323,7 @@ func (s *Store) StartUserSession(ctx context.Context, taskID, login string, priv
 		reset := from == domain.TaskBlocked || from == domain.TaskFailed
 		if reset {
 			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET attempt_used=0, review_rejections=0,
+				UPDATE tasks SET attempt_used=0, review_rejections=0, step_rejections='{}'::jsonb,
 					block_reason=NULL, blocked_by=NULL WHERE id=$1`, taskID); err != nil {
 				return err
 			}

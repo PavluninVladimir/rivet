@@ -54,7 +54,13 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	// report — расход запуска агента этой стадии (USAGE: у обёртки, итог
 	// запуска у нативного адаптера); нулевые указатели = данных нет.
 	var report usageReport
-	model := a.cfg.Model
+	// Модель сессии — из назначения (участник шага процесса), иначе модель
+	// runner'а по умолчанию; адаптер стадии строится под неё.
+	model := a.cfg.forModel(as.Model).Model
+	stageAdapter := a.adapter
+	if as.Model != "" && as.Model != a.cfg.Model {
+		stageAdapter = newAdapter(a.cfg.forModel(as.Model))
+	}
 	noteUsage := func(run agentRun) {
 		report = run.Usage
 		if run.Model != "" {
@@ -75,6 +81,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		emitUsage()
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_StageResult{
 			StageResult: &pb.StageResult{TaskId: as.TaskId, SessionId: as.SessionId,
+				StepId: as.StepId, Participant: as.Participant,
 				Stage: as.Stage, Ok: ok, Detail: tail(detail, 8000),
 				// Эхо доставленной версии: итог стадии привязан к политике,
 				// по которой работал агент (спека access-policy).
@@ -90,7 +97,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	switch as.Stage {
 	case pb.StageResult_CODING, pb.StageResult_FIXING:
 		step("агент приступил к реализации")
-		run, err := a.adapter.Run(sctx, ws, stagePrompt(as), sink)
+		run, err := stageAdapter.Run(sctx, ws, stagePrompt(as), sink)
 		noteUsage(run)
 		out := run.FinalText
 		// Блокировка распознаётся только у успешного запуска: агент,
@@ -144,7 +151,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 
 	case pb.StageResult_REVIEW:
 		step("независимое review изменений")
-		run, err := a.adapter.Run(sctx, ws, reviewPrompt(as), sink)
+		run, err := stageAdapter.Run(sctx, ws, reviewPrompt(as), sink)
 		noteUsage(run)
 		if err != nil {
 			result(false, fmt.Sprintf("ревьюер завершился с ошибкой: %v", err))

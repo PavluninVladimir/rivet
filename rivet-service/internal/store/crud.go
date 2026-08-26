@@ -174,18 +174,25 @@ func (s *Store) CreateTask(ctx context.Context, epicID string, in NewTask) (doma
 const taskCols = `t.id, t.epic_id, t.num, t.title, t.description, t.status, t.estimate,
 	t.capabilities, t.criteria, t.attempt_used, t.attempt_limit, t.review_rejections,
 	COALESCE(t.runner_id,''), COALESCE(t.branch,''), COALESCE(t.pr_url,''), COALESCE(t.block_reason,''),
-	COALESCE(t.blocked_by::text,''), t.created_at, t.updated_at`
+	COALESCE(t.blocked_by::text,''), t.step_id, t.step_entry, t.process, t.process_hash, t.step_rejections,
+	t.wait_reason, t.step_gen, t.created_at, t.updated_at`
 
 func scanTask(row pgx.Row) (domain.Task, error) {
 	var t domain.Task
-	var crit []byte
+	var crit, proc, rej []byte
 	err := row.Scan(&t.ID, &t.EpicID, &t.Num, &t.Title, &t.Description, &t.Status, &t.Estimate,
 		&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit, &t.ReviewRejections,
-		&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy, &t.Created, &t.Updated)
+		&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,
+		&t.StepID, &t.StepEntry, &proc, &t.ProcessHash, &rej, &t.WaitReason, &t.StepGen, &t.Created, &t.Updated)
 	if err != nil {
 		return t, err
 	}
 	_ = json.Unmarshal(crit, &t.Criteria)
+	if len(proc) > 0 {
+		t.Process = json.RawMessage(proc)
+	}
+	t.StepRejections = map[string]int{}
+	_ = json.Unmarshal(rej, &t.StepRejections)
 	return t, nil
 }
 
@@ -246,11 +253,23 @@ func (s *Store) ListEpicTasks(ctx context.Context, epicID string) ([]domain.Task
 // занятость целиком, и задачу, и публикацию (активную публикацию перед этим
 // проваливает вызывающий — Register). $6 — токен регистрации (RegisterRunner).
 const upsertRunnerSQL = `
-		INSERT INTO runners (id, agent, model, host, capabilities, adapter, depth, context_channel, status, last_seen, token_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$9,'idle',now(),$8)
+		INSERT INTO runners (id, agent, model, host, capabilities, adapter, depth, context_channel, models, status, last_seen, token_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$9,$10,'idle',now(),$8)
 		ON CONFLICT (id) DO UPDATE SET agent=$2, model=$3, host=$4, capabilities=$5,
-			adapter=$6, depth=$7, context_channel=$9,
+			adapter=$6, depth=$7, context_channel=$9, models=$10,
 			status='idle', task_id=NULL, deployment_id=NULL, ctx_pct=NULL, last_seen=now()`
+
+// runnerModels — список моделей runner'а: объявленный или одиночная
+// модель (runner'ы v10 и старые вызовы) как список из одного элемента.
+func runnerModels(r domain.Runner) []string {
+	if len(r.Models) > 0 {
+		return r.Models
+	}
+	if r.Model != "" {
+		return []string{r.Model}
+	}
+	return []string{}
+}
 
 // normalizeAdapter — значения адаптера и глубины по умолчанию для
 // внутренних потребителей и старых вызовов (обёртка, минимальная глубина).
@@ -271,7 +290,7 @@ func normalizeAdapter(r domain.Runner) domain.Runner {
 func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
 	r = normalizeAdapter(r)
 	_, err := s.Pool.Exec(ctx, upsertRunnerSQL, r.ID, r.Agent, r.Model, r.Host, r.Capabilities,
-		r.Adapter, r.Depth, nil, r.ContextChannel)
+		r.Adapter, r.Depth, nil, r.ContextChannel, runnerModels(r))
 	return err
 }
 
@@ -284,7 +303,7 @@ func (s *Store) TouchRunner(ctx context.Context, id string, ctxPct *int) error {
 
 func (s *Store) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, agent, model, host, capabilities, status, COALESCE(task_id::text,''), ctx_pct, draining, last_seen, adapter, depth, context_channel
+		SELECT id, agent, model, models, host, capabilities, status, COALESCE(task_id::text,''), ctx_pct, draining, last_seen, adapter, depth, context_channel
 		FROM runners ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -293,7 +312,7 @@ func (s *Store) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	var out []domain.Runner
 	for rows.Next() {
 		var r domain.Runner
-		if err := rows.Scan(&r.ID, &r.Agent, &r.Model, &r.Host, &r.Capabilities,
+		if err := rows.Scan(&r.ID, &r.Agent, &r.Model, &r.Models, &r.Host, &r.Capabilities,
 			&r.Status, &r.TaskID, &r.CtxPct, &r.Draining, &r.LastSeen, &r.Adapter, &r.Depth,
 			&r.ContextChannel); err != nil {
 			return nil, err
@@ -403,11 +422,11 @@ func (s *Store) CreateSession(ctx context.Context, in domain.Session) (string, e
 	}
 	var id string
 	err := s.Pool.QueryRow(ctx, `
-		INSERT INTO sessions (task_id, attempt, driver_kind, driver_id, agent, model, depth, scope, files, prompt, private, policy_hash)
-		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10,$11,$12)
+		INSERT INTO sessions (task_id, attempt, driver_kind, driver_id, agent, model, depth, scope, files, prompt, private, policy_hash, step_id, participant)
+		VALUES (NULLIF($1,'')::uuid,$2,$3,$4,$5,$6,$7,NULLIF($8,''),$9,$10,$11,$12,$13,$14)
 		RETURNING id`,
 		in.TaskID, in.Attempt, in.DriverKind, in.DriverID, in.Agent, in.Model, in.Depth, in.Scope,
-		files, in.Prompt, in.Private, in.PolicyHash).Scan(&id)
+		files, in.Prompt, in.Private, in.PolicyHash, in.StepID, in.Participant).Scan(&id)
 	return id, err
 }
 
@@ -427,7 +446,7 @@ func (s *Store) ListTaskSessions(ctx context.Context, taskID, viewerLogin string
 	rows, err := s.Pool.Query(ctx, `
 		SELECT id::text, COALESCE(task_id::text,''), attempt, driver_kind, driver_id,
 		       agent, model, depth, COALESCE(scope,''), COALESCE(transcript_ref,''),
-		       tokens, started_at, ended_at, files, prompt, outcome, last_step, private, policy_hash
+		       tokens, started_at, ended_at, files, prompt, outcome, last_step, private, policy_hash, step_id, participant
 		FROM sessions WHERE task_id=$1 ORDER BY started_at`, taskID)
 	if err != nil {
 		return nil, err
@@ -439,7 +458,7 @@ func (s *Store) ListTaskSessions(ctx context.Context, taskID, viewerLogin string
 		if err := rows.Scan(&v.ID, &v.TaskID, &v.Attempt, &v.DriverKind, &v.DriverID,
 			&v.Agent, &v.Model, &v.Depth, &v.Scope, &v.TranscriptRef,
 			&v.Tokens, &v.Started, &v.Ended, &v.Files, &v.Prompt, &v.Outcome, &v.LastStep,
-			&v.Private, &v.PolicyHash); err != nil {
+			&v.Private, &v.PolicyHash, &v.StepID, &v.Participant); err != nil {
 			return nil, err
 		}
 		if v.Private && v.DriverID != viewerLogin {

@@ -53,12 +53,9 @@ func (e *Engine) OnExternalChecks(ctx context.Context, task domain.Task, ok bool
 	if url != "" {
 		detail += ": " + url
 	}
-	e.mu.Lock()
-	e.stageContext[task.ID] = "Внешние проверки хостинга провалились:\n" + detail
-	e.mu.Unlock()
-	// Тот же путь, что и провал своих проверок: попытка расходуется,
-	// при исчерпании лимита задача проваливается с эскалацией.
-	if _, err := e.St.ConsumeAttempt(ctx, task.ID, domain.AttTestFailed, detail, false, 0, ""); err != nil {
+	// Тот же путь, что и провал своих проверок: отказ шага расходует
+	// попытку, при исчерпании лимита задача проваливается с эскалацией.
+	if err := e.externalChanges(ctx, task, domain.AttTestFailed, "Внешние проверки хостинга провалились:\n"+detail); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -96,19 +93,11 @@ func (e *Engine) OnExternalReview(ctx context.Context, task domain.Task, state, 
 	if state != "changes_requested" || task.Status != domain.TaskReview {
 		return false, nil
 	}
-	eff, err := e.St.EffectivePolicy(ctx, projectID)
-	if err != nil {
-		return false, err
-	}
 	detail := "Замечания ревьюера " + author
 	if body != "" {
 		detail += ":\n" + body
 	}
-	e.mu.Lock()
-	e.stageContext[task.ID] = detail
-	e.mu.Unlock()
-	if _, err := e.St.ConsumeAttempt(ctx, task.ID, domain.AttReviewLimit,
-		detail, false, eff.Presets.ReviewLimit, ""); err != nil {
+	if err := e.externalChanges(ctx, task, domain.AttReviewLimit, detail); err != nil {
 		return false, err
 	}
 	return true, nil

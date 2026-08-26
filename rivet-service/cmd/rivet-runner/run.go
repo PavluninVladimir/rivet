@@ -22,7 +22,9 @@ func run(args []string) error {
 	fs.StringVar(&cfg.TLSCA, "tls-ca", os.Getenv("RIVET_PLANE_TLS_CA"), "корневой сертификат control plane (пусто — системные корни)")
 	fs.StringVar(&cfg.ID, "id", envDef("RIVET_RUNNER_ID", hostDefault()), "идентификатор runner'а")
 	fs.StringVar(&cfg.Agent, "agent", envDef("RIVET_AGENT", "claude-code"), "название агента")
-	fs.StringVar(&cfg.Model, "model", os.Getenv("RIVET_MODEL"), "модель агента")
+	fs.StringVar(&cfg.Model, "model", os.Getenv("RIVET_MODEL"), "модель агента по умолчанию")
+	models := fs.String("models", os.Getenv("RIVET_MODELS"),
+		"поддерживаемые модели через запятую (протокол v11): модель сессии приходит в назначении; пусто — только -model")
 	fs.StringVar(&cfg.AgentCmd, "cmd", envDef("RIVET_AGENT_CMD", runner.DefaultAgentCmd),
 		"команда агента для обёртки; путь к промпту приходит в $RIVET_PROMPT_FILE")
 	fs.StringVar(&cfg.Adapter, "adapter", os.Getenv("RIVET_ADAPTER"),
@@ -42,6 +44,11 @@ func run(args []string) error {
 		return err
 	}
 	cfg.Capabilities = strings.Split(*caps, ",")
+	for _, mdl := range strings.Split(*models, ",") {
+		if mdl = strings.TrimSpace(mdl); mdl != "" {
+			cfg.Models = append(cfg.Models, mdl)
+		}
+	}
 	switch cfg.Adapter {
 	case "":
 		cfg.Adapter = runner.DefaultAdapter(cfg.Agent, cfg.AgentCmd)

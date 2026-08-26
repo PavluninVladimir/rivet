@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
@@ -40,7 +41,7 @@ func (s *Server) putInstallationPolicy(w http.ResponseWriter, r *http.Request) {
 	}
 	v, err := s.St.SaveInstallationPolicy(r.Context(), in, user(r))
 	if err != nil {
-		writeErr(w, err)
+		writeProcessErr(w, err)
 		return
 	}
 	// Пресеты — из сохранённой версии, а не повторным чтением активной:
@@ -78,6 +79,9 @@ type projectPolicyView struct {
 	// Source — источник политики проекта: собственное хранилище или файл
 	// доверенной ветки репозитория (api-contract add-policy-git-provider).
 	Source policySourceView `json:"source"`
+	// ProcessSource — чей процесс действует: project или installation
+	// (api-contract add-process-model).
+	ProcessSource string `json:"process_source"`
 }
 
 // sourceLabel — человекочитаемое имя источника политики.
@@ -96,9 +100,14 @@ type policySourceView struct {
 }
 
 func (s *Server) writeProjectPolicy(w http.ResponseWriter, r *http.Request, eff store.EffectivePolicy) {
+	processSource := "installation"
+	if eff.Overrides.Process != nil {
+		processSource = "project"
+	}
 	view := projectPolicyView{
 		Effective: eff.Presets, EffectiveHash: eff.Hash, Overrides: eff.Overrides,
-		Version: eff.Project, InstallationVersion: eff.Installation,
+		ProcessSource: processSource,
+		Version:       eff.Project, InstallationVersion: eff.Installation,
 		Engine: s.engineView(r),
 		Source: policySourceView{Kind: policy.SourceStore},
 	}
@@ -211,14 +220,33 @@ func (s *Server) putProjectPolicy(w http.ResponseWriter, r *http.Request) {
 			Code: "policy_from_git", Message: "политика проекта хранится в репозитории: меняйте её коммитом в " + policy.PolicyFile}})
 		return
 	}
-	var in policy.Overrides
-	if err := decode(r, &in); err != nil {
+	var raw json.RawMessage
+	if err := decode(r, &raw); err != nil {
 		unprocessable(w, "невалидный JSON")
 		return
 	}
+	var in policy.Overrides
+	if err := json.Unmarshal(raw, &in); err != nil {
+		unprocessable(w, "невалидный JSON")
+		return
+	}
+	// Тело без ключа process не трогает процесс проекта (api-contract):
+	// старые клиенты правят пресеты, не сбрасывая процесс на установку.
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &keys); err == nil {
+		if _, has := keys["process"]; !has {
+			cur, err := s.St.EffectivePolicy(r.Context(), r.PathValue("id"))
+			if err != nil {
+				// Не прочитали текущий процесс — не рискуем сбросить его молча.
+				writeErr(w, err)
+				return
+			}
+			in.Process = cur.Overrides.Process
+		}
+	}
 	v, err := s.St.SaveProjectPolicy(r.Context(), r.PathValue("id"), in, user(r))
 	if err != nil {
-		writeErr(w, err)
+		writeProcessErr(w, err)
 		return
 	}
 	// Ответ — из сохранённой версии: параллельный PUT не подменит её.
@@ -240,4 +268,18 @@ func (s *Server) listProjectPolicyVersions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// writeProcessErr — ошибка валидации процесса с привязкой к шагу и полю
+// (api-contract add-process-model: 422 с step и field), иначе как writeErr.
+func writeProcessErr(w http.ResponseWriter, err error) {
+	var pe *policy.ProcessError
+	if errors.As(err, &pe) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error": apiError{Code: "invalid", Message: pe.Error()},
+			"step":  pe.Step, "field": pe.Field,
+		})
+		return
+	}
+	writeErr(w, err)
 }

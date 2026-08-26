@@ -33,6 +33,10 @@ message RegisterRequest {
   // runner'ам control plane контекст не шлёт (спека agent-integration
   // «Обратный канал контекста»).
   bool context_channel = 9;
+  // Поддерживаемые модели (протокол v11, спека runners «Регистрация»):
+  // модель сессии приходит в Assignment.model. Пустой список — control plane
+  // берёт model как список из одного элемента (runner'ы v10).
+  repeated string models = 10;
 }
 
 message RegisterResponse {
@@ -110,6 +114,9 @@ message StageResult {
   string pr_url = 5;   // для stage=CODING при создании PR
   string session_id = 6; // сессия стадии из Assignment
   string policy_hash = 7; // эхо Assignment.policy.hash: итог стадии привязан к версии
+  // Эхо шага процесса и участника из Assignment (change add-process-model).
+  string step_id = 8;
+  string participant = 9;
 
   enum Stage {
     STAGE_UNSPECIFIED = 0;
@@ -186,6 +193,12 @@ message Assignment {
   // прочитать: у проекта без своих версий действуют значения установки, и
   // хэш у них тоже есть.
   Policy policy = 16;
+  // Процесс проекта (change add-process-model, спека process): модель, с
+  // которой агент запускает сессию (пусто — модель runner'а по умолчанию),
+  // шаг и участник, которые runner возвращает эхом в StageResult.
+  string model = 17;
+  string step_id = 18;
+  string participant = 19;
 }
 
 // Policy — часть политики, которая что-то значит для агента стадии.

@@ -25,7 +25,12 @@ import (
 // v6 — адаптер и глубина данных; v5 — токены регистрации, v4 —
 // репозиторий проекта, v3 — деплой-джобы, v2 — session_id. Runner'ы
 // младших версий отклоняются при Register.
-const protocolVersion = "10"
+const protocolVersion = "11"
+
+// compatProtocolVersion — прежняя версия, которую control plane принимает
+// до следующего мажорного изменения (design add-process-model): runner'ы
+// v10 регистрируются с одиночной моделью и игнорируют модель в назначении.
+const compatProtocolVersion = "10"
 
 // ProtocolVersion — версия протокола для состояния установки.
 const ProtocolVersion = protocolVersion
@@ -172,7 +177,7 @@ func (s *Server) flushRedactor(ctx context.Context, taskID, sessionID string) {
 }
 
 func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
-	if req.ProtocolVersion != protocolVersion {
+	if req.ProtocolVersion != protocolVersion && req.ProtocolVersion != compatProtocolVersion {
 		// Несовместимая версия — понятная ошибка, не разрыв (api-contract).
 		return &pb.RegisterResponse{
 			Accepted: false,
@@ -199,7 +204,7 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 	// «Регистрация фиксируется»).
 	token := tokenFromContext(ctx)
 	err := s.St.RegisterRunner(ctx, domain.Runner{
-		ID: req.RunnerId, Agent: req.Agent, Model: req.Model,
+		ID: req.RunnerId, Agent: req.Agent, Model: req.Model, Models: req.Models,
 		Host: req.Host, Capabilities: req.Capabilities,
 		Adapter: req.Adapter, Depth: domain.SessionDepth(req.Depth),
 		ContextChannel: req.ContextChannel,

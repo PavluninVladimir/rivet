@@ -50,6 +50,11 @@ func TestTaskTransitions(t *testing.T) {
 		{TaskBlocked, TaskReady}, {TaskFailed, TaskReady}, {TaskFailed, TaskCancelled},
 		// runner offline — перезапуск попытки
 		{TaskRunning, TaskReady}, {TaskTesting, TaskReady}, {TaskReview, TaskReady}, {TaskFixing, TaskReady},
+		// порядок активных шагов задаёт процесс проекта (спека backend/process):
+		// без шага test — сразу review, шаг code после review, возобновление
+		// из ready на любом шаге
+		{TaskRunning, TaskReview}, {TaskReview, TaskRunning}, {TaskReview, TaskTesting},
+		{TaskReady, TaskReview}, {TaskReady, TaskTesting}, {TaskReady, TaskFixing},
 	}
 	for _, p := range allowed {
 		if !p[0].CanTransition(p[1]) {
@@ -58,7 +63,7 @@ func TestTaskTransitions(t *testing.T) {
 	}
 	denied := [][2]TaskStatus{
 		{TaskDone, TaskRunning}, {TaskCancelled, TaskReady}, {TaskQueued, TaskRunning},
-		{TaskRunning, TaskReview}, {TaskReview, TaskRunning}, {TaskTesting, TaskDone},
+		{TaskTesting, TaskDone}, {TaskRunning, TaskDone},
 		{TaskReady, TaskDone}, {TaskBlocked, TaskDone}, {TaskFixing, TaskDone},
 	}
 	for _, p := range denied {

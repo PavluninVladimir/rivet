@@ -115,7 +115,13 @@ func (w *wrapAdapter) Run(ctx context.Context, dir, prompt string, sink runSink)
 		return agentRun{}, err
 	}
 	defer pf.cleanup()
-	out, err := runPTY(ctx, dir, w.cfg.AgentCmd, []string{"RIVET_PROMPT_FILE=" + pf.path}, sink.transcript)
+	// Модель назначения уходит обёрнутому агенту переменной окружения:
+	// что с ней делать, решает команда агента.
+	env := []string{"RIVET_PROMPT_FILE=" + pf.path}
+	if w.cfg.Model != "" {
+		env = append(env, "RIVET_MODEL="+w.cfg.Model)
+	}
+	out, err := runPTY(ctx, dir, w.cfg.AgentCmd, env, sink.transcript)
 	return agentRun{FinalText: out, Usage: parseUsage(out)}, err
 }
 

@@ -19,14 +19,18 @@ const (
 	TaskCancelled TaskStatus = "cancelled"
 )
 
-// taskTransitions — матрица переходов из спеки backend/domain-model, дословно.
+// taskTransitions — матрица переходов из спеки backend/domain-model. Между
+// активными статусами (running, testing, review, fixing) порядок задаёт
+// процесс проекта (спека backend/process), поэтому они переходят друг в
+// друга свободно; из ready задача входит на любой шаг (возобновление после
+// потери runner'а).
 var taskTransitions = map[TaskStatus][]TaskStatus{
 	TaskQueued:    {TaskReady, TaskBlocked, TaskCancelled},
-	TaskReady:     {TaskRunning, TaskQueued, TaskCancelled},
-	TaskRunning:   {TaskTesting, TaskBlocked, TaskFailed, TaskReady, TaskCancelled},
-	TaskTesting:   {TaskReview, TaskFixing, TaskFailed, TaskReady},
-	TaskReview:    {TaskDone, TaskFixing, TaskFailed, TaskReady},
-	TaskFixing:    {TaskTesting, TaskBlocked, TaskFailed, TaskReady},
+	TaskReady:     {TaskRunning, TaskTesting, TaskReview, TaskFixing, TaskQueued, TaskCancelled},
+	TaskRunning:   {TaskTesting, TaskReview, TaskFixing, TaskBlocked, TaskFailed, TaskReady, TaskCancelled},
+	TaskTesting:   {TaskReview, TaskFixing, TaskRunning, TaskBlocked, TaskFailed, TaskReady},
+	TaskReview:    {TaskDone, TaskFixing, TaskTesting, TaskRunning, TaskBlocked, TaskFailed, TaskReady},
+	TaskFixing:    {TaskTesting, TaskReview, TaskRunning, TaskBlocked, TaskFailed, TaskReady},
 	TaskBlocked:   {TaskQueued, TaskReady, TaskFixing, TaskCancelled},
 	TaskFailed:    {TaskQueued, TaskReady, TaskFixing, TaskCancelled},
 	TaskDone:      {},

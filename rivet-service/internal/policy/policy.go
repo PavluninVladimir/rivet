@@ -29,6 +29,9 @@ type Presets struct {
 	ReviewLimit      int      `json:"review_limit"`
 	DailyTokenBudget *int64   `json:"daily_token_budget"`
 	AutoPublish      bool     `json:"auto_publish"`
+	// Process — процесс задачи (спека backend/process). nil — процесс по
+	// умолчанию; omitempty, чтобы хэши версий без процесса не менялись.
+	Process *Process `json:"process,omitempty"`
 }
 
 // Overrides — документ проекта: каждое поле nil означает «наследуется от
@@ -41,6 +44,9 @@ type Overrides struct {
 	ReviewLimit      *int      `json:"review_limit"`
 	DailyTokenBudget *int64    `json:"daily_token_budget"`
 	AutoPublish      *bool     `json:"auto_publish"`
+	// Process — процесс проекта целиком (не поэлементно); nil — процесс
+	// установки.
+	Process *Process `json:"process,omitempty"`
 }
 
 // Defaults — значения по умолчанию, совпадающие с поведением до появления
@@ -113,7 +119,23 @@ func (p Presets) Validate() error {
 	if p.DailyTokenBudget != nil && *p.DailyTokenBudget < 0 {
 		return fmt.Errorf("%w: дневной бюджет токенов не может быть отрицательным", ErrInvalid)
 	}
-	return validatePatterns(p.HumanReviewPaths)
+	if err := validatePatterns(p.HumanReviewPaths); err != nil {
+		return err
+	}
+	if p.Process != nil {
+		return p.Process.Validate()
+	}
+	return nil
+}
+
+// EffectiveProcess — разрешённый процесс действующей политики: документ
+// политики или процесс по умолчанию, с лимитами из пресетов.
+func (p Presets) EffectiveProcess() Resolved {
+	doc := DefaultProcess()
+	if p.Process != nil {
+		doc = *p.Process
+	}
+	return Resolve(doc, p)
 }
 
 // Validate проверяет переопределения: те же правила для заданных полей.
@@ -128,7 +150,12 @@ func (o Overrides) Validate() error {
 		return fmt.Errorf("%w: дневной бюджет токенов не может быть отрицательным", ErrInvalid)
 	}
 	if o.HumanReviewPaths != nil {
-		return validatePatterns(*o.HumanReviewPaths)
+		if err := validatePatterns(*o.HumanReviewPaths); err != nil {
+			return err
+		}
+	}
+	if o.Process != nil {
+		return o.Process.Validate()
 	}
 	return nil
 }
@@ -187,6 +214,11 @@ func Effective(installation Presets, o Overrides) Presets {
 	}
 	if o.AutoPublish != nil {
 		eff.AutoPublish = *o.AutoPublish
+	}
+	if o.Process != nil {
+		cp := *o.Process
+		cp.Steps = append([]Step{}, o.Process.Steps...)
+		eff.Process = &cp
 	}
 	return eff
 }
