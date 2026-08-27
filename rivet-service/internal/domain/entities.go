@@ -628,17 +628,50 @@ const (
 	LLMStateUnchecked LLMProviderState = "unchecked"
 )
 
-// LLMProvider — провайдер модели декомпозиции с ключом в базе (спека
-// epic-decomposition «Настройка модели для декомпозиции»). Секрет наружу
-// не отдаётся — только префикс.
-type LLMProvider struct {
-	Provider    string
+// ModelEntry — модель подключения (спека model-connections «Список моделей
+// подключения»): обнаруженная у провайдера или заданная вручную. Цены в
+// микродолларах за миллион токенов.
+type ModelEntry struct {
+	ID            string `json:"id"`
+	Label         string `json:"label"`
+	InputPrice    *int64 `json:"input_price,omitempty"`
+	OutputPrice   *int64 `json:"output_price,omitempty"`
+	ContextWindow *int64 `json:"context_window,omitempty"`
+	Source        string `json:"source"` // discovered | manual
+	Hidden        bool   `json:"hidden"`
+	Missing       bool   `json:"missing"`
+}
+
+// ConnHeader — дополнительный HTTP-заголовок подключения; у секретного
+// значение наружу не отдаётся.
+type ConnHeader struct {
+	Name   string `json:"name"`
+	Value  string `json:"value,omitempty"`
+	Secret bool   `json:"secret"`
+}
+
+// ModelConnection — подключение к провайдеру, агрегатору или локальному
+// серверу моделей (спека backend/model-connections). Ключ наружу — префиксом.
+type ModelConnection struct {
+	ID          string
+	Name        string
+	Kind        string // vendor | aggregator | local
+	API         string // anthropic | openai
+	BaseURL     string
 	KeyPrefix   string
-	Model       string
-	Active      bool
+	HasKey      bool
+	Headers     []ConnHeader
+	Models      []ModelEntry
+	Enabled     bool
 	State       LLMProviderState
 	CheckDetail string
 	CheckedAt   *time.Time
 	UpdatedAt   time.Time
 	UpdatedBy   string // логин администратора
+}
+
+// PlannerModel — выбранная модель декомпозиции: подключение и модель.
+type PlannerModel struct {
+	ConnectionID string `json:"connection_id"`
+	Model        string `json:"model"`
 }

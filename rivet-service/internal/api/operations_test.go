@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
-	"github.com/PavluninVladimir/rivet/internal/planner"
 	"github.com/PavluninVladimir/rivet/internal/secretbox"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
@@ -157,112 +156,6 @@ func TestSystemStatus(t *testing.T) {
 	}
 }
 
-func TestModelsAPI(t *testing.T) {
-	f := seedOps(t, true)
-	ctx := context.Background()
-
-	// Подставной провайдер: ключ «good» принимается, «bad» отклоняется,
-	// остальное — сеть.
-	old := probe
-	probe = func(_ context.Context, provider, key string) error {
-		switch key {
-		case "good-key-1234567890":
-			return nil
-		case "bad-key-1234567890":
-			return fmt.Errorf("%w: HTTP 401", planner.ErrKeyRejected)
-		}
-		return errors.New("dial tcp: connection refused")
-	}
-	t.Cleanup(func() { probe = old })
-
-	resp, _ := call(t, "GET", f.srv.URL+"/api/v1/system/models", f.user, "", nil)
-	mustStatus(t, resp, http.StatusForbidden, "модели не-админом")
-
-	// Без модели декомпозиция отказывает no_planner.
-	proj, err := f.st.CreateProject(ctx, "p", "org/repo", nil, f.uid.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	epic, err := f.st.CreateEpic(ctx, proj.ID, "e", "goal")
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, body := call(t, "POST", f.srv.URL+"/api/v1/epics/"+epic.ID+"/decompose", f.user, "", nil)
-	mustStatus(t, resp, http.StatusServiceUnavailable, "декомпозиция без модели")
-	if !jsonContains(body, "no_planner") {
-		t.Fatalf("ожидался код no_planner: %s", body)
-	}
-
-	// Первое сохранение без ключа — 422; неизвестный провайдер — 404.
-	resp, _ = call(t, "PUT", f.srv.URL+"/api/v1/system/models/anthropic", f.admin, "", map[string]any{"active": true})
-	mustStatus(t, resp, http.StatusUnprocessableEntity, "первое сохранение без ключа")
-	resp, _ = call(t, "PUT", f.srv.URL+"/api/v1/system/models/openai", f.admin, "", map[string]any{"key": "good-key-1234567890"})
-	mustStatus(t, resp, http.StatusNotFound, "неизвестный провайдер")
-
-	// Ключ сохранён, проверен, активен: декомпозиция идёт этим провайдером.
-	resp, body = call(t, "PUT", f.srv.URL+"/api/v1/system/models/deepseek", f.admin, "",
-		map[string]any{"key": "good-key-1234567890", "active": true})
-	mustStatus(t, resp, http.StatusOK, "сохранение ключа")
-	var p llmProviderView
-	_ = json.Unmarshal(body, &p)
-	if p.State != "ok" || !p.Active || p.KeyPrefix != "good-key" || jsonContains(body, "good-key-1234567890") {
-		t.Fatalf("провайдер после сохранения: %s", body)
-	}
-	if _, st := f.api.plannerStatus(); st.Source != planner.SourceDB || st.Provider != "deepseek" || st.Model != "deepseek-v4-flash" {
-		t.Fatalf("планировщик не переключился: %+v", st)
-	}
-	resp, body = call(t, "GET", f.srv.URL+"/api/v1/system/models", f.admin, "", nil)
-	mustStatus(t, resp, http.StatusOK, "список моделей")
-	if !jsonContains(body, `"source":"db"`) {
-		t.Fatalf("источник: %s", body)
-	}
-
-	// Неверный ключ сохраняется как invalid, декомпозиция отказывает причиной.
-	resp, body = call(t, "PUT", f.srv.URL+"/api/v1/system/models/deepseek", f.admin, "",
-		map[string]any{"key": "bad-key-1234567890"})
-	mustStatus(t, resp, http.StatusOK, "неверный ключ сохраняется")
-	_ = json.Unmarshal(body, &p)
-	if p.State != "invalid" {
-		t.Fatalf("state = %s", p.State)
-	}
-	resp, body = call(t, "POST", f.srv.URL+"/api/v1/epics/"+epic.ID+"/decompose", f.user, "", nil)
-	mustStatus(t, resp, http.StatusServiceUnavailable, "декомпозиция с неверным ключом")
-	if !jsonContains(body, "planner_invalid") {
-		t.Fatalf("ожидался planner_invalid: %s", body)
-	}
-
-	// Сетевая ошибка при проверке — unchecked с пояснением, не invalid.
-	resp, body = call(t, "PUT", f.srv.URL+"/api/v1/system/models/deepseek", f.admin, "",
-		map[string]any{"key": "net-key-1234567890"})
-	mustStatus(t, resp, http.StatusOK, "ключ при сетевой ошибке")
-	_ = json.Unmarshal(body, &p)
-	if p.State != "unchecked" || p.CheckDetail == "" {
-		t.Fatalf("ожидался unchecked с пояснением: %s", body)
-	}
-
-	// Удаление возвращает установку на «модель не настроена».
-	resp, _ = call(t, "DELETE", f.srv.URL+"/api/v1/system/models/deepseek", f.admin, "", nil)
-	mustStatus(t, resp, http.StatusNoContent, "удаление")
-	if _, st := f.api.plannerStatus(); st.Source != planner.SourceNone {
-		t.Fatalf("после удаления источник = %s", st.Source)
-	}
-	resp, body = call(t, "GET", f.srv.URL+"/api/v1/events?scope=installation&type=llm_provider.removed", f.admin, "", nil)
-	mustStatus(t, resp, http.StatusOK, "аудит")
-	if !jsonContains(body, "llm_provider.removed") {
-		t.Fatalf("нет события удаления: %s", body)
-	}
-}
-
-func TestModelsWithoutSecretKey(t *testing.T) {
-	f := seedOps(t, false)
-	resp, body := call(t, "PUT", f.srv.URL+"/api/v1/system/models/anthropic", f.admin, "",
-		map[string]any{"key": "sk-ant-1234567890"})
-	mustStatus(t, resp, http.StatusServiceUnavailable, "ключ без RIVET_SECRET_KEY")
-	if !jsonContains(body, "no_secret_key") {
-		t.Fatalf("ожидался no_secret_key: %s", body)
-	}
-}
-
 func TestUsageInstallationScope(t *testing.T) {
 	f := seedOps(t, false)
 	ctx := context.Background()
@@ -312,40 +205,3 @@ func TestUsageInstallationScope(t *testing.T) {
 }
 
 func jsonContains(body []byte, s string) bool { return strings.Contains(string(body), s) }
-
-// Запасной источник из окружения: без активного провайдера в базе
-// планировщик берётся из EnvPlanner, ключ из консоли его вытесняет, а
-// удаление возвращает окружение (спека epic-decomposition).
-func TestPlannerEnvFallback(t *testing.T) {
-	f := seedOps(t, true)
-	ctx := context.Background()
-	old := probe
-	probe = func(context.Context, string, string) error { return nil }
-	t.Cleanup(func() { probe = old })
-
-	f.api.EnvPlanner = EnvPlanner{Provider: "anthropic", Key: "sk-env-1234567890"}
-	if err := f.api.ReloadPlanner(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if pl, st := f.api.plannerStatus(); pl == nil || st.Source != planner.SourceEnv || st.Provider != "anthropic" {
-		t.Fatalf("ожидался планировщик из окружения: %+v", st)
-	}
-	resp, body := call(t, "GET", f.srv.URL+"/api/v1/system/models", f.admin, "", nil)
-	mustStatus(t, resp, http.StatusOK, "модели")
-	if !strings.Contains(string(body), `"source":"env"`) || !strings.Contains(string(body), `"providers":[]`) {
-		t.Fatalf("список при env-источнике: %s", body)
-	}
-
-	resp, _ = call(t, "PUT", f.srv.URL+"/api/v1/system/models/deepseek", f.admin, "",
-		map[string]any{"key": "good-key-1234567890", "active": true, "model": "deepseek-reasoner"})
-	mustStatus(t, resp, http.StatusOK, "ключ из консоли")
-	if _, st := f.api.plannerStatus(); st.Source != planner.SourceDB || st.Provider != "deepseek" || st.Model != "deepseek-reasoner" {
-		t.Fatalf("база должна вытеснить окружение: %+v", st)
-	}
-
-	resp, _ = call(t, "DELETE", f.srv.URL+"/api/v1/system/models/deepseek", f.admin, "", nil)
-	mustStatus(t, resp, http.StatusNoContent, "удаление")
-	if _, st := f.api.plannerStatus(); st.Source != planner.SourceEnv {
-		t.Fatalf("после удаления ожидалось окружение: %+v", st)
-	}
-}

@@ -23,8 +23,9 @@ func (s *Server) decompose(w http.ResponseWriter, r *http.Request) {
 	pl, st := s.plannerStatus()
 	switch {
 	case st.State == "invalid":
-		writeJSON(w, http.StatusServiceUnavailable, map[string]apiError{"error": {
-			Code: "planner_invalid", Message: "ключ модели отклонён провайдером: " + st.Detail}})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": apiError{
+			Code: "planner_invalid", Message: "модель декомпозиции недоступна: " + st.Detail},
+			"connection_id": st.ConnectionID})
 		return
 	case pl == nil:
 		writeJSON(w, http.StatusServiceUnavailable, map[string]apiError{"error": {
