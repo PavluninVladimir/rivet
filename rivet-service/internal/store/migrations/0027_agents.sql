@@ -29,11 +29,11 @@ UPDATE runners SET declared_models = models, declared_capabilities = capabilitie
 
 -- Предустановленные профили с готовыми шаблонами окружения.
 INSERT INTO agents (id, name, adapter, command, capabilities, env, args, preset) VALUES
-  ('claude-code', 'Claude Code', 'claude-code', '', '{coding,review}',
+  ('claude-code', 'Claude Code', 'claude-code', '', '{}',
    '[{"name":"ANTHROPIC_API_KEY","value":"{{key}}"},{"name":"ANTHROPIC_BASE_URL","value":"{{base_url}}"}]', '[]', true),
-  ('codex', 'Codex', 'wrap', 'codex exec --skip-git-repo-check "$(cat "$RIVET_PROMPT_FILE")"', '{coding,review}',
+  ('codex', 'Codex', 'wrap', 'codex exec --skip-git-repo-check "$(cat "$RIVET_PROMPT_FILE")"', '{}',
    '[{"name":"OPENAI_API_KEY","value":"{{key}}"},{"name":"OPENAI_BASE_URL","value":"{{base_url}}"}]', '["-m","{{model}}"]', true),
-  ('opencode', 'OpenCode', 'wrap', 'opencode run "$(cat "$RIVET_PROMPT_FILE")"', '{coding,review}',
+  ('opencode', 'OpenCode', 'wrap', 'opencode run "$(cat "$RIVET_PROMPT_FILE")"', '{}',
    '[{"name":"OPENAI_API_KEY","value":"{{key}}"},{"name":"OPENAI_BASE_URL","value":"{{base_url}}"}]', '["--model","{{model}}"]', true);
 
 -- Существующие стенды: если есть подключение anthropic с моделями,
