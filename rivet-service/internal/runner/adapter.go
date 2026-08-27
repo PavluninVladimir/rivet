@@ -121,7 +121,14 @@ func (w *wrapAdapter) Run(ctx context.Context, dir, prompt string, sink runSink)
 	if w.cfg.Model != "" {
 		env = append(env, "RIVET_MODEL="+w.cfg.Model)
 	}
-	out, err := runPTY(ctx, dir, w.cfg.AgentCmd, env, sink.transcript)
+	// Окружение профиля агента поверх окружения runner'а; аргументы профиля
+	// добавляются к команде обёртки.
+	env = append(env, w.cfg.ExtraEnv...)
+	cmd := w.cfg.AgentCmd
+	for _, arg := range w.cfg.ExtraArgs {
+		cmd += " " + shellQuote(arg)
+	}
+	out, err := runPTY(ctx, dir, cmd, env, sink.transcript)
 	return agentRun{FinalText: out, Usage: parseUsage(out)}, err
 }
 

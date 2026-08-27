@@ -7,6 +7,10 @@
 set -eu
 PROMPT=$(cat "$RIVET_PROMPT_FILE")
 
+# Профиль агента (add-agent-profiles): модель и окружение из назначения
+# видны в транскрипте, секреты runner маскирует сам.
+echo "AGENT_MODEL=${RIVET_MODEL:-} FAKE_BASE_URL=${FAKE_BASE_URL:-} FAKE_KEY=${FAKE_KEY:-} ARGS=$*"
+
 # Отчёт о расходе (спека agent-integration «Отчёт usage через универсальную
 # обёртку»): даёт консоли ненулевые usage-цифры в e2e.
 usage() {

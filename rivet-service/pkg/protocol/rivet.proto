@@ -47,6 +47,10 @@ message RegisterResponse {
   bool accepted = 1;
   string message = 2;
   int32 heartbeat_interval_s = 3;
+  // Протокол v12 (add-agent-profiles): агент runner'а есть в каталоге
+  // профилей и канал runner'а признан защищённым (TLS или loopback).
+  bool catalog = 4;
+  bool secure = 5;
 }
 
 message RunnerMsg {
@@ -207,6 +211,18 @@ message Assignment {
   string participant = 19;
   // Текст задания шага prompt (add-process-editor).
   string step_prompt = 20;
+  // Запуск агента по профилю каталога (протокол v12, add-agent-profiles,
+  // спека agents «Доставка модели и учётных данных runner'у»): переменные
+  // окружения и аргументы по шаблону профиля, команда обёртки, подключение
+  // модели. Секреты включены только по режиму профиля и каналу runner'а;
+  // runner накладывает окружение поверх своего и маскирует секреты.
+  map<string, string> agent_env = 21;
+  repeated string agent_args = 22;
+  string agent_command = 23;
+  string connection_id = 24;
+  bool secrets_included = 25;
+  // Имена переменных с секретами: runner маскирует их значения в транскрипте.
+  repeated string agent_secret_names = 26;
 }
 
 // Policy — часть политики, которая что-то значит для агента стадии.

@@ -322,7 +322,11 @@ func (s *Store) ConnectionRefs(ctx context.Context, id string) ([]Ref, error) {
 	if ok && pm.ConnectionID == id {
 		refs = append(refs, Ref{Kind: "planner", ID: "planner_model"})
 	}
-	return refs, nil
+	agents, err := agentRefsForConnection(ctx, s.Pool, id)
+	if err != nil {
+		return nil, err
+	}
+	return append(refs, agents...), nil
 }
 
 func (s *Store) DeleteConnection(ctx context.Context, id, actorLogin string) error {
@@ -333,12 +337,25 @@ func (s *Store) DeleteConnection(ctx context.Context, id, actorLogin string) err
 		if err := lockPlanner(ctx, tx); err != nil {
 			return err
 		}
+		// Строка подключения под блокировкой: параллельная привязка профиля
+		// (FOR SHARE в checkBinding) дождётся исхода удаления.
+		if _, err := tx.Exec(ctx, `SELECT 1 FROM model_connections WHERE id=$1 FOR UPDATE`, id); err != nil {
+			return err
+		}
 		pm, ok, err := plannerModelTx(ctx, tx, false)
 		if err != nil {
 			return err
 		}
+		var refs []Ref
 		if ok && pm.ConnectionID == id {
-			return &ErrInUse{Refs: []Ref{{Kind: "planner", ID: "planner_model"}}}
+			refs = append(refs, Ref{Kind: "planner", ID: "planner_model"})
+		}
+		agents, err := agentRefsForConnection(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		if refs = append(refs, agents...); len(refs) > 0 {
+			return &ErrInUse{Refs: refs}
 		}
 		tag, err := tx.Exec(ctx, `DELETE FROM model_connections WHERE id=$1`, id)
 		if err != nil {

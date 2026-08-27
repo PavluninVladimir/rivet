@@ -92,6 +92,19 @@ type projectPolicyView struct {
 	// ProcessSource — чей процесс действует: project или installation
 	// (api-contract add-process-model).
 	ProcessSource string `json:"process_source"`
+	// AgentModels — действующие модели по умолчанию профилей агентов для
+	// проекта (add-agent-profiles): установка (профиль) и переопределение.
+	AgentModels map[string]agentModelView `json:"agent_models"`
+}
+
+// agentModelView — модель агента для проекта: значение установки из
+// профиля, действующее значение и его источник.
+type agentModelView struct {
+	Name         string                 `json:"name"`
+	Installation *domain.AgentModelRef  `json:"installation"`
+	Effective    *domain.AgentModelRef  `json:"effective"`
+	Source       string                 `json:"source"` // installation | project
+	Models       []domain.AgentModelRef `json:"models"`
 }
 
 // sourceLabel — человекочитаемое имя источника политики.
@@ -120,6 +133,20 @@ func (s *Server) writeProjectPolicy(w http.ResponseWriter, r *http.Request, eff 
 		Version:       eff.Project, InstallationVersion: eff.Installation,
 		Engine: s.engineView(r),
 		Source: policySourceView{Kind: policy.SourceStore},
+	}
+	view.AgentModels = map[string]agentModelView{}
+	if agents, err := s.St.ListAgents(r.Context()); err == nil {
+		for _, a := range agents {
+			if !a.Enabled {
+				continue
+			}
+			v := agentModelView{Name: a.Name, Installation: a.DefaultModel, Effective: a.DefaultModel, Source: "installation", Models: a.Models}
+			if ov, ok := eff.Presets.AgentModels[a.ID]; ok {
+				m := domain.AgentModelRef{ConnectionID: ov.ConnectionID, Model: ov.Model}
+				v.Effective, v.Source = &m, "project"
+			}
+			view.AgentModels[a.ID] = v
+		}
 	}
 	if p, err := s.St.GetProject(r.Context(), r.PathValue("id")); err == nil && p.PolicySource == policy.SourceGit {
 		view.Source = policySourceView{Kind: policy.SourceGit, File: policy.PolicyFile, Ref: p.DefaultBranch}

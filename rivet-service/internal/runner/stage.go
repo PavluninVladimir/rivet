@@ -42,12 +42,15 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	}
 	// sink — потоки запуска агента: транскрипт и структурированные шаги
 	// адаптера полной глубины (спека agent-integration «Шаги сессии»).
+	stageCfg := a.cfg.forAssignment(as)
+	masker := newSecretMasker(stageCfg.SecretValues, transcript)
 	sink := runSink{
-		transcript: transcript,
+		transcript: masker.feed,
 		session:    as.SessionId,
 		contexts:   a.contexts,
 		step: func(ev *pb.AgentEvent) {
 			ev.TaskId, ev.SessionId = as.TaskId, as.SessionId
+			ev.Text = masker.maskString(ev.Text)
 			emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Event{Event: ev}})
 		},
 	}
@@ -56,10 +59,18 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	var report usageReport
 	// Модель сессии — из назначения (участник шага процесса), иначе модель
 	// runner'а по умолчанию; адаптер стадии строится под неё.
-	model := a.cfg.forModel(as.Model).Model
+	model := stageCfg.Model
 	stageAdapter := a.adapter
-	if as.Model != "" && as.Model != a.cfg.Model {
-		stageAdapter = newAdapter(a.cfg.forModel(as.Model))
+	if as.Model != "" && as.Model != a.cfg.Model || len(stageCfg.ExtraEnv) > 0 || len(stageCfg.ExtraArgs) > 0 || stageCfg.AgentCmd != a.cfg.AgentCmd {
+		stageAdapter = newAdapter(stageCfg)
+	}
+	// runAgent — запуск адаптера с дожимом маски: хвост транскрипта и
+	// итоговый текст (маркеры, вопрос BLOCKED) не уносят секрет назначения.
+	runAgent := func(ws, prompt string) (agentRun, error) {
+		run, err := stageAdapter.Run(sctx, ws, prompt, sink)
+		masker.flush()
+		run.FinalText = masker.maskString(run.FinalText)
+		return run, err
 	}
 	noteUsage := func(run agentRun) {
 		report = run.Usage
@@ -99,7 +110,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	switch as.Stage {
 	case pb.StageResult_CODING, pb.StageResult_FIXING:
 		step("агент приступил к реализации")
-		run, err := stageAdapter.Run(sctx, ws, stagePrompt(as), sink)
+		run, err := runAgent(ws, stagePrompt(as))
 		noteUsage(run)
 		out := run.FinalText
 		// Блокировка распознаётся только у успешного запуска: агент,
@@ -153,7 +164,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 
 	case pb.StageResult_REVIEW:
 		step("независимое review изменений")
-		run, err := stageAdapter.Run(sctx, ws, reviewPrompt(as), sink)
+		run, err := runAgent(ws, reviewPrompt(as))
 		noteUsage(run)
 		if err != nil {
 			result(false, fmt.Sprintf("ревьюер завершился с ошибкой: %v", err))
@@ -167,7 +178,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		// процесса в ветке задачи, изменения коммитятся, вердикт — маркером;
 		// без маркера успешный выход агента даёт ok.
 		step("задание процесса: " + firstLine(as.StepPrompt))
-		run, err := stageAdapter.Run(sctx, ws, promptStepPrompt(as), sink)
+		run, err := runAgent(ws, promptStepPrompt(as))
 		noteUsage(run)
 		out := run.FinalText
 		if q, blocked := parseBlocked(out); blocked && err == nil {

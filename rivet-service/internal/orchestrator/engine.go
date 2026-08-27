@@ -390,12 +390,48 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	// «Доставка политик runner'ам»). Ошибка чтения не валит стадию — агент
 	// работает как прежде, гейты на plane никуда не делись.
 	var assignPolicy *pb.Policy
+	var agentModels map[string]policy.AgentModel
 	if eff, err := e.St.EffectivePolicy(ctx, p.ID); err != nil {
 		slog.Error("dispatch: политика проекта", "project", p.ID, "err", err)
 	} else {
 		assignPolicy = &pb.Policy{
 			Hash: eff.Hash, HumanReviewPaths: eff.Presets.HumanReviewPaths,
 			PolicyDir: policy.PolicyDir,
+		}
+		agentModels = eff.Presets.AgentModels
+	}
+	// Профиль агента из каталога (add-agent-profiles, спека agents «Доставка
+	// модели и учётных данных runner'у»): модель участника, иначе
+	// переопределение проекта, иначе модель по умолчанию; окружение и
+	// аргументы по шаблону, секреты по режиму профиля и каналу runner'а.
+	model := run.Model
+	var launch *store.AgentLaunch
+	// Окружение профиля уезжает только runner'ам, объявившим протокол v12:
+	// прежние полей не знают, а секреты без адресата отправлять незачем.
+	if runner.Catalog && runner.Protocol == "12" {
+		var override *policy.AgentModel
+		if am, ok := agentModels[runner.Agent]; ok {
+			override = &am
+		}
+		prof, binding, ok, rerr := e.St.ResolveAgentModel(ctx, runner.Agent, run.Model, override)
+		if rerr != nil {
+			slog.Error("dispatch: профиль агента", "agent", runner.Agent, "err", rerr)
+		} else if ok {
+			include := prof.Secrets == "always" || (prof.Secrets == "secure" && runner.Secure)
+			l, berr := e.St.BuildAgentLaunch(ctx, prof, binding, e.Box, include)
+			if berr != nil {
+				slog.Error("dispatch: окружение агента", "agent", runner.Agent, "err", berr)
+			} else {
+				launch = &l
+				if binding.Model != "" {
+					model = binding.Model
+				}
+			}
+		}
+	}
+	if model != "" && model != run.Model {
+		if err := e.St.SetRunModel(ctx, run.ID, model); err != nil {
+			slog.Error("dispatch: модель запуска", "run", run.ID, "err", err)
 		}
 	}
 	// Глубина сессии — глубина адаптера runner'а (спека agent-integration
@@ -405,8 +441,7 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 		slog.Error("dispatch: runner depth", "runner", runner.ID, "err", err)
 		depth = domain.DepthMinimal
 	}
-	// Модель сессии — из участника, иначе модель runner'а по умолчанию.
-	model := run.Model
+	// Модель сессии — из профиля или участника, иначе модель runner'а по умолчанию.
 	if model == "" {
 		model = runner.Model
 	}
@@ -480,14 +515,31 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 			Checks: checks, ExtraContext: extra, SessionId: sessionID,
 			RepoUrl: repoURL, GitToken: gitToken, BaseBranch: p.DefaultBranch,
 			UserPrompt: spec.userPrompt, Policy: assignPolicy,
-			Model: run.Model, StepId: step.ID, Participant: run.Participant,
+			Model: model, StepId: step.ID, Participant: run.Participant,
 			StepPrompt: step.Prompt,
 		}},
+	}
+	if launch != nil {
+		as := msg.GetAssign()
+		as.AgentEnv, as.AgentArgs, as.AgentCommand, as.ConnectionId = launch.Env, launch.Args, launch.Command, launch.ConnectionID
+		as.SecretsIncluded = len(launch.SecretNames) > 0
+		as.AgentSecretNames = launch.SecretNames
 	}
 	if !e.Out.Send(runner.ID, msg) {
 		slog.Warn("dispatch: runner недоступен, задачу вернёт heartbeat-таймаут",
 			"runner", runner.ID, "task", task.ID)
 		return sessionID, false
+	}
+	if launch != nil && len(launch.SecretNames) > 0 {
+		// Факт доставки секретов в event log без значений (спека agents).
+		if _, err := e.St.AppendEvent(ctx, store.EventInput{
+			ActorKind: domain.ActorRunner, ActorID: runner.ID, Type: "runner.secrets_delivered",
+			ProjectID: p.ID, TaskID: task.ID,
+			Text:    "runner " + runner.ID + " получил учётные данные подключения " + launch.ConnectionID,
+			Payload: map[string]any{"runner_id": runner.ID, "task_id": task.ID, "connection_id": launch.ConnectionID, "env_names": launch.SecretNames, "agent": runner.Agent},
+		}); err != nil {
+			slog.Error("dispatch: событие доставки секретов", "err", err)
+		}
 	}
 	return sessionID, true
 }
