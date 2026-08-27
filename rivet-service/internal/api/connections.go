@@ -8,7 +8,6 @@ import (
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/llm"
-	"github.com/PavluninVladimir/rivet/internal/planner"
 	"github.com/PavluninVladimir/rivet/internal/secretbox"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
@@ -288,11 +287,8 @@ type plannerView struct {
 
 func (s *Server) plannerView() plannerView {
 	_, st := s.plannerStatus()
-	v := plannerView{Source: string(st.Source), Model: st.Model, State: st.State, Detail: st.Detail}
-	if st.Source == planner.SourceCatalog {
-		v.ConnectionID = st.ConnectionID
-	}
-	return v
+	// У источника env в ConnectionID имя провайдера окружения.
+	return plannerView{Source: string(st.Source), ConnectionID: st.ConnectionID, Model: st.Model, State: st.State, Detail: st.Detail}
 }
 
 func (s *Server) getPlanner(w http.ResponseWriter, r *http.Request) {
