@@ -35,6 +35,9 @@ type Presets struct {
 	// ProcessLocks — ограничения установки на процессы проектов
 	// (add-process-editor); в переопределениях проекта их нет.
 	ProcessLocks *ProcessLocks `json:"process_locks,omitempty"`
+	// AgentModels — модели по умолчанию агентов, переопределённые проектом
+	// (add-agent-profiles); у установки пусто: умолчания живут в каталоге.
+	AgentModels map[string]AgentModel `json:"agent_models,omitempty"`
 }
 
 // Overrides — документ проекта: каждое поле nil означает «наследуется от
@@ -50,6 +53,16 @@ type Overrides struct {
 	// Process — процесс проекта целиком (не поэлементно); nil — процесс
 	// установки.
 	Process *Process `json:"process,omitempty"`
+	// AgentModels — модель по умолчанию профиля агента для этого проекта:
+	// одна из привязок профиля (спека agents «Переопределение модели агента
+	// в проекте»). Отсутствие ключа — модель установки.
+	AgentModels map[string]AgentModel `json:"agent_models,omitempty"`
+}
+
+// AgentModel — пара подключение/модель из привязок профиля агента.
+type AgentModel struct {
+	ConnectionID string `json:"connection_id"`
+	Model        string `json:"model"`
 }
 
 // Defaults — значения по умолчанию, совпадающие с поведением до появления
@@ -177,6 +190,11 @@ func (o Overrides) Validate() error {
 			return err
 		}
 	}
+	for id, m := range o.AgentModels {
+		if strings.TrimSpace(id) == "" || m.ConnectionID == "" || m.Model == "" {
+			return &ProcessError{Field: "agent_models." + id, Msg: "укажите подключение и модель"}
+		}
+	}
 	if o.Process != nil {
 		return o.Process.Validate()
 	}
@@ -242,6 +260,12 @@ func Effective(installation Presets, o Overrides) Presets {
 		cp := *o.Process
 		cp.Steps = append([]Step{}, o.Process.Steps...)
 		eff.Process = &cp
+	}
+	if len(o.AgentModels) > 0 {
+		eff.AgentModels = map[string]AgentModel{}
+		for k, v := range o.AgentModels {
+			eff.AgentModels[k] = v
+		}
 	}
 	// Ограничения установки проектом не переопределяются: остаются как есть.
 	return eff

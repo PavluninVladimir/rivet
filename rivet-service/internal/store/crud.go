@@ -253,11 +253,38 @@ func (s *Store) ListEpicTasks(ctx context.Context, epicID string) ([]domain.Task
 // занятость целиком, и задачу, и публикацию (активную публикацию перед этим
 // проваливает вызывающий — Register). $6 — токен регистрации (RegisterRunner).
 const upsertRunnerSQL = `
-		INSERT INTO runners (id, agent, model, host, capabilities, adapter, depth, context_channel, models, stages, status, last_seen, token_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$9,$10,$11,'idle',now(),$8)
+		INSERT INTO runners (id, agent, model, host, capabilities, adapter, depth, context_channel, models, stages, status, last_seen, token_id, declared_models, secure, catalog, declared_capabilities, protocol)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$9,$10,$11,'idle',now(),$8,$10,$12,false,$5,$13)
 		ON CONFLICT (id) DO UPDATE SET agent=$2, model=$3, host=$4, capabilities=$5,
-			adapter=$6, depth=$7, context_channel=$9, models=$10, stages=$11,
+			adapter=$6, depth=$7, context_channel=$9, models=$10, stages=$11, declared_models=$10, secure=$12, catalog=false,
+			declared_capabilities=$5, protocol=$13,
 			status='idle', task_id=NULL, deployment_id=NULL, ctx_pct=NULL, last_seen=now()`
+
+// runnerCols — колонки runner'а с профилем агента (add-agent-profiles).
+const runnerCols = `r.id, r.agent, r.model, r.models, r.stages, r.host, r.capabilities, r.status, COALESCE(r.task_id::text,''), r.ctx_pct, r.draining, r.last_seen, r.adapter, r.depth, r.context_channel,
+	r.catalog, r.secure, COALESCE(a.name, ''), r.declared_models, r.declared_capabilities, r.protocol`
+
+func scanRunner(row pgx.Row) (domain.Runner, error) {
+	var r domain.Runner
+	err := row.Scan(&r.ID, &r.Agent, &r.Model, &r.Models, &r.Stages, &r.Host, &r.Capabilities,
+		&r.Status, &r.TaskID, &r.CtxPct, &r.Draining, &r.LastSeen, &r.Adapter, &r.Depth, &r.ContextChannel,
+		&r.Catalog, &r.Secure, &r.ProfileName, &r.DeclaredModels, &r.DeclaredCapabilities, &r.Protocol)
+	return r, err
+}
+
+// adoptRunnerProfile — runner с агентом из каталога получает модели и
+// capabilities профиля (спека runners «Регистрация runner'а»); без
+// включённого профиля действуют объявленные.
+func adoptRunnerProfile(ctx context.Context, tx pgx.Tx, runnerID, agent string) error {
+	a, err := scanAgent(tx.QueryRow(ctx, `SELECT `+agentCols+` FROM agents a LEFT JOIN users u ON u.id=a.updated_by WHERE a.id=$1 AND a.enabled`, agent))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return syncRunnersForAgent(ctx, tx, a, runnerID)
+}
 
 // runnerModels — список моделей runner'а: объявленный или одиночная
 // модель (runner'ы v10 и старые вызовы) как список из одного элемента.
@@ -298,9 +325,13 @@ func normalizeAdapter(r domain.Runner) domain.Runner {
 // протокол использует RegisterRunner.
 func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
 	r = normalizeAdapter(r)
-	_, err := s.Pool.Exec(ctx, upsertRunnerSQL, r.ID, r.Agent, r.Model, r.Host, r.Capabilities,
-		r.Adapter, r.Depth, nil, r.ContextChannel, runnerModels(r), runnerStages(r))
-	return err
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, upsertRunnerSQL, r.ID, r.Agent, r.Model, r.Host, r.Capabilities,
+			r.Adapter, r.Depth, nil, r.ContextChannel, runnerModels(r), runnerStages(r), r.Secure, r.Protocol); err != nil {
+			return err
+		}
+		return adoptRunnerProfile(ctx, tx, r.ID, r.Agent)
+	})
 }
 
 // TouchRunner обновляет heartbeat; ctxPct == nil — заполненность неизвестна.
@@ -312,18 +343,15 @@ func (s *Store) TouchRunner(ctx context.Context, id string, ctxPct *int) error {
 
 func (s *Store) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT id, agent, model, models, stages, host, capabilities, status, COALESCE(task_id::text,''), ctx_pct, draining, last_seen, adapter, depth, context_channel
-		FROM runners ORDER BY id`)
+		SELECT `+runnerCols+` FROM runners r LEFT JOIN agents a ON a.id = r.agent ORDER BY r.id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []domain.Runner
 	for rows.Next() {
-		var r domain.Runner
-		if err := rows.Scan(&r.ID, &r.Agent, &r.Model, &r.Models, &r.Stages, &r.Host, &r.Capabilities,
-			&r.Status, &r.TaskID, &r.CtxPct, &r.Draining, &r.LastSeen, &r.Adapter, &r.Depth,
-			&r.ContextChannel); err != nil {
+		r, err := scanRunner(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, r)

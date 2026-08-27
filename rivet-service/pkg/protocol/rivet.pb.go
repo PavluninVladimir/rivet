@@ -275,8 +275,12 @@ type RegisterResponse struct {
 	Accepted           bool   `protobuf:"varint,1,opt,name=accepted,proto3" json:"accepted,omitempty"`
 	Message            string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
 	HeartbeatIntervalS int32  `protobuf:"varint,3,opt,name=heartbeat_interval_s,json=heartbeatIntervalS,proto3" json:"heartbeat_interval_s,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Протокол v12 (add-agent-profiles): агент runner'а есть в каталоге
+	// профилей и канал runner'а признан защищённым (TLS или loopback).
+	Catalog       bool `protobuf:"varint,4,opt,name=catalog,proto3" json:"catalog,omitempty"`
+	Secure        bool `protobuf:"varint,5,opt,name=secure,proto3" json:"secure,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RegisterResponse) Reset() {
@@ -328,6 +332,20 @@ func (x *RegisterResponse) GetHeartbeatIntervalS() int32 {
 		return x.HeartbeatIntervalS
 	}
 	return 0
+}
+
+func (x *RegisterResponse) GetCatalog() bool {
+	if x != nil {
+		return x.Catalog
+	}
+	return false
+}
+
+func (x *RegisterResponse) GetSecure() bool {
+	if x != nil {
+		return x.Secure
+	}
+	return false
 }
 
 type RunnerMsg struct {
@@ -1392,9 +1410,21 @@ type Assignment struct {
 	StepId      string `protobuf:"bytes,18,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
 	Participant string `protobuf:"bytes,19,opt,name=participant,proto3" json:"participant,omitempty"`
 	// Текст задания шага prompt (add-process-editor).
-	StepPrompt    string `protobuf:"bytes,20,opt,name=step_prompt,json=stepPrompt,proto3" json:"step_prompt,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	StepPrompt string `protobuf:"bytes,20,opt,name=step_prompt,json=stepPrompt,proto3" json:"step_prompt,omitempty"`
+	// Запуск агента по профилю каталога (протокол v12, add-agent-profiles,
+	// спека agents «Доставка модели и учётных данных runner'у»): переменные
+	// окружения и аргументы по шаблону профиля, команда обёртки, подключение
+	// модели. Секреты включены только по режиму профиля и каналу runner'а;
+	// runner накладывает окружение поверх своего и маскирует секреты.
+	AgentEnv        map[string]string `protobuf:"bytes,21,rep,name=agent_env,json=agentEnv,proto3" json:"agent_env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	AgentArgs       []string          `protobuf:"bytes,22,rep,name=agent_args,json=agentArgs,proto3" json:"agent_args,omitempty"`
+	AgentCommand    string            `protobuf:"bytes,23,opt,name=agent_command,json=agentCommand,proto3" json:"agent_command,omitempty"`
+	ConnectionId    string            `protobuf:"bytes,24,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
+	SecretsIncluded bool              `protobuf:"varint,25,opt,name=secrets_included,json=secretsIncluded,proto3" json:"secrets_included,omitempty"`
+	// Имена переменных с секретами: runner маскирует их значения в транскрипте.
+	AgentSecretNames []string `protobuf:"bytes,26,rep,name=agent_secret_names,json=agentSecretNames,proto3" json:"agent_secret_names,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Assignment) Reset() {
@@ -1565,6 +1595,48 @@ func (x *Assignment) GetStepPrompt() string {
 		return x.StepPrompt
 	}
 	return ""
+}
+
+func (x *Assignment) GetAgentEnv() map[string]string {
+	if x != nil {
+		return x.AgentEnv
+	}
+	return nil
+}
+
+func (x *Assignment) GetAgentArgs() []string {
+	if x != nil {
+		return x.AgentArgs
+	}
+	return nil
+}
+
+func (x *Assignment) GetAgentCommand() string {
+	if x != nil {
+		return x.AgentCommand
+	}
+	return ""
+}
+
+func (x *Assignment) GetConnectionId() string {
+	if x != nil {
+		return x.ConnectionId
+	}
+	return ""
+}
+
+func (x *Assignment) GetSecretsIncluded() bool {
+	if x != nil {
+		return x.SecretsIncluded
+	}
+	return false
+}
+
+func (x *Assignment) GetAgentSecretNames() []string {
+	if x != nil {
+		return x.AgentSecretNames
+	}
+	return nil
 }
 
 // Policy — часть политики, которая что-то значит для агента стадии.
@@ -2074,11 +2146,13 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x0fcontext_channel\x18\t \x01(\bR\x0econtextChannel\x12\x16\n" +
 	"\x06models\x18\n" +
 	" \x03(\tR\x06models\x12\x16\n" +
-	"\x06stages\x18\v \x03(\tR\x06stages\"z\n" +
+	"\x06stages\x18\v \x03(\tR\x06stages\"\xac\x01\n" +
 	"\x10RegisterResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x120\n" +
-	"\x14heartbeat_interval_s\x18\x03 \x01(\x05R\x12heartbeatIntervalS\"\xce\x03\n" +
+	"\x14heartbeat_interval_s\x18\x03 \x01(\x05R\x12heartbeatIntervalS\x12\x18\n" +
+	"\acatalog\x18\x04 \x01(\bR\acatalog\x12\x16\n" +
+	"\x06secure\x18\x05 \x01(\bR\x06secure\"\xce\x03\n" +
 	"\tRunnerMsg\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12'\n" +
 	"\x05hello\x18\x02 \x01(\v2\x0f.rivet.v1.HelloH\x00R\x05hello\x123\n" +
@@ -2182,7 +2256,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x04text\x18\x04 \x01(\tR\x04text\"'\n" +
 	"\x03Ack\x12 \n" +
 	"\facked_msg_id\x18\x01 \x01(\tR\n" +
-	"ackedMsgId\"\xf6\x04\n" +
+	"ackedMsgId\"\xb6\a\n" +
 	"\n" +
 	"Assignment\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
@@ -2209,7 +2283,17 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\astep_id\x18\x12 \x01(\tR\x06stepId\x12 \n" +
 	"\vparticipant\x18\x13 \x01(\tR\vparticipant\x12\x1f\n" +
 	"\vstep_prompt\x18\x14 \x01(\tR\n" +
-	"stepPrompt\"i\n" +
+	"stepPrompt\x12?\n" +
+	"\tagent_env\x18\x15 \x03(\v2\".rivet.v1.Assignment.AgentEnvEntryR\bagentEnv\x12\x1d\n" +
+	"\n" +
+	"agent_args\x18\x16 \x03(\tR\tagentArgs\x12#\n" +
+	"\ragent_command\x18\x17 \x01(\tR\fagentCommand\x12#\n" +
+	"\rconnection_id\x18\x18 \x01(\tR\fconnectionId\x12)\n" +
+	"\x10secrets_included\x18\x19 \x01(\bR\x0fsecretsIncluded\x12,\n" +
+	"\x12agent_secret_names\x18\x1a \x03(\tR\x10agentSecretNames\x1a;\n" +
+	"\rAgentEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"i\n" +
 	"\x06Policy\x12\x12\n" +
 	"\x04hash\x18\x01 \x01(\tR\x04hash\x12,\n" +
 	"\x12human_review_paths\x18\x02 \x03(\tR\x10humanReviewPaths\x12\x1d\n" +
@@ -2274,7 +2358,7 @@ func file_pkg_protocol_rivet_proto_rawDescGZIP() []byte {
 }
 
 var file_pkg_protocol_rivet_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(StageResult_Stage)(0),   // 0: rivet.v1.StageResult.Stage
 	(DeployResult_Stage)(0),  // 1: rivet.v1.DeployResult.Stage
@@ -2299,6 +2383,7 @@ var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(*PauseRunner)(nil),      // 20: rivet.v1.PauseRunner
 	(*DeployJob)(nil),        // 21: rivet.v1.DeployJob
 	(*DeployResult)(nil),     // 22: rivet.v1.DeployResult
+	nil,                      // 23: rivet.v1.Assignment.AgentEnvEntry
 }
 var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	5,  // 0: rivet.v1.RunnerMsg.hello:type_name -> rivet.v1.Hello
@@ -2320,16 +2405,17 @@ var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	0,  // 16: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
 	17, // 17: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
 	16, // 18: rivet.v1.Assignment.policy:type_name -> rivet.v1.Policy
-	1,  // 19: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
-	2,  // 20: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
-	4,  // 21: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
-	3,  // 22: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
-	12, // 23: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
-	22, // [22:24] is the sub-list for method output_type
-	20, // [20:22] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	23, // 19: rivet.v1.Assignment.agent_env:type_name -> rivet.v1.Assignment.AgentEnvEntry
+	1,  // 20: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
+	2,  // 21: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
+	4,  // 22: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
+	3,  // 23: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
+	12, // 24: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
+	23, // [23:25] is the sub-list for method output_type
+	21, // [21:23] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_pkg_protocol_rivet_proto_init() }
@@ -2364,7 +2450,7 @@ func file_pkg_protocol_rivet_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_protocol_rivet_proto_rawDesc), len(file_pkg_protocol_rivet_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   21,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -585,11 +585,8 @@ func (s *Store) AssignRun(ctx context.Context, excludedProjects, excludedEpics [
 
 // GetRunner — runner по идентификатору.
 func (s *Store) GetRunner(ctx context.Context, id string) (domain.Runner, error) {
-	var r domain.Runner
-	err := s.Pool.QueryRow(ctx, `
-		SELECT id, agent, model, models, stages, host, capabilities, status, COALESCE(task_id::text,''), ctx_pct, draining, last_seen, adapter, depth, context_channel
-		FROM runners WHERE id=$1`, id).Scan(&r.ID, &r.Agent, &r.Model, &r.Models, &r.Stages, &r.Host, &r.Capabilities,
-		&r.Status, &r.TaskID, &r.CtxPct, &r.Draining, &r.LastSeen, &r.Adapter, &r.Depth, &r.ContextChannel)
+	r, err := scanRunner(s.Pool.QueryRow(ctx, `
+		SELECT `+runnerCols+` FROM runners r LEFT JOIN agents a ON a.id = r.agent WHERE r.id=$1`, id))
 	return r, nf(err)
 }
 

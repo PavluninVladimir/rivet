@@ -113,6 +113,7 @@ func (c *claudeAdapter) Run(ctx context.Context, dir, prompt string, sink runSin
 	if c.cfg.Model != "" {
 		args = append(args, "--model", c.cfg.Model)
 	}
+	args = append(args, c.cfg.ExtraArgs...)
 	bin := c.cfg.ClaudeBin
 	if bin == "" {
 		bin = "claude"
@@ -122,7 +123,8 @@ func (c *claudeAdapter) Run(ctx context.Context, dir, prompt string, sink runSin
 	cmd.Stdin = strings.NewReader(prompt)
 	// RIVET_HOOK_CMD дублирует команду хука для стендов и тестов: fake-claude
 	// вызывает её сам вместо чтения settings-файла.
-	cmd.Env = append(os.Environ(), "RIVET_HOOK_SOCK="+sockPath, "RIVET_HOOK_CMD="+hookCmd)
+	// Окружение профиля агента (ключ и адрес подключения) поверх окружения хоста.
+	cmd.Env = append(append(os.Environ(), c.cfg.ExtraEnv...), "RIVET_HOOK_SOCK="+sockPath, "RIVET_HOOK_CMD="+hookCmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return agentRun{}, err

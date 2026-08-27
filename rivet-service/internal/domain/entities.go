@@ -148,6 +148,17 @@ type Runner struct {
 	// (спека agent-integration «Уровни глубины данных»).
 	Adapter string
 	Depth   SessionDepth
+	// Catalog — агент runner'а есть в каталоге профилей (add-agent-profiles):
+	// модели и capabilities приходят из профиля. Secure — канал runner'а
+	// защищён (TLS или loopback): секреты подключений можно доставлять.
+	Catalog              bool
+	Secure               bool
+	ProfileName          string
+	DeclaredModels       []string
+	DeclaredCapabilities []string
+	// Protocol — версия протокола runner'а при регистрации: полям v12
+	// (окружение профиля) нет смысла ехать runner'у v11.
+	Protocol string
 	// ContextChannel — адаптер доводит контекст от Rivet до работающего
 	// агента (спека agent-integration «Обратный канал контекста»);
 	// без него система контекст этому runner'у не шлёт.
@@ -668,6 +679,38 @@ type ModelConnection struct {
 	CheckedAt   *time.Time
 	UpdatedAt   time.Time
 	UpdatedBy   string // логин администратора
+}
+
+// AgentModelRef — привязка модели к агенту: подключение и модель из его списка.
+type AgentModelRef struct {
+	ConnectionID string `json:"connection_id"`
+	Model        string `json:"model"`
+	Unavailable  bool   `json:"unavailable,omitempty"`
+}
+
+// EnvVar — переменная окружения шаблона агента с подстановками.
+type EnvVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// AgentProfile — профиль агента (спека backend/agents «Каталог агентов»).
+type AgentProfile struct {
+	ID           string
+	Name         string
+	Adapter      string // claude-code | wrap
+	Command      string
+	Capabilities []string
+	Models       []AgentModelRef
+	DefaultModel *AgentModelRef
+	Env          []EnvVar
+	Args         []string
+	Secrets      string // never | secure | always
+	Enabled      bool
+	Preset       bool
+	Runners      int
+	UpdatedAt    time.Time
+	UpdatedBy    string
 }
 
 // PlannerModel — выбранная модель декомпозиции: подключение и модель.

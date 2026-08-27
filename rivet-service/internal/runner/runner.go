@@ -4,12 +4,14 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,7 +30,7 @@ import (
 // v6 — адаптер и глубина данных; v5 — токены регистрации, v4 —
 // репозиторий проекта, v3 — деплой-джобы, v2 — session_id. Runner'ы
 // младших версий отклоняются при Register.
-const protocolVersion = "11"
+const protocolVersion = "12"
 
 type Config struct {
 	PlaneAddr string
@@ -63,6 +65,13 @@ type Config struct {
 	AdapterCmd     string
 	AdapterDepth   string
 	AdapterContext bool
+	// ExtraEnv и ExtraArgs — окружение и аргументы агента из назначения
+	// (профиль каталога, протокол v12): накладываются поверх окружения
+	// runner'а и аргументов адаптера. SecretValues — значения для
+	// маскирования в транскрипте.
+	ExtraEnv     []string
+	ExtraArgs    []string
+	SecretValues []string
 }
 
 func Run(ctx context.Context, cfg Config) error {
@@ -158,6 +167,105 @@ func (c Config) forModel(model string) Config {
 		c.Model = model
 	}
 	return c
+}
+
+// forAssignment — конфигурация адаптера под назначение: модель, окружение и
+// аргументы профиля агента (add-agent-profiles), команда обёртки из
+// профиля. Секреты назначения маскируются в транскрипте.
+func (c Config) forAssignment(as *pb.Assignment) Config {
+	c = c.forModel(as.Model)
+	if len(as.AgentEnv) > 0 {
+		keys := make([]string, 0, len(as.AgentEnv))
+		for k := range as.AgentEnv {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		secret := map[string]bool{}
+		for _, n := range as.AgentSecretNames {
+			secret[n] = true
+		}
+		for _, k := range keys {
+			c.ExtraEnv = append(c.ExtraEnv, k+"="+as.AgentEnv[k])
+			if secret[k] && as.AgentEnv[k] != "" {
+				c.SecretValues = append(c.SecretValues, as.AgentEnv[k])
+			}
+		}
+	}
+	c.ExtraArgs = append([]string{}, as.AgentArgs...)
+	if as.AgentCommand != "" && c.Adapter == AdapterWrap {
+		c.AgentCmd = as.AgentCommand
+	}
+	return c
+}
+
+// secretMasker — подмена значений секретов в потоке транскрипта: вывод
+// агента не должен унести ключ подключения в хранилище. Хвост чанка длиной
+// до самого длинного секрета придерживается до следующего чанка или
+// flush: секрет, разрезанный границей чанков, всё равно маскируется.
+type secretMasker struct {
+	values [][]byte
+	keep   int
+	tail   []byte
+	sink   func([]byte)
+}
+
+func newSecretMasker(values []string, sink func([]byte)) *secretMasker {
+	m := &secretMasker{sink: sink}
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		m.values = append(m.values, []byte(v))
+		if len(v) > m.keep {
+			m.keep = len(v)
+		}
+	}
+	if m.keep > 0 {
+		m.keep--
+	}
+	return m
+}
+
+func (m *secretMasker) mask(b []byte) []byte {
+	for _, v := range m.values {
+		b = bytes.ReplaceAll(b, v, []byte("***"))
+	}
+	return b
+}
+
+func (m *secretMasker) feed(b []byte) {
+	if len(m.values) == 0 {
+		m.sink(b)
+		return
+	}
+	buf := m.mask(append(m.tail, b...))
+	if len(buf) > m.keep {
+		m.sink(buf[:len(buf)-m.keep])
+		m.tail = append([]byte{}, buf[len(buf)-m.keep:]...)
+	} else {
+		m.tail = buf
+	}
+}
+
+func (m *secretMasker) flush() {
+	if len(m.tail) > 0 {
+		m.sink(m.mask(m.tail))
+		m.tail = nil
+	}
+}
+
+// maskString — маскирование секретов в тексте итога и шагов.
+func (m *secretMasker) maskString(s string) string {
+	if len(m.values) == 0 {
+		return s
+	}
+	return string(m.mask([]byte(s)))
+}
+
+// maskSecrets — маскирование без переноса (тесты и одиночные строки).
+func maskSecrets(values []string, sink func([]byte)) func([]byte) {
+	m := newSecretMasker(values, sink)
+	return func(b []byte) { m.feed(b); m.flush() }
 }
 
 func (a *agent) session(ctx context.Context) error {

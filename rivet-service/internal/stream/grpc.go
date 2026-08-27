@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,8 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 )
 
 // Версия 10: рабочая копия репозитория в деплой-джобе — доставка
@@ -25,12 +28,12 @@ import (
 // v6 — адаптер и глубина данных; v5 — токены регистрации, v4 —
 // репозиторий проекта, v3 — деплой-джобы, v2 — session_id. Runner'ы
 // младших версий отклоняются при Register.
-const protocolVersion = "11"
+const protocolVersion = "12"
 
 // compatProtocolVersion — прежняя версия, которую control plane принимает
 // до следующего мажорного изменения (design add-process-model): runner'ы
 // v10 регистрируются с одиночной моделью и игнорируют модель в назначении.
-const compatProtocolVersion = "10"
+const compatProtocolVersion = "11"
 
 // ProtocolVersion — версия протокола для состояния установки.
 const ProtocolVersion = protocolVersion
@@ -203,20 +206,46 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 	// Регистрация фиксирует токен и пишет событие установки (спека runners
 	// «Регистрация фиксируется»).
 	token := tokenFromContext(ctx)
+	secure := secureChannel(ctx)
 	err := s.St.RegisterRunner(ctx, domain.Runner{
 		ID: req.RunnerId, Agent: req.Agent, Model: req.Model, Models: req.Models, Stages: req.Stages,
 		Host: req.Host, Capabilities: req.Capabilities,
 		Adapter: req.Adapter, Depth: domain.SessionDepth(req.Depth),
-		ContextChannel: req.ContextChannel,
+		ContextChannel: req.ContextChannel, Secure: secure, Protocol: req.ProtocolVersion,
 	}, token)
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("runner registered", "runner", req.RunnerId, "agent", req.Agent, "caps", req.Capabilities, "token", token.Name)
+	rn, err := s.St.GetRunner(ctx, req.RunnerId)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("runner registered", "runner", req.RunnerId, "agent", req.Agent, "caps", rn.Capabilities, "token", token.Name, "catalog", rn.Catalog, "secure", secure)
 	return &pb.RegisterResponse{
 		Accepted:           true,
 		HeartbeatIntervalS: int32(s.HeartbeatInterval.Seconds()),
+		Catalog:            rn.Catalog,
+		Secure:             secure,
 	}, nil
+}
+
+// secureChannel — защищён ли канал runner'а: TLS у соединения или
+// loopback-адрес (runner на той же машине). Секреты подключений в режиме
+// профиля secure уходят только по такому каналу.
+func secureChannel(ctx context.Context) bool {
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return false
+	}
+	if _, tls := p.AuthInfo.(credentials.TLSInfo); tls {
+		return true
+	}
+	host := p.Addr.String()
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {

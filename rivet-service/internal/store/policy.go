@@ -147,6 +147,9 @@ func (s *Store) SaveInstallationPolicy(ctx context.Context, p policy.Presets, lo
 	if err := p.Validate(); err != nil {
 		return PolicyVersion{}, err
 	}
+	if err := s.ValidateProcessAgents(ctx, p.Process); err != nil {
+		return PolicyVersion{}, err
+	}
 	return s.savePolicyVersion(ctx, PolicyScopeInstallation, "", p, login)
 }
 
@@ -220,6 +223,12 @@ func (s *Store) SaveProjectPolicy(ctx context.Context, projectID string, o polic
 	if err := s.ValidateProcessMembers(ctx, projectID, o); err != nil {
 		return PolicyVersion{}, err
 	}
+	if err := s.ValidateProcessAgents(ctx, o.Process); err != nil {
+		return PolicyVersion{}, err
+	}
+	if err := s.ValidateAgentModels(ctx, o.AgentModels); err != nil {
+		return PolicyVersion{}, err
+	}
 	if err := s.checkProjectLocks(ctx, o); err != nil {
 		return PolicyVersion{}, err
 	}
@@ -282,6 +291,12 @@ func (s *Store) SaveProjectPolicyFromGit(ctx context.Context, projectID string, 
 		return false, err
 	}
 	if err := s.ValidateProcessMembers(ctx, projectID, o); err != nil {
+		return false, err
+	}
+	if err := s.ValidateProcessAgents(ctx, o.Process); err != nil {
+		return false, err
+	}
+	if err := s.ValidateAgentModels(ctx, o.AgentModels); err != nil {
 		return false, err
 	}
 	if err := s.checkProjectLocks(ctx, o); err != nil {

@@ -129,7 +129,14 @@ func (s *Store) RegisterRunner(ctx context.Context, r domain.Runner, token domai
 		r = normalizeAdapter(r)
 		if _, err := tx.Exec(ctx, upsertRunnerSQL+`, token_id=$8`,
 			r.ID, r.Agent, r.Model, r.Host, r.Capabilities, r.Adapter, r.Depth,
-			tokenID(token), r.ContextChannel, runnerModels(r), runnerStages(r)); err != nil {
+			tokenID(token), r.ContextChannel, runnerModels(r), runnerStages(r), r.Secure, r.Protocol); err != nil {
+			return err
+		}
+		if err := adoptRunnerProfile(ctx, tx, r.ID, r.Agent); err != nil {
+			return err
+		}
+		var catalog bool
+		if err := tx.QueryRow(ctx, `SELECT catalog FROM runners WHERE id=$1`, r.ID).Scan(&catalog); err != nil {
 			return err
 		}
 		_, err := appendEvent(ctx, tx, EventInput{
@@ -138,6 +145,7 @@ func (s *Store) RegisterRunner(ctx context.Context, r domain.Runner, token domai
 			Payload: map[string]any{
 				"agent": r.Agent, "host": r.Host,
 				"token_id": token.ID, "token_name": token.Name,
+				"catalog": catalog, "secure": r.Secure,
 			},
 		})
 		return err
