@@ -1,0 +1,16 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Осознанно непроверяемые вызовы: defer-закрытия, записи в SSE-поток
+      # (обрыв клиента — норма) и уборка temp-файлов.
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Fprint
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*google.golang.org/grpc.ClientConn).Close
+        - (*github.com/jackc/pgx/v5.Conn).Close
+        - os.Remove

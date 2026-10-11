@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.vscode/
+.idea/
+data/
+
+# вложенные клиентские репозитории (отдельные git-репо, не часть rivet)
+/rivet-web/
+/rivet-android/
+/rivet-ios/
+/rivet-e2e/

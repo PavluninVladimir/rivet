@@ -1,0 +1,91 @@
+# Runner'ы подключаются с хоста: выпустите токен регистрации в консоли
+# («Управление приложением» → «Runner'ы») и запустите
+#   RIVET_RUNNER_TOKEN=rrt_... rivet-runner -plane localhost:8090 [-tls -tls-ca ca.pem]
+services:
+  rivetd:
+    build:
+      context: .
+      args:
+        VERSION: ${RIVET_VERSION:-dev}
+    ports:
+      # Только loopback: gRPC без TLS несёт токен runner'а открытым текстом,
+      # наружу не публикуем.
+      - "127.0.0.1:8080:8080"   # REST API + встроенная веб-консоль
+      - "127.0.0.1:8090:8090"   # gRPC для runner'ов (подключаются с хоста)
+    environment:
+      RIVET_DATABASE_URL: postgres://rivet:rivet@postgres:5432/rivet?sslmode=disable
+      RIVET_S3_ENDPOINT: minio:9000
+      # Необязательные секреты пробрасываются из окружения хоста / .env.
+      RIVET_GITHUB_TOKEN: ${RIVET_GITHUB_TOKEN:-}
+      RIVET_GITHUB_WEBHOOK_SECRET: ${RIVET_GITHUB_WEBHOOK_SECRET:-}
+      # По умолчанию fake: с github без RIVET_GITHUB_TOKEN конвейер падает на CreatePR.
+      # Для реальных PR задай RIVET_SCM=github и RIVET_GITHUB_TOKEN в окружении/.env.
+      RIVET_SCM: ${RIVET_SCM:-fake}
+      # Ключ шифрования учётных данных хостингов (32 байта base64): без него
+      # подключение репозитория с токеном отключено. Дефолт — только для
+      # локального стенда за loopback, как и пароль администратора ниже.
+      RIVET_SECRET_KEY: ${RIVET_SECRET_KEY:-cml2ZXQtbG9jYWwtZGV2LWtleS0zMi1ieXRlcyEhISE=}
+      # Внешний адрес установки: нужен, чтобы система сама регистрировала
+      # webhook на хостинге. Пусто — данные для ручной настройки в консоли.
+      RIVET_PUBLIC_URL: ${RIVET_PUBLIC_URL:-}
+      # Bootstrap первого администратора (rivetd не стартует без владельца).
+      # Дефолт только для локального стенда за loopback: смени при публикации.
+      # Пароль не короче 8 символов — общее требование ко всем путям задания.
+      RIVET_ADMIN_LOGIN: ${RIVET_ADMIN_LOGIN:-admin}
+      RIVET_ADMIN_PASSWORD: ${RIVET_ADMIN_PASSWORD:-admin-local}
+      # Ключ модели для декомпозиции из окружения — запасной источник: ключ,
+      # заданный в консоли («Управление приложением» → «Модели»), имеет приоритет.
+      RIVET_LLM_PROVIDER: ${RIVET_LLM_PROVIDER:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # TLS протокола runner'ов (необязательно): PEM-файлы сертификата и ключа,
+      # смонтированные в контейнер. Без них порт 8090 держите за периметром.
+      RIVET_GRPC_TLS_CERT: ${RIVET_GRPC_TLS_CERT:-}
+      RIVET_GRPC_TLS_KEY: ${RIVET_GRPC_TLS_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      # service_healthy обязательно: rivetd проверяет MinIO один раз на старте
+      # и при недоступности отключает blob store до перезапуска.
+      minio:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: rivet
+      POSTGRES_PASSWORD: rivet
+      POSTGRES_DB: rivet
+    ports:
+      # Только loopback: dev-credentials не должны светиться в сеть.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rivet"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  minio:
+    # Тег закреплён: latest менял бы поведение (в т.ч. healthcheck) без правок кода.
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: rivet
+      MINIO_ROOT_PASSWORD: rivetsecret
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    ports:
+      # Только loopback: dev-credentials не должны светиться в сеть.
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - miniodata:/data
+
+volumes:
+  pgdata:
+  miniodata:

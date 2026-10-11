@@ -1,0 +1,7 @@
+# Секреты и локальные артефакты не должны попадать в build context.
+.env
+.env.*
+*.log
+/scripts/
+Dockerfile
+docker-compose.yml
