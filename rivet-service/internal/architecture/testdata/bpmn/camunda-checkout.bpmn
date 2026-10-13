@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:camunda="http://camunda.org/schema/1.0/bpmn" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:modeler="http://camunda.org/schema/modeler/1.0" xmlns:rivet="urn:rivet:architecture:1" id="Definitions_1k2v9x0" targetNamespace="http://bpmn.io/schema/bpmn" exporter="Camunda Modeler" exporterVersion="5.28.0" modeler:executionPlatform="Camunda Platform" modeler:executionPlatformVersion="7.22.0">
+  <bpmn:collaboration id="Collaboration_0f3kq1s">
+    <bpmn:participant id="Participant_1q9w0ab" name="Магазин" processRef="Process_checkout" />
+  </bpmn:collaboration>
+  <bpmn:process id="Process_checkout" name="Оформление заказа" isExecutable="true" camunda:historyTimeToLive="180">
+    <bpmn:laneSet id="LaneSet_0b8x1zm">
+      <bpmn:lane id="Lane_buyer" name="Покупатель" rivet:ref="biz.buyer">
+        <bpmn:flowNodeRef>StartEvent_1</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Activity_cart</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="Lane_shop" name="Магазин">
+        <bpmn:flowNodeRef>Activity_order</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Gateway_paid</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Event_done</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>Event_failed</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="StartEvent_1" name="Корзина собрана">
+      <bpmn:outgoing>Flow_1</bpmn:outgoing>
+    </bpmn:startEvent>
+    <bpmn:userTask id="Activity_cart" name="Проверить корзину" camunda:assignee="${buyer}">
+      <bpmn:documentation>Покупатель проверяет состав и адрес доставки</bpmn:documentation>
+      <bpmn:incoming>Flow_1</bpmn:incoming>
+      <bpmn:outgoing>Flow_2</bpmn:outgoing>
+    </bpmn:userTask>
+    <bpmn:serviceTask id="Activity_order" name="Создать заказ" camunda:type="external" camunda:topic="orders" rivet:ref="app.order-api">
+      <bpmn:extensionElements>
+        <camunda:inputOutput>
+          <camunda:inputParameter name="cart">${cart}</camunda:inputParameter>
+        </camunda:inputOutput>
+      </bpmn:extensionElements>
+      <bpmn:incoming>Flow_2</bpmn:incoming>
+      <bpmn:outgoing>Flow_3</bpmn:outgoing>
+    </bpmn:serviceTask>
+    <bpmn:exclusiveGateway id="Gateway_paid" name="Оплата прошла?" default="Flow_no">
+      <bpmn:incoming>Flow_3</bpmn:incoming>
+      <bpmn:outgoing>Flow_yes</bpmn:outgoing>
+      <bpmn:outgoing>Flow_no</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+    <bpmn:endEvent id="Event_done" name="Заказ оформлен">
+      <bpmn:incoming>Flow_yes</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="Event_failed" name="Заказ не оплачен">
+      <bpmn:incoming>Flow_no</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:sequenceFlow id="Flow_1" sourceRef="StartEvent_1" targetRef="Activity_cart" />
+    <bpmn:sequenceFlow id="Flow_2" sourceRef="Activity_cart" targetRef="Activity_order" />
+    <bpmn:sequenceFlow id="Flow_3" sourceRef="Activity_order" targetRef="Gateway_paid" />
+    <bpmn:sequenceFlow id="Flow_yes" name="да" sourceRef="Gateway_paid" targetRef="Event_done">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${paid}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_no" name="нет" sourceRef="Gateway_paid" targetRef="Event_failed" />
+  </bpmn:process>
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Collaboration_0f3kq1s">
+      <bpmndi:BPMNShape id="Participant_1q9w0ab_di" bpmnElement="Participant_1q9w0ab" isHorizontal="true">
+        <dc:Bounds x="129" y="80" width="771" height="300" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Lane_buyer_di" bpmnElement="Lane_buyer" isHorizontal="true">
+        <dc:Bounds x="159" y="80" width="741" height="125" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Lane_shop_di" bpmnElement="Lane_shop" isHorizontal="true">
+        <dc:Bounds x="159" y="205" width="741" height="175" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="_BPMNShape_StartEvent_2" bpmnElement="StartEvent_1">
+        <dc:Bounds x="209" y="122" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="185" y="165" width="85" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_cart_di" bpmnElement="Activity_cart">
+        <dc:Bounds x="300" y="100" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Flow_1_di" bpmnElement="Flow_1">
+        <di:waypoint x="245" y="140" />
+        <di:waypoint x="300" y="140" />
+      </bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

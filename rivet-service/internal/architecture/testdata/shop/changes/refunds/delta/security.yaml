@@ -1,0 +1,6 @@
+added:
+  - id: sec.refund-fraud
+    title: Возврат чужого заказа
+    severity: medium
+    mitigation: Сервис возвратов сверяет владельца заказа с сессией покупателя
+    targets: [app.refunds, app.refund-form]

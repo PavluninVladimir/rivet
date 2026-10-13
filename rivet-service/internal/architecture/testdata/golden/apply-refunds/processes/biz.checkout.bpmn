@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:rivet="urn:rivet:architecture:1"
+                  id="defs-checkout" targetNamespace="urn:shop">
+  <bpmn:process id="checkout" name="Оформление заказа" isExecutable="false">
+    <bpmn:laneSet id="checkout-lanes">
+      <bpmn:lane id="lane-buyer" name="Покупатель" rivet:ref="biz.buyer">
+        <bpmn:flowNodeRef>start</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>cart</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>pay</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="lane-shop" name="Магазин">
+        <bpmn:flowNodeRef>create-order</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>paid</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>notify</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>done</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>failed</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="start" name="Корзина собрана"/>
+    <bpmn:userTask id="cart" name="Проверить корзину"/>
+    <bpmn:serviceTask id="create-order" name="Создать заказ" rivet:ref="app.order-api"/>
+    <bpmn:userTask id="pay" name="Оплатить заказ"/>
+    <bpmn:exclusiveGateway id="paid" name="Оплата прошла?"/>
+    <bpmn:serviceTask id="notify" name="Сообщить об ошибке оплаты" rivet:ref="app.storefront"/>
+    <bpmn:endEvent id="done" name="Заказ оформлен"/>
+    <bpmn:endEvent id="failed" name="Заказ не оплачен"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="cart"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="cart" targetRef="create-order"/>
+    <bpmn:sequenceFlow id="f3" sourceRef="create-order" targetRef="pay"/>
+    <bpmn:sequenceFlow id="f4" sourceRef="pay" targetRef="paid"/>
+    <bpmn:sequenceFlow id="f5" name="да" sourceRef="paid" targetRef="done"/>
+    <bpmn:sequenceFlow id="f6" name="нет" sourceRef="paid" targetRef="notify"/>
+    <bpmn:sequenceFlow id="f7" sourceRef="notify" targetRef="failed"/>
+  </bpmn:process>
+</bpmn:definitions>

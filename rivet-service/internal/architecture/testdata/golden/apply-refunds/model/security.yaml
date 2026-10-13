@@ -1,0 +1,11 @@
+threats:
+  - id: sec.card-leak
+    title: Утечка данных карты
+    severity: high
+    mitigation: Карту принимает платёжный шлюз, витрина её не видит
+    targets: [app.storefront]
+  - id: sec.refund-fraud
+    title: Возврат чужого заказа
+    severity: medium
+    mitigation: Сервис возвратов сверяет владельца заказа с сессией покупателя
+    targets: [app.refunds, app.refund-form]

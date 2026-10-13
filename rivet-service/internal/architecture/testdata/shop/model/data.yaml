@@ -1,0 +1,7 @@
+elements:
+  - id: data.order
+    type: data-object
+    name: Запись заказа
+    props: {table: orders}
+    relations:
+      - {type: realization, to: biz.order}

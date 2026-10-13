@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "system"],
+  "properties": {
+    "format": {"type": "string"},
+    "system": {"type": "string", "minLength": 1},
+    "principles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "rationale": {"type": "string"}
+        }
+      }
+    },
+    "viewpoints": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}

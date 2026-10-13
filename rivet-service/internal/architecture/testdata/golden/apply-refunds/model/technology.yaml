@@ -1,0 +1,16 @@
+elements:
+  - id: tech.k8s
+    type: node
+    name: Кластер Kubernetes
+    relations:
+      - {type: serving, to: app.storefront}
+      - {type: serving, to: app.orders}
+      - {type: serving, to: app.refunds}
+      - {type: assignment, to: tech.postgres}
+  - id: tech.postgres
+    type: system-software
+    name: PostgreSQL
+    props: {version: "16"}
+    relations:
+      - {type: serving, to: app.orders}
+      - {type: access, to: data.order, mode: readwrite}

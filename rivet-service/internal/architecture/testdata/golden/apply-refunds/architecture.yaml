@@ -1,0 +1,10 @@
+format: rivet.architecture/v1
+system: Интернет-магазин
+principles:
+  - id: p.single-order-source
+    title: У заказа один источник истины
+    rationale: Состояние заказа меняет только сервис заказов, остальные читают его через API
+  - id: p.buyer-first
+    title: Покупатель не ждёт внутренние системы
+    rationale: Витрина отвечает покупателю сразу, долгие операции идут асинхронно
+viewpoints: [security]

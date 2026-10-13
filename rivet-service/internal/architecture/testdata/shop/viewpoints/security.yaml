@@ -1,0 +1,30 @@
+id: security
+title: Угрозы и меры защиты
+prompt: |
+  Опиши угрозы для компонентов и интерфейсов и меры против них. У каждой
+  угрозы перечисли затронутые элементы модели в поле targets.
+items: /threats
+schema:
+  type: object
+  additionalProperties: false
+  required: [threats]
+  properties:
+    threats:
+      type: array
+      items:
+        type: object
+        additionalProperties: false
+        required: [id, title, targets]
+        properties:
+          id: {type: string}
+          title: {type: string}
+          severity: {enum: [low, medium, high]}
+          mitigation: {type: string}
+          targets:
+            type: array
+            minItems: 1
+            items: {type: string, x-rivet-ref: true}
+render:
+  kind: graph
+  label: title
+  edges: [targets]

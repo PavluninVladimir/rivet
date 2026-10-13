@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:rivet="urn:rivet:architecture:1"
+                  id="defs-refund" targetNamespace="urn:shop">
+  <bpmn:process id="refund" name="Возврат заказа" isExecutable="false">
+    <bpmn:laneSet id="refund-lanes">
+      <bpmn:lane id="lane-buyer" name="Покупатель" rivet:ref="biz.buyer">
+        <bpmn:flowNodeRef>start</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>form</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="lane-manager" name="Менеджер заказов" rivet:ref="biz.manager">
+        <bpmn:flowNodeRef>review</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>approved</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>refund</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>reject</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>refunded</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>rejected</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="start" name="Покупатель хочет вернуть заказ"/>
+    <bpmn:userTask id="form" name="Заполнить форму возврата"/>
+    <bpmn:userTask id="review" name="Проверить заявку"/>
+    <bpmn:exclusiveGateway id="approved" name="Возврат одобрен?"/>
+    <bpmn:serviceTask id="refund" name="Оформить возврат" rivet:ref="app.refunds"/>
+    <bpmn:serviceTask id="reject" name="Сообщить об отказе" rivet:ref="app.refunds"/>
+    <bpmn:endEvent id="refunded" name="Деньги возвращены"/>
+    <bpmn:endEvent id="rejected" name="Возврат отклонён"/>
+    <bpmn:sequenceFlow id="r1" sourceRef="start" targetRef="form"/>
+    <bpmn:sequenceFlow id="r2" sourceRef="form" targetRef="review"/>
+    <bpmn:sequenceFlow id="r3" sourceRef="review" targetRef="approved"/>
+    <bpmn:sequenceFlow id="r4" name="да" sourceRef="approved" targetRef="refund"/>
+    <bpmn:sequenceFlow id="r5" name="нет" sourceRef="approved" targetRef="reject"/>
+    <bpmn:sequenceFlow id="r6" sourceRef="refund" targetRef="refunded"/>
+    <bpmn:sequenceFlow id="r7" sourceRef="reject" targetRef="rejected"/>
+  </bpmn:process>
+</bpmn:definitions>

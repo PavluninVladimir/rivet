@@ -1,0 +1,14 @@
+added:
+  - id: biz.refund
+    type: process
+    name: Возврат заказа
+    relations:
+      - {type: realization, to: biz.sales}
+      - {type: access, to: biz.order, mode: readwrite}
+modified:
+  - id: biz.manager
+    type: role
+    name: Менеджер заказов
+    relations:
+      - {type: assignment, to: biz.delivery}
+      - {type: assignment, to: biz.refund}

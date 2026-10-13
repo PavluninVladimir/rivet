@@ -1,0 +1,33 @@
+elements:
+  - id: app.storefront
+    type: component
+    name: Витрина
+    description: Веб-приложение для покупателей
+    props: {language: typescript}
+    relations:
+      - {type: realization, to: biz.checkout}
+      - {type: flow, to: app.orders}
+  - id: app.orders
+    type: component
+    name: Сервис заказов
+    props: {language: go, replicas: 3}
+    relations:
+      - {type: realization, to: app.order-api}
+      - {type: access, to: data.order, mode: write}
+  - id: app.mail-refunds
+    type: component
+    name: Возвраты по почте
+    description: Скрипт, который разбирает письма о возвратах
+    relations:
+      - {type: access, to: data.order, mode: read}
+  - id: app.order-api
+    type: application-service
+    name: API заказов
+    relations:
+      - {type: serving, to: app.storefront}
+      - {type: serving, to: biz.delivery}
+  - id: app.web-ui
+    type: interface
+    name: Веб-интерфейс витрины
+    relations:
+      - {type: serving, to: biz.buyer}

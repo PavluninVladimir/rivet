@@ -11,6 +11,11 @@ import (
 )
 
 func dispatch(cmd string, args []string) error {
+	// Описание архитектуры живёт в репозитории проекта: команды не
+	// требуют ни базы, ни control plane.
+	if cmd == "architecture" {
+		return cmdArchitecture(args)
+	}
 	cfg, err := config.FromEnv()
 	if err != nil {
 		return err

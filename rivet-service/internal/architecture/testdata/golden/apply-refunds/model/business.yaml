@@ -1,0 +1,51 @@
+elements:
+  - id: biz.customer
+    type: actor
+    name: Покупатель
+    relations:
+      - {type: assignment, to: biz.buyer}
+  - id: biz.staff
+    type: actor
+    name: Сотрудник магазина
+    relations:
+      - {type: assignment, to: biz.manager}
+  - id: biz.buyer
+    type: role
+    name: Покупатель
+    relations:
+      - {type: assignment, to: biz.checkout}
+  - id: biz.manager
+    type: role
+    name: Менеджер заказов
+    relations:
+      - {type: assignment, to: biz.delivery}
+      - {type: assignment, to: biz.refund}
+  - id: biz.sales
+    type: business-service
+    name: Продажа товаров
+    description: Покупатель выбирает товары, оплачивает и получает заказ
+    relations:
+      - {type: serving, to: biz.customer}
+  # Процессы описаны в processes/<id>.bpmn.
+  - id: biz.checkout
+    type: process
+    name: Оформление заказа
+    relations:
+      - {type: realization, to: biz.sales}
+      - {type: access, to: biz.order, mode: write}
+      - {type: triggering, to: biz.delivery}
+  - id: biz.delivery
+    type: process
+    name: Доставка заказа
+    relations:
+      - {type: realization, to: biz.sales}
+      - {type: access, to: biz.order, mode: readwrite}
+  - id: biz.order
+    type: business-object
+    name: Заказ
+  - id: biz.refund
+    type: process
+    name: Возврат заказа
+    relations:
+      - {type: realization, to: biz.sales}
+      - {type: access, to: biz.order, mode: readwrite}
