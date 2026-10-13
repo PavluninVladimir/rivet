@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["gaps"],
+  "properties": {
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "kind", "description"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "kind": {"enum": ["add", "change", "remove"]},
+          "description": {"type": "string", "minLength": 1},
+          "elements": {"type": "array", "items": {"type": "string"}},
+          "processes": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    }
+  }
+}

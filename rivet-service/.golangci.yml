@@ -11,6 +11,7 @@ linters:
         - fmt.Fprint
         - (io.Closer).Close
         - (*os.File).Close
+        - (*os.Root).Close
         - (*google.golang.org/grpc.ClientConn).Close
         - (*github.com/jackc/pgx/v5.Conn).Close
         - os.Remove

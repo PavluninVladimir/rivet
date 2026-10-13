@@ -1,0 +1,9 @@
+modified:
+  - id: tech.k8s
+    type: node
+    name: Кластер Kubernetes
+    relations:
+      - {type: serving, to: app.storefront}
+      - {type: serving, to: app.orders}
+      - {type: serving, to: app.refunds}
+      - {type: assignment, to: tech.postgres}

@@ -1,0 +1,17 @@
+gaps:
+  - id: gap.refund-process
+    title: Нет процесса возврата
+    kind: add
+    description: Возвраты приходят письмами, менеджер разбирает их вручную, и они не попадают в учёт заказа
+    elements: [biz.refund, biz.manager]
+    processes: [biz.refund]
+  - id: gap.refund-service
+    title: Нет сервиса и формы возврата
+    kind: add
+    description: Витрине нужна форма возврата, а заказам сервис, который принимает заявку и меняет статус заказа
+    elements: [app.refunds, app.refund-form, app.storefront, tech.k8s, sec.refund-fraud]
+  - id: gap.mail-refunds
+    title: Разбор писем о возвратах больше не нужен
+    kind: remove
+    description: Скрипт разбора писем заменяется сервисом возвратов
+    elements: [app.mail-refunds]

@@ -1,0 +1,41 @@
+elements:
+  # Витрина отправляет заявки на возврат в новый сервис.
+  - id: app.storefront
+    type: component
+    name: Витрина
+    description: Веб-приложение для покупателей
+    props: {language: typescript}
+    relations:
+      - {type: realization, to: biz.checkout}
+      - {type: flow, to: app.orders}
+      - {type: flow, to: app.refunds}
+  - id: app.orders
+    type: component
+    name: Сервис заказов
+    props: {language: go, replicas: 3}
+    relations:
+      - {type: realization, to: app.order-api}
+      - {type: access, to: data.order, mode: write}
+  - id: app.order-api
+    type: application-service
+    name: API заказов
+    relations:
+      - {type: serving, to: app.storefront}
+      - {type: serving, to: biz.delivery}
+  - id: app.web-ui
+    type: interface
+    name: Веб-интерфейс витрины
+    relations:
+      - {type: serving, to: biz.buyer}
+  - id: app.refunds
+    type: component
+    name: Сервис возвратов
+    props: {language: go}
+    relations:
+      - {type: realization, to: biz.refund}
+      - {type: access, to: data.order, mode: write}
+  - id: app.refund-form
+    type: interface
+    name: Форма возврата
+    relations:
+      - {type: serving, to: biz.buyer}

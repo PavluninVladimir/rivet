@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:rivet="urn:rivet:architecture:1"
+                  id="defs-delivery" targetNamespace="urn:shop">
+  <bpmn:process id="delivery" name="Доставка заказа" isExecutable="false">
+    <bpmn:laneSet id="delivery-lanes">
+      <bpmn:lane id="lane-manager" name="Менеджер заказов" rivet:ref="biz.manager">
+        <bpmn:flowNodeRef>start</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>split</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>pack</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>invoice</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>join</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>ship</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>end</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="start" name="Заказ оплачен"/>
+    <bpmn:parallelGateway id="split" gatewayDirection="Diverging"/>
+    <bpmn:userTask id="pack" name="Собрать заказ"/>
+    <bpmn:serviceTask id="invoice" name="Выставить документы" rivet:ref="app.order-api"/>
+    <bpmn:parallelGateway id="join" gatewayDirection="Converging"/>
+    <bpmn:manualTask id="ship" name="Передать курьеру"/>
+    <bpmn:endEvent id="end" name="Заказ передан"/>
+    <bpmn:sequenceFlow id="d1" sourceRef="start" targetRef="split"/>
+    <bpmn:sequenceFlow id="d2" sourceRef="split" targetRef="pack"/>
+    <bpmn:sequenceFlow id="d3" sourceRef="split" targetRef="invoice"/>
+    <bpmn:sequenceFlow id="d4" sourceRef="pack" targetRef="join"/>
+    <bpmn:sequenceFlow id="d5" sourceRef="invoice" targetRef="join"/>
+    <bpmn:sequenceFlow id="d6" sourceRef="join" targetRef="ship"/>
+    <bpmn:sequenceFlow id="d7" sourceRef="ship" targetRef="end"/>
+  </bpmn:process>
+</bpmn:definitions>
