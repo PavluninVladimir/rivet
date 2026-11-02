@@ -701,6 +701,102 @@ func (s *Store) RejectStep(ctx context.Context, taskID string, step policy.Resol
 	return failed, rejections, err
 }
 
+// MergeConflictKey — ключ счётчика возвратов на разрешение конфликта в
+// tasks.step_rejections. Двоеточие не встречается в id шагов, поэтому
+// счётчик не смешивается с отказами самого шага merge (замечания человека
+// на хостинге, провал внешних проверок).
+func MergeConflictKey(mergeStepID string) string { return mergeStepID + ":conflicts" }
+
+// MergeConflictInput — конфликт при merge задачи. StepID и Gen — снимок
+// задачи, с которого начался merge (обычно шаг merge, но человек может
+// подтвердить merge и на шаге review); MergeStepID — шаг merge процесса,
+// по нему ведётся счётчик.
+type MergeConflictInput struct {
+	TaskID, ProjectID, StepID, MergeStepID string
+	Gen, Limit                             int
+	// Reset — вмешательство человека (подтверждение merge): счётчик
+	// возвратов обнуляется, открытая эскалация MERGE_CONFLICT закрывается.
+	Reset bool
+	// Escalation — текст эскалации на случай исчерпания лимита.
+	Escalation string
+}
+
+// MergeConflictResult — исход учёта конфликта.
+type MergeConflictResult struct {
+	// Returns — номер этого возврата агенту; при исчерпании — сколько их было.
+	Returns int
+	// Return — задача должна уйти агенту: счётчик увеличен.
+	Return bool
+	// Exhausted — лимит исчерпан, задача остаётся на merge.
+	Exhausted bool
+	// Escalated — эскалация MERGE_CONFLICT создана этим вызовом.
+	Escalated bool
+	// Stale — задача уже не на этом входе в merge (её увёл другой
+	// обработчик): ничего не изменено.
+	Stale bool
+}
+
+// RecordMergeConflict учитывает конфликт при merge одной транзакцией под
+// блокировкой строки задачи (спека task-pipeline «Конфликт с базовой веткой
+// при merge»): попытки задачи (attempt_used, review_rejections) не
+// тратятся. Операцию merge целиком сериализует движок (блокировка по
+// задаче); здесь снимок ещё раз сверяется с задачей: если она ушла с этого
+// входа в merge, ответ Stale и ничего не меняется.
+func (s *Store) RecordMergeConflict(ctx context.Context, in MergeConflictInput) (MergeConflictResult, error) {
+	var res MergeConflictResult
+	key := MergeConflictKey(in.MergeStepID)
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var status domain.TaskStatus
+		var stepID string
+		var gen, count int
+		err := tx.QueryRow(ctx, `
+			SELECT status, step_id, step_gen, COALESCE((step_rejections->>$2)::int, 0)
+			FROM tasks WHERE id=$1 FOR UPDATE`, in.TaskID, key).Scan(&status, &stepID, &gen, &count)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if status != domain.TaskReview || stepID != in.StepID || gen != in.Gen {
+			res.Stale = true
+			return nil
+		}
+		if in.Reset {
+			count = 0
+			if _, err := tx.Exec(ctx, `
+				UPDATE attention SET status='resolved', resolved_at=now()
+				WHERE task_id=$1 AND reason=$2 AND status <> 'resolved'`, in.TaskID, string(domain.AttMergeConflict)); err != nil {
+				return err
+			}
+		}
+		if count >= in.Limit {
+			res.Returns, res.Exhausted = count, true
+			if _, err := tx.Exec(ctx, `
+				UPDATE tasks SET step_rejections = jsonb_set(step_rejections, ARRAY[$2::text], to_jsonb($3::int)), updated_at=now()
+				WHERE id=$1`, in.TaskID, key, count); err != nil {
+				return err
+			}
+			tag, err := tx.Exec(ctx, `
+				INSERT INTO attention (project_id, task_id, reason, message)
+				SELECT $1, $2, $3, $4
+				WHERE NOT EXISTS (SELECT 1 FROM attention WHERE task_id=$2 AND reason=$3 AND status <> 'resolved')`,
+				in.ProjectID, in.TaskID, string(domain.AttMergeConflict), in.Escalation)
+			if err != nil {
+				return err
+			}
+			res.Escalated = tag.RowsAffected() > 0
+			return nil
+		}
+		res.Returns, res.Return = count+1, true
+		_, err = tx.Exec(ctx, `
+			UPDATE tasks SET step_rejections = jsonb_set(step_rejections, ARRAY[$2::text], to_jsonb($3::int)), updated_at=now()
+			WHERE id=$1`, in.TaskID, key, res.Returns)
+		return err
+	})
+	return res, err
+}
+
 // ClaimStepOutcome закрепляет применение исхода за текущим входом на шаг:
 // true — вызывающий применяет исход, false — его уже применил другой
 // обработчик (одновременные вердикты участников, повтор доставки).

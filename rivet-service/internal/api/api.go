@@ -866,6 +866,13 @@ func (s *Server) taskMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Engine.MergeTask(r.Context(), r.PathValue("id"), user(r)); err != nil {
+		// Конфликт с базовой веткой: merge не выполнен, задача уже ушла
+		// агенту на разрешение конфликта (api-contract add-merge-conflict-recovery).
+		var mc *orchestrator.MergeConflictError
+		if errors.As(err, &mc) {
+			writeJSON(w, http.StatusConflict, map[string]apiError{"error": {Code: "merge_conflict", Message: mc.Error()}})
+			return
+		}
 		writeErr(w, err)
 		return
 	}

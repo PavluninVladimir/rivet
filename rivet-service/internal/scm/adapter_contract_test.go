@@ -359,6 +359,95 @@ func TestAdapterMergeReturnsSHA(t *testing.T) {
 	}
 }
 
+// Конфликт с базовой веткой оба адаптера сообщают одной ошибкой (спека
+// scm-integration «Распознавание конфликта при merge»).
+func TestAdapterMergeConflict(t *testing.T) {
+	const ghMerge = "PUT /repos/own/proj/pulls/7/merge"
+	const ghPR = "GET /repos/own/proj/pulls/7"
+	const glMerge = "PUT /api/v4/projects/own%2Fproj/merge_requests/7/merge"
+	const glMR = "GET /api/v4/projects/own%2Fproj/merge_requests/7"
+	cases := []struct {
+		name     string
+		github   map[string]stubResp
+		gitlab   map[string]stubResp
+		conflict bool
+	}{
+		{"конфликт по тексту отказа", map[string]stubResp{
+			ghMerge: {405, `{"message":"Pull Request has merge conflicts","status":"405"}`},
+		}, map[string]stubResp{
+			glMerge: {406, `{"message":"Branch cannot be merged"}`},
+			glMR:    {200, `{"iid":7,"has_conflicts":true}`},
+		}, true},
+		{"конфликт по состоянию PR", map[string]stubResp{
+			ghMerge: {405, `{"message":"Pull Request is not mergeable"}`},
+			ghPR:    {200, `{"number":7,"mergeable":false,"mergeable_state":"dirty"}`},
+		}, map[string]stubResp{
+			glMerge: {422, `{"message":"422 Unprocessable"}`},
+			glMR:    {200, `{"iid":7,"has_conflicts":false,"detailed_merge_status":"conflict"}`},
+		}, true},
+		{"обязательные проверки не конфликт", map[string]stubResp{
+			ghMerge: {405, `{"message":"Pull Request is not mergeable"}`},
+			ghPR:    {200, `{"number":7,"mergeable":false,"mergeable_state":"blocked"}`},
+		}, map[string]stubResp{
+			glMerge: {405, `{"message":"405 Method Not Allowed"}`},
+			glMR:    {200, `{"iid":7,"has_conflicts":false,"detailed_merge_status":"ci_must_pass"}`},
+		}, false},
+		{"mergeable ещё не посчитан", map[string]stubResp{
+			ghMerge: {405, `{"message":"Pull Request is not mergeable"}`},
+			ghPR:    {200, `{"number":7,"mergeable":null,"mergeable_state":"unknown"}`},
+		}, map[string]stubResp{
+			glMerge: {406, `{"message":"Branch cannot be merged"}`},
+			glMR:    {200, `{"iid":7,"has_conflicts":false,"detailed_merge_status":"checking"}`},
+		}, false},
+		{"нет прав на merge не конфликт, даже если PR конфликтует", map[string]stubResp{
+			ghMerge: {403, `{"message":"protected branch"}`},
+			ghPR:    {200, `{"number":7,"mergeable":false,"mergeable_state":"dirty"}`},
+		}, map[string]stubResp{
+			glMerge: {403, `{"message":"403 Forbidden"}`},
+			glMR:    {200, `{"iid":7,"has_conflicts":true}`},
+		}, false},
+		{"ошибка хостинга не конфликт", map[string]stubResp{
+			ghMerge: {502, `{"message":"bad gateway"}`},
+			ghPR:    {200, `{"number":7,"mergeable":false,"mergeable_state":"dirty"}`},
+		}, map[string]stubResp{
+			glMerge: {500, `{"message":"500 Internal Server Error"}`},
+			glMR:    {200, `{"iid":7,"has_conflicts":true}`},
+		}, false},
+	}
+	for _, tc := range cases {
+		for _, c := range bothAdapters(tc.github, tc.gitlab) {
+			t.Run(tc.name+"/"+c.name, func(t *testing.T) {
+				srv := newStub(c.routes).server(t)
+				_, err := c.build(srv.URL, "t").Merge(context.Background(), "own/proj", 7)
+				if err == nil {
+					t.Fatal("ожидался отказ merge")
+				}
+				if got := errors.Is(err, ErrMergeConflict); got != tc.conflict {
+					t.Fatalf("конфликт=%v, ожидалось %v: %v", got, tc.conflict, err)
+				}
+			})
+		}
+	}
+}
+
+// Fake имитирует конфликт по метке в заголовке: первый merge отклонён,
+// следующий проходит, PR без метки мержится сразу.
+func TestFakeMergeConflictOnce(t *testing.T) {
+	ctx := context.Background()
+	f := NewFake()
+	marked, _ := f.CreatePR(ctx, "e2e/demo", "agent/task-1", "main", "task-1: правка "+FakeConflictMarker, "")
+	plain, _ := f.CreatePR(ctx, "e2e/demo", "agent/task-2", "main", "task-2: правка", "")
+	if _, err := f.Merge(ctx, "e2e/demo", marked.Number); !errors.Is(err, ErrMergeConflict) {
+		t.Fatalf("первый merge помеченного PR: %v", err)
+	}
+	if _, err := f.Merge(ctx, "e2e/demo", marked.Number); err != nil {
+		t.Fatalf("второй merge помеченного PR: %v", err)
+	}
+	if _, err := f.Merge(ctx, "e2e/demo", plain.Number); err != nil {
+		t.Fatalf("PR без метки: %v", err)
+	}
+}
+
 // CreatePR/CreateMR возвращают номер и ссылку одинаково.
 func TestAdapterCreatePR(t *testing.T) {
 	cases := bothAdapters(
