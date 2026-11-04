@@ -68,11 +68,11 @@ rivet/
 - `pkg/protocol` — gRPC-протокол между rivetd и runner'ами.
 
 Состояние хранится в PostgreSQL, транскрипты сессий агентов — в
-S3-совместимом хранилище (MinIO в dev).
+S3-совместимом хранилище (RustFS в dev).
 
 ## Сборка и запуск
 
-Нужны Go 1.26.2 или новее, Docker (для Postgres и MinIO) и, если пересобирать консоль,
+Нужны Go 1.26.2 или новее, Docker (для Postgres и S3-хранилища RustFS) и, если пересобирать консоль,
 Node.js 24.
 
 Проще всего поднять всё в Docker:
@@ -93,7 +93,7 @@ rivetd слушает `127.0.0.1:8080` (API и веб-консоль) и `127.0.
 
 ```sh
 cd rivet-service
-docker compose up -d postgres minio
+docker compose up -d postgres s3
 make build            # go build ./...
 RIVET_SCM=fake RIVET_ADMIN_LOGIN=admin RIVET_ADMIN_PASSWORD=change-me \
   go run ./cmd/rivetd

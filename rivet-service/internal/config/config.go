@@ -23,7 +23,7 @@ type Config struct {
 	GRPCTLSCert string
 	GRPCTLSKey  string
 
-	// S3 — объектное хранилище транскриптов (MinIO в dev).
+	// S3 — объектное хранилище транскриптов (RustFS в dev).
 	S3Endpoint  string
 	S3AccessKey string
 	S3SecretKey string
