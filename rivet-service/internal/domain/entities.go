@@ -88,6 +88,29 @@ type Epic struct {
 	// (add-project-lead-view); nil — не было или не задана.
 	StartedAt *time.Time
 	DueAt     *time.Time
+	// Исследование продукта (add-product-discovery): приоритет из бэклога,
+	// зависимости от других Epic'ов проекта, незавершённые зависимости и
+	// связь с версией исследования. Заполняются только в API Epic'а
+	// (store.EnrichEpics); nil у остальных чтений.
+	Priority   *string
+	DependsOn  []string
+	WaitingFor []EpicRef
+	Discovery  *EpicDiscovery
+}
+
+// EpicRef — Epic в причине ожидания: идентификатор, название, статус.
+type EpicRef struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
+// EpicDiscovery — обоснование Epic'а из исследования: версия и снимки
+// связанных потребностей с цитатами.
+type EpicDiscovery struct {
+	RunID   string            `json:"run_id"`
+	Version int               `json:"version"`
+	Needs   []json.RawMessage `json:"needs"`
 }
 
 type Criterion struct {
