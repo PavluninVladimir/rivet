@@ -1,6 +1,11 @@
 package planner
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/PavluninVladimir/rivet/internal/domain"
+)
 
 func TestValidatePlan(t *testing.T) {
 	valid := []PlannedTask{
@@ -39,5 +44,20 @@ func TestParsePlanTolerant(t *testing.T) {
 	plan, err := parsePlan(text)
 	if err != nil || len(plan) != 1 || plan[0].Title != "A" {
 		t.Fatalf("парсер не справился: %v %+v", err, plan)
+	}
+}
+
+// Инструкция Тимлида дополняет задание, требования к формату остаются
+// (спека epic-decomposition «Декомпозицию выполняет Тимлид»).
+func TestLeadInstructionInPrompt(t *testing.T) {
+	epic := domain.Epic{Title: "E", Goal: "цель"}
+	plain := buildPrompt(epic, domain.Project{}, "")
+	if strings.Contains(plain, "# Роль Тимлида") {
+		t.Fatal("без инструкции блока нет")
+	}
+	p := buildPrompt(epic, domain.Project{}, "Не больше 5 задач на Epic.")
+	if !strings.Contains(p, "# Роль Тимлида\nНе больше 5 задач на Epic.") || !strings.Contains(p, "Верни ТОЛЬКО JSON-массив") ||
+		strings.Index(p, "# Роль Тимлида") < strings.Index(p, "Верни ТОЛЬКО JSON-массив") {
+		t.Fatalf("инструкция после требований к формату: %s", p)
 	}
 }

@@ -8,6 +8,7 @@ import (
 
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -18,15 +19,22 @@ import (
 // executeStage выполняет назначенную стадию и отправляет StageResult.
 func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*pb.RunnerMsg)) {
 	sctx, cancel := context.WithCancel(ctx)
+	sc := &stageCancel{cancel: cancel}
 	a.mu.Lock()
-	a.cancel[as.TaskId] = cancel
+	if a.cancel == nil {
+		a.cancel = map[string]*stageCancel{}
+	}
+	a.cancel[as.TaskId] = sc
 	a.mu.Unlock()
 	defer func() {
 		cancel()
 		a.mu.Lock()
-		delete(a.cancel, as.TaskId)
+		if a.cancel[as.TaskId] == sc {
+			delete(a.cancel, as.TaskId)
+		}
 		a.mu.Unlock()
 	}()
+	emit = guardResults(sctx, sc, as, emit)
 
 	// Новая стадия — заполненность контекста прежнего запуска неактуальна.
 	a.ctxPct.Store(ctxUnknown)
@@ -103,6 +111,11 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 
 	ws, err := a.workspace(sctx, as, step)
 	if err != nil {
+		// У тестировщика это сбой инфраструктуры: попытка разработчика не
+		// расходуется (add-agent-roles).
+		if as.Stage == pb.StageResult_TESTING && as.GetRole() != nil {
+			promptVerdict = verdictInfraError
+		}
 		result(false, "workspace: "+err.Error())
 		return
 	}
@@ -144,23 +157,31 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		result(true, "изменения в ветке "+as.Branch)
 
 	case pb.StageResult_TESTING:
+		if role := as.GetRole(); role != nil {
+			// Push тестировщику запрещён окружением процесса агента, а не
+			// конфигом репозитория: падение runner'а посреди сессии не
+			// оставит блок следующим стадиям в этом каталоге.
+			testerCfg := stageCfg
+			testerCfg.ExtraEnv = append(slices.Clone(stageCfg.ExtraEnv),
+				pushBlockEnv(append(os.Environ(), stageCfg.ExtraEnv...))...)
+			testerAdapter := newAdapter(testerCfg)
+			testerRun := func(ws, prompt string) (agentRun, error) {
+				run, err := testerAdapter.Run(sctx, ws, prompt, sink)
+				masker.flush()
+				run.FinalText = masker.maskString(run.FinalText)
+				return run, err
+			}
+			a.testerStage(sctx, as, ws, role, step, transcript, testerRun, noteUsage, emitUsage, emit,
+				func(verdict string) { promptVerdict = verdict }, result)
+			return
+		}
 		if len(as.Checks) == 0 {
 			step("проверки проекта не настроены — этап пропущен")
 			result(true, "нет настроенных проверок")
 			return
 		}
-		var report strings.Builder
-		ok := true
-		for _, c := range as.Checks {
-			step("проверка: " + c.Name)
-			out, err := runShell(sctx, ws, c.Cmd, transcript)
-			fmt.Fprintf(&report, "== %s ==\n%s\n", c.Name, tail(out, 4000))
-			if err != nil {
-				ok = false
-				fmt.Fprintf(&report, "FAIL: %v\n", err)
-			}
-		}
-		result(ok, report.String())
+		ok, report := runChecks(sctx, ws, as.Checks, step, transcript)
+		result(ok, report)
 
 	case pb.StageResult_REVIEW:
 		step("независимое review изменений")
@@ -247,16 +268,29 @@ func (a *agent) workspace(ctx context.Context, as *pb.Assignment, step func(stri
 		return "", err
 	}
 	br, bs := shellQuote(as.Branch), shellQuote(base)
+	// Страховка: блок push тестировщика из конфига репозитория (так его
+	// ставили прежние версии runner'а) не должен пережить сессию.
+	_, _ = runShell(ctx, dir, "git config --unset-all remote.origin.pushurl '^rivet-tester-no-push:' || true", nil)
+	// Незакоммиченные правки в каталоге — хвост прерванной стадии (остановка
+	// или падение runner'а): в работу новой стадии они не попадают.
+	// Игнорируемые файлы (зависимости, кэши) остаются: копия тёплая.
+	// --prune: ветка, удалённая на хостинге, не продолжается по старой ссылке.
+	const prep = "git fetch --prune origin && git reset -q --hard && git clean -qffd && "
 	var script string
 	switch as.Stage {
 	case pb.StageResult_CODING:
-		script = fmt.Sprintf("git fetch origin && git checkout -B %s origin/%s", br, bs)
+		// Повтор CODING (итог прошлой попытки не дошёл до control plane, а
+		// её push дошёл до origin) продолжает ветку задачи с origin: старт
+		// от базовой отбросил бы доставленную работу, и push не прошёл бы.
+		script = fmt.Sprintf(prep+
+			"if git rev-parse -q --verify refs/remotes/origin/%s >/dev/null; then git checkout -B %s origin/%s; else git checkout -B %s origin/%s; fi",
+			br, br, br, br, bs)
 	default:
 		// FIXING, TESTING, REVIEW — ветка обычно уже существует (локально
 		// или на origin). Сессия доработки из blocked/failed может прийти
 		// на другой runner до первого push ветки — тогда она создаётся от
 		// базовой (add-user-sessions).
-		script = fmt.Sprintf("git fetch origin && (git checkout %s || git checkout -b %s origin/%s || git checkout -B %s origin/%s) && (git pull --ff-only origin %s || true)",
+		script = fmt.Sprintf(prep+"(git checkout %s || git checkout -b %s origin/%s || git checkout -B %s origin/%s) && (git pull --ff-only origin %s || true)",
 			br, br, br, br, bs, br)
 	}
 	if out, err := runShellEnv(ctx, dir, script, env, nil); err != nil {
@@ -460,6 +494,7 @@ func stagePrompt(as *pb.Assignment) string {
 		return codingPrompt(as)
 	}
 	var b strings.Builder
+	b.WriteString(rolePrompt(as.GetRole()))
 	fmt.Fprintf(&b, "Ты работаешь над задачей task-%d в ветке %s (сессия доработки по запросу человека).\n\n", as.TaskNum, as.Branch)
 	b.WriteString(as.UserPrompt)
 	b.WriteString("\n\n")
@@ -476,6 +511,7 @@ func stagePrompt(as *pb.Assignment) string {
 // задачи, политика, правила маркеров.
 func promptStepPrompt(as *pb.Assignment) string {
 	var b strings.Builder
+	b.WriteString(rolePrompt(as.GetRole()))
 	fmt.Fprintf(&b, "Ты работаешь над задачей task-%d в ветке %s.\n\n", as.TaskNum, as.Branch)
 	fmt.Fprintf(&b, "# Задание шага процесса\n\n%s\n\n", as.StepPrompt)
 	fmt.Fprintf(&b, "# Контекст задачи: %s\n\n%s\n\n", as.Title, as.Description)
@@ -523,6 +559,7 @@ func firstLine(s string) string {
 
 func codingPrompt(as *pb.Assignment) string {
 	var b strings.Builder
+	b.WriteString(rolePrompt(as.GetRole()))
 	fmt.Fprintf(&b, "Ты работаешь над задачей task-%d в ветке %s.\n\n", as.TaskNum, as.Branch)
 	fmt.Fprintf(&b, "# Задача: %s\n\n%s\n\n", as.Title, as.Description)
 	if len(as.Criteria) > 0 {
@@ -544,7 +581,14 @@ func codingPrompt(as *pb.Assignment) string {
 
 func reviewPrompt(as *pb.Assignment) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Ты — независимый ревьюер задачи task-%d: %s.\n\n", as.TaskNum, as.Title)
+	// С ролью кем быть говорит блок роли (add-agent-roles); без неё —
+	// прежняя первая строка.
+	if rp := rolePrompt(as.GetRole()); rp != "" {
+		b.WriteString(rp)
+		fmt.Fprintf(&b, "Review задачи task-%d: %s.\n\n", as.TaskNum, as.Title)
+	} else {
+		fmt.Fprintf(&b, "Ты — независимый ревьюер задачи task-%d: %s.\n\n", as.TaskNum, as.Title)
+	}
 	if len(as.Criteria) > 0 {
 		b.WriteString("# Acceptance criteria\n")
 		for _, c := range as.Criteria {
@@ -632,4 +676,23 @@ func tail(s string, n int) string {
 		return s
 	}
 	return "…" + s[len(s)-n:]
+}
+
+// guardResults — итог стадии (StageResult, Blocked), отменённой не control
+// plane'ом, а остановкой runner'а или обрывом канала, не отправляется и в
+// журнал не пишется: иначе прерванная работа проигралась бы как настоящий
+// провал. Сессии нет в pending_sessions, и control plane назначит стадию
+// заново без расхода попытки. События, транскрипт и расход идут как прежде.
+func guardResults(sctx context.Context, sc *stageCancel, as *pb.Assignment, emit func(*pb.RunnerMsg)) func(*pb.RunnerMsg) {
+	return func(m *pb.RunnerMsg) {
+		switch m.Kind.(type) {
+		case *pb.RunnerMsg_StageResult, *pb.RunnerMsg_Blocked:
+			if sctx.Err() != nil && !sc.byPlane.Load() {
+				slog.Info("стадия прервана остановкой runner'а или обрывом канала: итог не отправляется, стадия будет назначена заново",
+					"task", as.TaskId, "session", as.SessionId)
+				return
+			}
+		}
+		emit(m)
+	}
 }

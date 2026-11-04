@@ -55,6 +55,9 @@ type Engine struct {
 	// открытые сессии: session_id → task_id (у задачи может идти несколько
 	// сессий сразу — параллельные участники шага)
 	sessions map[string]string
+	// performers — исполнитель открытой сессии (роль и имя runner'а) для
+	// событий её шагов (add-agent-roles)
+	performers map[string]sessionPerformer
 	// публикации: лог и владелец (runner); фаза отката — durable в БД
 	deployLogs  map[string][]byte
 	deployOwner map[string]string
@@ -97,6 +100,7 @@ func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, hear
 		stageContext:       map[string]string{},
 		transcripts:        map[string][]byte{},
 		sessions:           map[string]string{},
+		performers:         map[string]sessionPerformer{},
 		deployLogs:         map[string][]byte{},
 		deployOwner:        map[string]string{},
 		budgetNotified:     map[string]string{},
@@ -173,15 +177,23 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err := e.enterReady(ctx, excluded, excludedEpics); err != nil {
 		return err
 	}
+	// Runner'ы и запуски, чья стадия в этом тике не стартовала, исключаются
+	// до конца тика: остальные назначения идут дальше, а цикл не крутится
+	// на недоступном runner'е.
+	var badRunners []string
+	var badRuns []int64
 	for {
-		a, ok, err := e.St.AssignRun(ctx, excluded, excludedEpics)
+		a, ok, err := e.St.AssignRunExcept(ctx, excluded, excludedEpics, badRunners, badRuns)
 		if err != nil {
 			return err
 		}
 		if !ok {
 			break
 		}
-		e.dispatchAssigned(ctx, a)
+		if !e.dispatchAssigned(ctx, a) {
+			badRunners = append(badRunners, a.Runner.ID)
+			badRuns = append(badRuns, a.Run.ID)
+		}
 	}
 	if err := e.markWaiting(ctx); err != nil {
 		return err
@@ -360,12 +372,12 @@ type sessionSpec struct {
 // запустить) и признак доставки. spec — переопределение сессии (сессия
 // доработки); nil — обычная scheduler-сессия со снимком задачи.
 func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.StepRun, runner domain.Runner,
-	step policy.ResolvedStep, entry string, spec *sessionSpec) (string, bool) {
+	step policy.ResolvedStep, entry string, spec *sessionSpec) (string, bool, error) {
 	stage := stageFor(step.Kind, entry)
 	p, _, err := e.projectOf(ctx, task)
 	if err != nil {
 		slog.Error("dispatch: project", "task", task.ID, "err", err)
-		return "", false
+		return "", false, fmt.Errorf("проект задачи: %w", err)
 	}
 	if runner.Agent == "" {
 		if r, err := e.St.GetRunner(ctx, runner.ID); err == nil {
@@ -396,6 +408,7 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	// работает как прежде, гейты на plane никуда не делись.
 	var assignPolicy *pb.Policy
 	var agentModels map[string]policy.AgentModel
+	testPaths := append([]string{}, policy.DefaultTestPaths...)
 	if eff, err := e.St.EffectivePolicy(ctx, p.ID); err != nil {
 		slog.Error("dispatch: политика проекта", "project", p.ID, "err", err)
 	} else {
@@ -404,12 +417,26 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 			PolicyDir: policy.PolicyDir,
 		}
 		agentModels = eff.Presets.AgentModels
+		testPaths = eff.Presets.EffectiveTestPaths()
 	}
+	// Исполнитель (add-agent-roles): шаблон роли и агент команды —
+	// инструкция и имя; отключённый или пропавший шаблон — без роли.
+	perf := e.runPerformer(ctx, run)
 	// Профиль агента из каталога (add-agent-profiles, спека agents «Доставка
 	// модели и учётных данных runner'у»): модель участника, иначе
 	// переопределение проекта, иначе модель по умолчанию; окружение и
 	// аргументы по шаблону, секреты по режиму профиля и каналу runner'а.
 	model := run.Model
+	// Модель агента команды обязательна (планировщик подобрал runner с ней);
+	// модель шаблона или переопределение проекта — предпочтение: берётся,
+	// если runner её поддерживает.
+	switch {
+	case model != "":
+	case perf.agent != nil && perf.agent.Model != "":
+		model = perf.agent.Model
+	case run.PrefModel != "" && (contains(runner.Models, run.PrefModel) || runner.Model == run.PrefModel):
+		model = run.PrefModel
+	}
 	var launch *store.AgentLaunch
 	// Окружение профиля уезжает только runner'ам, объявившим протокол v12:
 	// прежние полей не знают, а секреты без адресата отправлять незачем.
@@ -418,7 +445,19 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 		if am, ok := agentModels[runner.Agent]; ok {
 			override = &am
 		}
-		prof, binding, ok, rerr := e.St.ResolveAgentModel(ctx, runner.Agent, run.Model, override)
+		explicit := model
+		// Модель агента команды — пара с подключением: привязка ищется по
+		// паре, а не по одному имени модели (одна модель может быть у двух
+		// подключений).
+		if perf.agent != nil && perf.agent.ConnectionID != "" && perf.agent.Model != "" && run.Model == "" {
+			override = &policy.AgentModel{ConnectionID: perf.agent.ConnectionID, Model: perf.agent.Model}
+			explicit = ""
+		}
+		prof, binding, ok, rerr := e.St.ResolveAgentModel(ctx, runner.Agent, explicit, override)
+		if rerr == nil && ok && explicit == "" && perf.agent != nil && perf.agent.Model != "" && binding.Model != perf.agent.Model {
+			// Пары нет в привязках профиля runner'а: модель — по имени.
+			prof, binding, ok, rerr = e.St.ResolveAgentModel(ctx, runner.Agent, perf.agent.Model, nil)
+		}
 		if rerr != nil {
 			slog.Error("dispatch: профиль агента", "agent", runner.Agent, "err", rerr)
 		} else if ok {
@@ -434,7 +473,9 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 			}
 		}
 	}
-	if model != "" && model != run.Model {
+	// Модель назначения пишется отдельно от явной модели участника: при
+	// повторном назначении она не станет требованием к runner'у.
+	if model != "" {
 		if err := e.St.SetRunModel(ctx, run.ID, model); err != nil {
 			slog.Error("dispatch: модель запуска", "run", run.ID, "err", err)
 		}
@@ -472,7 +513,7 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	})
 	if err != nil {
 		slog.Error("dispatch: session", "task", task.ID, "err", err)
-		return "", false
+		return "", false, fmt.Errorf("сессия стадии: %w", err)
 	}
 	// Запуск мог быть отменён другим участником шага (any, blocked) между
 	// назначением и отправкой: тогда сессия закрывается, стадия не стартует.
@@ -486,12 +527,13 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 		if _, cerr := e.St.EndSession(ctx, sessionID, "", "стадия не запущена: запуск отменён"); cerr != nil {
 			slog.Error("dispatch: end unbound session", "session", sessionID, "err", cerr)
 		}
-		return "", false
+		return "", false, nil
 	}
 	e.mu.Lock()
 	e.sessions[sessionID] = task.ID
 	delete(e.transcripts, sessionID)
 	e.mu.Unlock()
+	e.rememberPerformer(sessionID, perf, runner)
 	// Репозиторий проекта: адрес клонирования и токен доступа (design
 	// решение 8). Токен уедет в git через askpass, не в аргументы команд.
 	gitToken, err := e.St.ProjectToken(ctx, p.ID, e.Box)
@@ -503,7 +545,7 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 			slog.Error("dispatch: end ghost session", "session", sessionID, "err", cerr)
 		}
 		e.dropSessionID(sessionID)
-		return "", false
+		return "", false, fmt.Errorf("учётные данные проекта: %w", err)
 	}
 	// У fake-провайдера (e2e-стенд) настоящего адреса нет: клонирование
 	// идёт по RIVET_GIT_BASE, как до этого изменения.
@@ -522,7 +564,11 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 			UserPrompt: spec.userPrompt, Policy: assignPolicy,
 			Model: model, StepId: step.ID, Participant: run.Participant,
 			StepPrompt: step.Prompt,
+			Role:       assignmentRole(perf),
 		}},
+	}
+	if perf.role != nil && stage == pb.StageResult_TESTING {
+		msg.GetAssign().TestPaths = testPaths
 	}
 	if launch != nil {
 		as := msg.GetAssign()
@@ -533,7 +579,7 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	if !e.Out.Send(runner.ID, msg) {
 		slog.Warn("dispatch: runner недоступен, задачу вернёт heartbeat-таймаут",
 			"runner", runner.ID, "task", task.ID)
-		return sessionID, false
+		return sessionID, false, nil
 	}
 	if launch != nil && len(launch.SecretNames) > 0 {
 		// Факт доставки секретов в event log без значений (спека agents).
@@ -546,7 +592,7 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 			slog.Error("dispatch: событие доставки секретов", "err", err)
 		}
 	}
-	return sessionID, true
+	return sessionID, true, nil
 }
 
 // transcriptCap — жёсткий предел буфера транскрипта стадии: после append
@@ -594,6 +640,7 @@ func (e *Engine) DropSession(taskID string) {
 		if tid == taskID {
 			delete(e.sessions, sid)
 			delete(e.transcripts, sid)
+			delete(e.performers, sid)
 		}
 	}
 }
@@ -603,6 +650,7 @@ func (e *Engine) dropSessionID(sessionID string) {
 	e.mu.Lock()
 	delete(e.sessions, sessionID)
 	delete(e.transcripts, sessionID)
+	delete(e.performers, sessionID)
 	e.mu.Unlock()
 }
 
@@ -652,6 +700,7 @@ func (e *Engine) flushTranscript(ctx context.Context, task domain.Task, stage, s
 	buf := e.transcripts[sessionID]
 	delete(e.transcripts, sessionID)
 	delete(e.sessions, sessionID)
+	delete(e.performers, sessionID)
 	e.mu.Unlock()
 	ref := ""
 	if len(buf) > 0 && e.Blob != nil {
@@ -711,7 +760,30 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 	if !ok {
 		return fmt.Errorf("шаг %q запуска не найден в снимке процесса задачи %s", run.StepID, task.ID)
 	}
+	// Сбой инфраструктуры тестировщика (add-agent-roles): git, push,
+	// падение агента — не замечания разработчику. Шаг повторяется без
+	// расхода попытки, повторный сбой эскалирует.
+	infraExhausted := false
+	if step.Kind == policy.StepTest && sr.Verdict == verdictInfraError {
+		retried, err := e.retryInfra(ctx, task, step, run, runnerID, sr.Detail)
+		if err != nil || retried {
+			return err
+		}
+		infraExhausted = true
+		sr.Detail = "повторный сбой инфраструктуры тестировщика: " + sr.Detail
+	}
+	// Вердикт самого агента (тестировщик, шаг prompt): по нему подписывается
+	// исход шага.
+	if sr.Verdict != "" {
+		if err := e.St.SetRunAgentVerdict(ctx, run.ID, sr.Verdict); err != nil {
+			return err
+		}
+	}
 	verdict := verdictOf(step.Kind, sr.Ok, sr.Verdict)
+	if infraExhausted {
+		// Повторный сбой — не замечания разработчику, а эскалация (переход fail).
+		verdict = policy.OutcomeFail
+	}
 	// Runner остаётся за задачей, если следующий шаг можно отдать ему же
 	// (тот же worktree: code → test, провал проверок → исправление).
 	// С шага review runner не переиспользуется: ревьюер не должен
@@ -845,7 +917,7 @@ func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login str
 		return "", fmt.Errorf("сессию не удалось запустить: %v", err)
 	}
 	a.Task.StepID, a.Task.StepEntry = step.ID, policy.OutcomeChanges
-	sessionID, delivered := e.dispatchRun(ctx, a.Task, runs[0], a.Runner, step, policy.OutcomeChanges, &sessionSpec{
+	sessionID, delivered, _ := e.dispatchRun(ctx, a.Task, runs[0], a.Runner, step, policy.OutcomeChanges, &sessionSpec{
 		driverKind: "user", driverID: login, prompt: prompt,
 		userPrompt: prompt, private: private,
 	})

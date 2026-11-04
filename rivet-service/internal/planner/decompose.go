@@ -29,7 +29,14 @@ type PlannedTask struct {
 
 // Decompose запрашивает у модели план Epic и валидирует его.
 func (p *Planner) Decompose(ctx context.Context, epic domain.Epic, project domain.Project) ([]PlannedTask, error) {
-	text, err := p.c.Complete(ctx, buildPrompt(epic, project))
+	return p.DecomposeAs(ctx, epic, project, "")
+}
+
+// DecomposeAs — декомпозиция от имени роли Тимлида (add-agent-roles):
+// инструкция роли дополняет задание, требования к формату плана остаются.
+// Пустая инструкция — прежнее задание.
+func (p *Planner) DecomposeAs(ctx context.Context, epic domain.Epic, project domain.Project, leadInstruction string) ([]PlannedTask, error) {
+	text, err := p.c.Complete(ctx, buildPrompt(epic, project, leadInstruction))
 	if err != nil {
 		return nil, fmt.Errorf("model: %w", err)
 	}
@@ -44,7 +51,7 @@ func (p *Planner) Decompose(ctx context.Context, epic domain.Epic, project domai
 	return plan, nil
 }
 
-func buildPrompt(epic domain.Epic, project domain.Project) string {
+func buildPrompt(epic domain.Epic, project domain.Project, leadInstruction string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, `Ты — планировщик разработки. Декомпозируй Epic на небольшие задачи для автономных coding-агентов.
 
@@ -63,6 +70,9 @@ func buildPrompt(epic domain.Epic, project domain.Project) string {
 Правила: задачи небольшие (одна сессия агента); зависимости образуют ациклический граф;
 у каждой задачи минимум один проверяемый acceptance criterion; независимые задачи не связывай
 зависимостями — они пойдут параллельно.`, project.Repo(), epic.Title, epic.Goal)
+	if inst := strings.TrimSpace(leadInstruction); inst != "" {
+		fmt.Fprintf(&b, "\n\n# Роль Тимлида\n%s\n\nТребования к формату ответа выше остаются обязательными.", inst)
+	}
 	return b.String()
 }
 

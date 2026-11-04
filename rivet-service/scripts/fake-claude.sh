@@ -38,6 +38,34 @@ case "$PROMPT" in
 esac
 hook '{"hook_event_name":"SessionStart","session_id":"fake-claude-1"}'
 
+# Тестировщик (add-agent-roles): тест на критерии в тестовом каталоге и
+# вердикт маркером. [e2e-tester-changes] — замечания, пока разработчик не
+# сделал второй проход; [e2e-tester-code] — правка src/, которую runner
+# откатит как выход за границу роли.
+case "$PROMPT" in
+*"проверяешь задачу"*)
+  mkdir -p tests
+  emit '{"type":"assistant","message":{"model":"claude-fake-1","usage":{"input_tokens":1100,"output_tokens":90},"content":[{"type":"text","text":"Пишу тесты по критериям приёмки."},{"type":"tool_use","name":"Edit","input":{"file_path":"'"$PWD"'/tests/e2e-tests.txt"}}]}}'
+  printf 'test %s\n' "$(date +%s)" >> tests/e2e-tests.txt
+  hook "{\"hook_event_name\":\"PostToolUse\",\"session_id\":\"fake-claude-1\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$PWD/tests/e2e-tests.txt\"}}"
+  VERDICT="VERDICT: OK"
+  case "$PROMPT" in
+  *"[e2e-tester-code]"*)
+    mkdir -p src
+    printf 'tester %s\n' "$(date +%s)" >> src/tester-touch.txt
+    ;;
+  *"[e2e-tester-changes]"*)
+    if [ "$(wc -l < e2e-result.txt 2>/dev/null || echo 0)" -lt 2 ]; then
+      VERDICT="VERDICT: CHANGES: e2e-тестировщик: критерий 1 не выполнен, повторите реализацию"
+    fi
+    ;;
+  esac
+  hook '{"hook_event_name":"Stop","session_id":"fake-claude-1"}'
+  emit '{"type":"result","subtype":"success","result":"Тесты готовы.\n'"$VERDICT"'","total_cost_usd":0.02,"usage":{"input_tokens":1100,"output_tokens":90}}'
+  exit 0
+  ;;
+esac
+
 case "$PROMPT" in
 *"[e2e-block]"*)
   case "$PROMPT" in

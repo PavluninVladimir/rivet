@@ -198,6 +198,24 @@ func (s *Store) UpsertAgent(ctx context.Context, in AgentInput, actorID, actorLo
 		if in.Capabilities == nil {
 			in.Capabilities = []string{}
 		}
+		// Профиль, на который ссылаются агенты команды, шаблоны или
+		// переопределения ролей, нельзя выключить, а их модели — отвязать.
+		if exists {
+			var keep map[string]bool
+			if in.Enabled == nil || *in.Enabled {
+				keep = map[string]bool{}
+				for _, m := range in.Models {
+					keep[m.ConnectionID+"/"+m.Model] = true
+				}
+			}
+			refs, err := agentUseRefs(ctx, tx, in.ID, keep)
+			if err != nil {
+				return err
+			}
+			if len(refs) > 0 {
+				return &ErrInUse{Refs: refs}
+			}
+		}
 		mj, _ := json.Marshal(in.Models)
 		ej, _ := json.Marshal(in.Env)
 		aj, _ := json.Marshal(in.Args)
@@ -419,7 +437,11 @@ func (s *Store) DeleteAgent(ctx context.Context, id, actorLogin string) error {
 			}
 		}
 		prows.Close()
-		if len(refs) > 0 {
+		team, err := agentUseRefs(ctx, tx, id, nil)
+		if err != nil {
+			return err
+		}
+		if refs = append(refs, team...); len(refs) > 0 {
 			return &ErrInUse{Refs: refs}
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM agents WHERE id=$1`, id); err != nil {
@@ -671,6 +693,8 @@ func (s *Store) BuildAgentLaunch(ctx context.Context, a domain.AgentProfile, b d
 
 // SetRunModel фиксирует модель, выбранную при назначении (для консоли и usage).
 func (s *Store) SetRunModel(ctx context.Context, runID int64, model string) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE task_step_runs SET model=$2 WHERE id=$1 AND model=''`, runID, model)
+	// Назначенная модель — отдельно от явной модели участника: она не
+	// становится требованием при повторном назначении.
+	_, err := s.Pool.Exec(ctx, `UPDATE task_step_runs SET assigned_model=$2 WHERE id=$1`, runID, model)
 	return err
 }

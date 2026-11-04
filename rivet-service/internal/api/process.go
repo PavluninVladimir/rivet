@@ -27,14 +27,21 @@ type stepRunView struct {
 	Detail      string     `json:"detail"`
 	By          string     `json:"by"`
 	FinishedAt  *time.Time `json:"finished_at"`
+	// Role — роль участника, Model — модель запуска, AgentID и AgentName —
+	// агент команды запуска (add-agent-roles).
+	Role      string `json:"role"`
+	Model     string `json:"model,omitempty"`
+	AgentID   string `json:"agent_id"`
+	AgentName string `json:"agent_name"`
 }
 
 func runView(r store.StepRun) stepRunView {
 	v := stepRunView{ID: r.ID, Participant: r.Participant, Kind: "agent", Runner: r.RunnerID,
-		Verdict: r.Verdict, Detail: r.Detail, By: r.VerdictBy, FinishedAt: r.FinishedAt}
-	if r.AgentKind != "" || r.Model != "" {
-		v.Agent = r.AgentKind + "/" + r.Model
-		if r.Model == "" {
+		Verdict: r.Verdict, Detail: r.Detail, By: r.VerdictBy, FinishedAt: r.FinishedAt,
+		Role: r.Role, Model: r.DisplayModel(), AgentID: r.AgentID, AgentName: r.AgentName}
+	if m := r.DisplayModel(); r.AgentKind != "" || m != "" {
+		v.Agent = r.AgentKind + "/" + m
+		if m == "" {
 			v.Agent = r.AgentKind
 		}
 	}

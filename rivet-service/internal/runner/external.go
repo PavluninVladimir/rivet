@@ -35,7 +35,9 @@ func (a *externalAdapter) Run(ctx context.Context, dir, prompt string, sink runS
 	}
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", a.cfg.AdapterCmd)
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
+	// Окружение профиля агента (и запрет push тестировщику) — адаптеру,
+	// который запускает агента.
+	cmd.Env = append(os.Environ(), a.cfg.ExtraEnv...)
 	// Адаптер — чужая программа, которая обычно запускает агента: убивать
 	// надо всю группу процессов, иначе внуки переживут отмену стадии и
 	// удержат её вывод открытым. WaitDelay страхует тот же случай, когда

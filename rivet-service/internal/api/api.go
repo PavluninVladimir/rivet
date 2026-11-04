@@ -34,6 +34,12 @@ type Server struct {
 	// 30 секунд достаточно: история меняется завершением задач.
 	estMu    sync.Mutex
 	estCache map[string]cachedEstimate
+	// decomposing — идущие декомпозиции: агент-Тимлид → Epic (add-agent-roles,
+	// «Тимлид составляет план» в команде). Только в памяти процесса: после
+	// рестарта rivetd декомпозиция не идёт, признак не залипает.
+	decompMu    sync.Mutex
+	decomposing map[string]map[string]*decomposition
+	decompSeq   int64
 	// Planner — горячо заменяемый планировщик декомпозиции; пересобирается
 	// ReloadPlanner из базы либо EnvPlanner (design add-operations-management).
 	Planner    *planner.Holder
@@ -93,6 +99,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/system/agents/{id}", s.putAgent)
 	mux.HandleFunc("DELETE /api/v1/system/agents/{id}", s.deleteAgent)
 	mux.HandleFunc("GET /api/v1/agents", s.listAgentsForMembers)
+	mux.HandleFunc("GET /api/v1/roles", s.listRoles)
+	mux.HandleFunc("POST /api/v1/system/roles", s.createRole)
+	mux.HandleFunc("PUT /api/v1/system/roles/{id}", s.updateRole)
+	mux.HandleFunc("DELETE /api/v1/system/roles/{id}", s.deleteRole)
+	mux.HandleFunc("GET /api/v1/team", s.listTeam)
+	mux.HandleFunc("POST /api/v1/system/team", s.createTeamAgent)
+	mux.HandleFunc("PUT /api/v1/system/team/{id}", s.updateTeamAgent)
+	mux.HandleFunc("DELETE /api/v1/system/team/{id}", s.deleteTeamAgent)
+	mux.HandleFunc("GET /api/v1/models/choices", s.modelChoices)
+	mux.HandleFunc("PATCH /api/v1/system/runners/{id}", s.renameRunner)
 	mux.HandleFunc("GET /api/v1/system/planner", s.getPlanner)
 	mux.HandleFunc("PUT /api/v1/system/planner", s.putPlanner)
 	mux.HandleFunc("GET /api/v1/runner-tokens", s.listRunnerTokens)
@@ -924,6 +940,15 @@ func (s *Server) listRunners(w http.ResponseWriter, r *http.Request) {
 			out[i].TaskID = ""
 		}
 	}
+	// Роли, которые runner может выполнять (add-agent-roles).
+	roles, err := s.St.ListRoles(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	for i := range out {
+		out[i].Roles = runnerRoles(out[i], roles)
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -1061,7 +1086,7 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	flushEvents := func() bool {
-		evs, err := s.St.Events(r.Context(), store.EventFilter{ProjectID: projectID, AfterID: after, Limit: 200})
+		evs, err := s.St.Events(r.Context(), store.EventFilter{ProjectID: projectID, AfterID: after, Limit: 200, GlobalTypes: store.RoleStreamTypes})
 		if err != nil {
 			return false
 		}

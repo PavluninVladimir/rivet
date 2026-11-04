@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
@@ -196,7 +197,27 @@ func testStore(t *testing.T) *store.Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
+	// Тесты механики конвейера закрепляют прежний шаг test без сессии
+	// тестировщика (add-agent-roles: по умолчанию тестировщик включён и
+	// предпочитает другой runner). Тестировщика проверяют отдельные тесты.
+	if _, err := s.SaveInstallationPolicy(ctx, defaultsNoTester(), "root"); err != nil {
+		t.Fatal(err)
+	}
+	// Без команды агентов роли работают по шаблону через capability, как
+	// до появления команды: runner переиспользуется между шагами. Команду
+	// проверяют отдельные тесты (withTeam).
+	if _, err := s.Pool.Exec(ctx, `DELETE FROM team_agents`); err != nil {
+		t.Fatal(err)
+	}
 	return s
+}
+
+// defaultsNoTester — пресеты по умолчанию без сессии тестировщика.
+func defaultsNoTester() policy.Presets {
+	p := policy.Defaults()
+	off := false
+	p.TesterAgent = &off
+	return p
 }
 
 // mustOwner — владелец проектов в тестах конвейера (членство обязательно).

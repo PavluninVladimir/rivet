@@ -48,3 +48,6 @@ func NewDeepSeek(apiKey, model string) *Planner {
 
 // deepseekBase — адрес DeepSeek API; переменная, чтобы тесты подменяли его.
 var deepseekBase = "https://api.deepseek.com"
+
+// FromCompleter — планировщик поверх произвольного провайдера (тесты, стенды).
+func FromCompleter(c Completer) *Planner { return &Planner{c: c} }

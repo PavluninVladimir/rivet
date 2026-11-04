@@ -39,6 +39,14 @@ func (r *Registry) Detach(runnerID string, ch chan *pb.PlaneMsg) {
 	r.mu.Unlock()
 }
 
+// Connected — подключён ли runner (есть открытый канал).
+func (r *Registry) Connected(runnerID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.conns[runnerID]
+	return ok
+}
+
 // Send — неблокирующая доставка; false, если runner не подключён или канал полон.
 // Блокировка держится на время отправки: Attach/Detach закрывают канал под
 // write-lock, и без этого reconnect во время отправки уронил бы plane

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/policy"
@@ -42,6 +43,30 @@ type StepRun struct {
 	Detail     string
 	CreatedAt  time.Time
 	FinishedAt *time.Time
+	// Role — роль участника (add-agent-roles); PrefModel — предпочтительная
+	// модель роли при выборе runner'а (не требование); AgentID и AgentName —
+	// агент команды, который ведёт запуск.
+	Role      string
+	PrefModel string
+	AgentID   string
+	AgentName string
+	// RoleAgent — профиль шаблона (обязателен без своего профиля агента),
+	// PrefAgent — профиль из переопределения проекта (предпочтение),
+	// AgentVerdict — вердикт, который вернул сам агент (тестировщик).
+	RoleAgent    string
+	PrefAgent    string
+	AgentVerdict string
+	// AssignedModel — модель, с которой стадия ушла runner'у; Model — только
+	// явная модель участника (требование к runner'у).
+	AssignedModel string
+}
+
+// DisplayModel — модель запуска для людей: назначенная, иначе явная.
+func (r StepRun) DisplayModel() string {
+	if r.AssignedModel != "" {
+		return r.AssignedModel
+	}
+	return r.Model
 }
 
 // IsUser — запуск участника-человека.
@@ -52,13 +77,15 @@ func (r StepRun) Open() bool { return r.Verdict == "" }
 
 const runCols = `r.id, r.task_id::text, r.step_id, r.step_kind, r.pass, r.participant, r.agent_kind, r.model,
 	r.capabilities, r.user_login, r.user_role, COALESCE(r.runner_id,''), COALESCE(r.session_id::text,''), COALESCE(r.verdict,''),
-	r.verdict_by, r.detail, r.created_at, r.finished_at`
+	r.verdict_by, r.detail, r.created_at, r.finished_at, r.role, r.pref_model, COALESCE(r.agent_id, ''),
+	COALESCE((SELECT ta.name FROM team_agents ta WHERE ta.id = r.agent_id), ''), r.role_agent, r.pref_agent, r.agent_verdict, r.assigned_model`
 
 func scanRun(row pgx.Row) (StepRun, error) {
 	var r StepRun
 	err := row.Scan(&r.ID, &r.TaskID, &r.StepID, &r.StepKind, &r.Pass, &r.Participant, &r.AgentKind, &r.Model,
 		&r.Capabilities, &r.UserLogin, &r.UserRole, &r.RunnerID, &r.SessionID, &r.Verdict, &r.VerdictBy,
-		&r.Detail, &r.CreatedAt, &r.FinishedAt)
+		&r.Detail, &r.CreatedAt, &r.FinishedAt, &r.Role, &r.PrefModel, &r.AgentID, &r.AgentName,
+		&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel)
 	return r, err
 }
 
@@ -109,9 +136,12 @@ type EnterStep struct {
 	ProcessHash    string
 	ReuseRunner    string
 	ReleaseRunners bool
-	Text           string
-	Payload        map[string]any
-	Actor          EventInput
+	// Roles — роли участников шага по идентификатору участника, разрешённые
+	// оркестратором по каталогу и политике проекта (add-agent-roles).
+	Roles   map[string]RoleBinding
+	Text    string
+	Payload map[string]any
+	Actor   EventInput
 	// Silent — без события task.status (вызывающий пишет своё).
 	Silent bool
 }
@@ -134,6 +164,16 @@ func (s *Store) EnterStep(ctx context.Context, in EnterStep) ([]StepRun, error) 
 		// Поколение входа: запуски прежних входов на тот же шаг (blocked,
 		// cancelled) в оценку нового входа не попадают.
 		gen++
+		// Переиспользуемый runner должен быть всё ещё за этой задачей: его
+		// могли освободить и отдать другой (решение о переиспользовании
+		// принималось раньше).
+		reuse := in.ReuseRunner
+		if reuse != "" {
+			var cur *string
+			if err := tx.QueryRow(ctx, `SELECT task_id::text FROM runners WHERE id=$1 FOR UPDATE`, reuse).Scan(&cur); err != nil || (cur != nil && *cur != in.TaskID) {
+				reuse = ""
+			}
+		}
 		if !hasProcess && in.Process != nil {
 			raw, err := json.Marshal(in.Process)
 			if err != nil {
@@ -157,7 +197,7 @@ func (s *Store) EnterStep(ctx context.Context, in EnterStep) ([]StepRun, error) 
 		// Из ready статус выставит назначение первого запуска агента; шаги
 		// без агентов (merge, deploy, только люди) runner'а не ждут —
 		// проекция сразу.
-		if from != domain.TaskReady || in.ReuseRunner != "" || !hasAgentParticipants(in.Step) {
+		if from != domain.TaskReady || reuse != "" || !hasAgentParticipants(in.Step) {
 			to = StepStatus(in.Step.Kind, in.Entry)
 		}
 		if to != from && !from.CanTransition(to) {
@@ -190,21 +230,21 @@ func (s *Store) EnterStep(ctx context.Context, in EnterStep) ([]StepRun, error) 
 		}
 		for i, p := range parts {
 			runner := ""
-			if i == 0 && in.ReuseRunner != "" {
-				runner = in.ReuseRunner
+			if i == 0 && reuse != "" {
+				runner = reuse
 			}
-			r, err := insertRun(ctx, tx, in.TaskID, in.Step, pass, p, runner)
+			r, err := insertRun(ctx, tx, in.TaskID, in.Step, pass, p, runner, in.Roles[p.ID])
 			if err != nil {
 				return err
 			}
 			runs = append(runs, r)
 		}
-		if in.ReuseRunner != "" {
-			if err := bindRunner(ctx, tx, in.TaskID, in.Step.Kind, in.ReuseRunner); err != nil {
+		if reuse != "" {
+			if err := bindRunner(ctx, tx, in.TaskID, in.Step.Kind, reuse); err != nil {
 				return err
 			}
 		}
-		if in.Silent || (in.Text == "" && to == from && in.ReuseRunner == "") {
+		if in.Silent || (in.Text == "" && to == from && reuse == "") {
 			return nil
 		}
 		ev := in.Actor
@@ -219,6 +259,21 @@ func (s *Store) EnterStep(ctx context.Context, in EnterStep) ([]StepRun, error) 
 		payload := map[string]any{"status": string(to), "step": in.Step.ID}
 		for k, v := range in.Payload {
 			payload[k] = v
+		}
+		// Тот же runner продолжает следующий шаг: исполнитель с ролью виден
+		// и здесь, как в событии назначения (add-agent-roles).
+		if reuse != "" && len(runs) > 0 && runs[0].Role != "" {
+			var title, rname string
+			if err := tx.QueryRow(ctx, `
+				SELECT COALESCE((SELECT title FROM agent_roles WHERE id=$1), ''),
+				       COALESCE((SELECT COALESCE(NULLIF(display_name, ''), id) FROM runners WHERE id=$2), '')`,
+				runs[0].Role, reuse).Scan(&title, &rname); err != nil {
+				return err
+			}
+			if title != "" {
+				payload["role"] = map[string]any{"id": runs[0].Role, "title": title}
+			}
+			payload["runner"], payload["runner_name"] = reuse, rname
 		}
 		ev.Payload = payload
 		_, err := appendEvent(ctx, tx, ev)
@@ -237,34 +292,56 @@ func hasAgentParticipants(step policy.ResolvedStep) bool {
 	return false
 }
 
-func insertRun(ctx context.Context, tx pgx.Tx, taskID string, step policy.ResolvedStep, pass int, p policy.ResolvedParticipant, runner string) (StepRun, error) {
-	caps := step.Capabilities
-	if caps == nil {
-		caps = []string{}
+func insertRun(ctx context.Context, tx pgx.Tx, taskID string, step policy.ResolvedStep, pass int, p policy.ResolvedParticipant, runner string, rb RoleBinding) (StepRun, error) {
+	caps := append([]string{}, step.Capabilities...)
+	// Роль участника (add-agent-roles): capability шаблона добавляется к
+	// capability шага. Профиль шаблона хранится отдельно от явного типа
+	// участника: у агента команды со своим профилем он не действует.
+	if !p.IsUser() && rb.Role != "" {
+		if rb.Capability != "" && !containsStr(caps, rb.Capability) {
+			caps = append(caps, rb.Capability)
+		}
+	} else {
+		rb = RoleBinding{}
 	}
 	var runnerArg *string
 	if runner != "" {
 		runnerArg = &runner
 	}
 	return scanRun(tx.QueryRow(ctx, `
-		INSERT INTO task_step_runs AS r (task_id, step_id, step_kind, pass, participant, agent_kind, model, capabilities, runner_id, user_login, user_role)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-		RETURNING `+runCols, taskID, step.ID, step.Kind, pass, p.ID, p.Agent.Kind, p.Agent.Model, caps, runnerArg, p.User.Login, p.User.Role))
+		INSERT INTO task_step_runs AS r (task_id, step_id, step_kind, pass, participant, agent_kind, model, capabilities, runner_id, user_login, user_role,
+			role, pref_model, role_agent, pref_agent)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		RETURNING `+runCols, taskID, step.ID, step.Kind, pass, p.ID, p.Agent.Kind, p.Agent.Model, caps, runnerArg, p.User.Login, p.User.Role,
+		rb.Role, rb.PrefModel, rb.Agent, rb.PrefAgent))
 }
 
+// ErrRunnerBusy — runner уже ведёт стадию другой задачи.
+var ErrRunnerBusy = errors.New("runner занят другой задачей")
+
 // bindRunner привязывает runner к задаче на шаге: статус runner'а по типу
-// шага, исполнитель (code/test) или ревьюер (review) на задаче.
+// шага, исполнитель (code/test) или ревьюер (review) на задаче. Шаг test
+// исполнителя задачи не перезаписывает, если он уже есть: тестировщик
+// может работать на другом runner'е (add-agent-roles), а ревьюер не должен
+// совпадать именно с исполнителем шага code.
 func bindRunner(ctx context.Context, tx pgx.Tx, taskID, kind, runnerID string) error {
-	if _, err := tx.Exec(ctx,
-		`UPDATE runners SET status=$2, task_id=$3, ctx_pct=NULL WHERE id=$1`, runnerID, runnerStatus(kind), taskID); err != nil {
+	// Runner ведёт одну стадию: занятый другой задачей не привязывается
+	// (защита от двойного назначения при переиспользовании).
+	tag, err := tx.Exec(ctx,
+		`UPDATE runners SET status=$2, task_id=$3, ctx_pct=NULL WHERE id=$1 AND (task_id IS NULL OR task_id=$3)`,
+		runnerID, runnerStatus(kind), taskID)
+	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRunnerBusy
 	}
 	col := "runner_id"
 	if kind == policy.StepReview {
 		col = "reviewer_id"
 	}
-	_, err := tx.Exec(ctx, `UPDATE tasks SET `+col+`=$2, updated_at=now() WHERE id=$1 AND (`+col+` IS NULL OR $3)`,
-		taskID, runnerID, kind != policy.StepReview)
+	_, err = tx.Exec(ctx, `UPDATE tasks SET `+col+`=$2, updated_at=now() WHERE id=$1 AND (`+col+` IS NULL OR $3)`,
+		taskID, runnerID, kind != policy.StepReview && kind != policy.StepTest)
 	return err
 }
 
@@ -366,17 +443,17 @@ func (s *Store) SetRunSession(ctx context.Context, runID int64, sessionID string
 // (Assignment не доставлен — планировщик назначит заново).
 func (s *Store) UnbindRun(ctx context.Context, runID int64) error {
 	_, err := s.Pool.Exec(ctx,
-		`UPDATE task_step_runs SET runner_id=NULL, session_id=NULL WHERE id=$1 AND verdict IS NULL`, runID)
+		`UPDATE task_step_runs SET runner_id=NULL, session_id=NULL, agent_id=NULL, assigned_model='' WHERE id=$1 AND verdict IS NULL`, runID)
 	return err
 }
 
 // AddSequentialRun создаёт запуск следующего участника (sequential) на
 // том же проходе; runner назначит планировщик.
-func (s *Store) AddSequentialRun(ctx context.Context, taskID string, step policy.ResolvedStep, pass int, p policy.ResolvedParticipant) (StepRun, error) {
+func (s *Store) AddSequentialRun(ctx context.Context, taskID string, step policy.ResolvedStep, pass int, p policy.ResolvedParticipant, rb RoleBinding) (StepRun, error) {
 	var r StepRun
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var err error
-		r, err = insertRun(ctx, tx, taskID, step, pass, p, "")
+		r, err = insertRun(ctx, tx, taskID, step, pass, p, "", rb)
 		return err
 	})
 	return r, err
@@ -436,7 +513,7 @@ func (s *Store) ReadyToEnter(ctx context.Context, excludedProjects, excludedEpic
 		excludedEpics = []string{}
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT `+taskCols+` FROM tasks t
+		SELECT `+taskCols+` FROM `+taskFrom+`
 		JOIN epics e ON e.id=t.epic_id AND e.status='running'
 			AND e.project_id <> ALL($1::uuid[]) AND e.id <> ALL($2::uuid[])
 		WHERE t.status='ready'
@@ -462,6 +539,23 @@ type RunAssignment struct {
 	Run    StepRun
 	Task   domain.Task
 	Runner domain.Runner
+	// Pending — событие назначения и переход статуса задачи: событие
+	// пишется после доставки стадии (RunDelivered), при недоставке переход
+	// откатывается (UndoAssign).
+	Pending *PendingAssign
+}
+
+// PendingAssign — итог назначения, который подтверждает доставка. Статус
+// задачи меняется ещё в транзакции назначения: результат стадии может
+// прийти сразу после отправки, раньше подтверждения. Недоставка возвращает
+// задачу в ready. Событие «назначена» или «назначен исполнитель» пишется
+// только после доставки, иначе устойчивая ошибка старта писала бы его на
+// каждый повтор.
+type PendingAssign struct {
+	Event EventInput
+	// To — статус, в который назначение перевело задачу из ready (пусто —
+	// задача уже была в работе).
+	To domain.TaskStatus
 }
 
 // AssignRun атомарно назначает один ожидающий запуск подходящему свободному
@@ -470,6 +564,13 @@ type RunAssignment struct {
 // Задача в ready получает статус-проекцию шага и ветку. ok=false —
 // назначать нечего.
 func (s *Store) AssignRun(ctx context.Context, excludedProjects, excludedEpics []string) (RunAssignment, bool, error) {
+	return s.AssignRunExcept(ctx, excludedProjects, excludedEpics, nil, nil)
+}
+
+// AssignRunExcept — AssignRun без указанных runner'ов и запусков: тик
+// планировщика исключает те, чья стадия в этом тике не стартовала, и
+// продолжает назначать остальные (add-agent-roles).
+func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedEpics, excludedRunners []string, excludedRuns []int64) (RunAssignment, bool, error) {
 	var a RunAssignment
 	assigned := false
 	if excludedProjects == nil {
@@ -478,47 +579,108 @@ func (s *Store) AssignRun(ctx context.Context, excludedProjects, excludedEpics [
 	if excludedEpics == nil {
 		excludedEpics = []string{}
 	}
+	if excludedRunners == nil {
+		excludedRunners = []string{}
+	}
+	if excludedRuns == nil {
+		excludedRuns = []int64{}
+	}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var runID int64
 		var taskID, epicID, projectID, runnerID, kind, entry string
 		var from domain.TaskStatus
 		var num int64
-		var branch string
+		var branch, role, roleTitle, runnerName, agentID, agentName string
+		var rolesFeature bool
+		var seen time.Time
 		err := tx.QueryRow(ctx, `
-			SELECT r.id, t.id, t.epic_id, e.project_id, x.id, r.step_kind, t.step_entry, t.status, t.num, COALESCE(t.branch,'')
+			SELECT r.id, t.id, t.epic_id, e.project_id, x.id, r.step_kind, t.step_entry, t.status, t.num, COALESCE(t.branch,''),
+				r.role, COALESCE((SELECT ar.title FROM agent_roles ar WHERE ar.id = r.role), ''),
+				COALESCE(NULLIF(x.display_name, ''), x.id), 'roles' = ANY(x.features),
+				COALESCE(x.agent_id, ''), COALESCE(x.agent_name, ''), x.last_seen
 			FROM task_step_runs r
 			JOIN tasks t ON t.id = r.task_id
 			JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
 				AND e.project_id <> ALL($1::uuid[])
 				AND e.id <> ALL($2::uuid[])
 			JOIN LATERAL (
-				SELECT x.id FROM runners x
-				WHERE x.status = 'idle' AND NOT x.draining
+				SELECT x.id, x.display_name, x.features, x.last_seen, ag.id AS agent_id, ag.name AS agent_name FROM runners x
+				-- агент команды роли (add-agent-roles): включённый, без открытого
+				-- запуска, runner подходит ему по профилю и модели
+				LEFT JOIN team_agents ag ON r.role <> '' AND ag.role_id = r.role AND ag.enabled
+					AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)
+					AND (ag.model = '' OR ag.model = ANY(x.models) OR x.model = ag.model)
+				WHERE x.status = 'idle' AND NOT x.draining AND x.task_id IS NULL AND x.id <> ALL($3::text[])
 				  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)
 				  AND (r.agent_kind = '' OR x.agent = r.agent_kind)
+				  -- профиль: агента команды, иначе шаблона (если задан); профиль
+				  -- переопределения проекта — только предпочтение (ниже)
+				  AND x.agent = COALESCE(NULLIF(ag.agent, ''), NULLIF(r.role_agent, ''), x.agent)
 				  AND (r.model = '' OR r.model = ANY(x.models))
 				  AND (r.step_kind <> 'prompt' OR 'PROMPT' = ANY(x.stages))
 				  AND (r.step_kind <> 'review' OR x.id IS DISTINCT FROM t.runner_id)
-				-- беречь специалистов: из подходящих берём наименее «богатого» по
-				-- capabilities и моделям, чтобы runner с редкой моделью достался
-				-- участнику, которому без него не обойтись
-				ORDER BY cardinality(x.capabilities), cardinality(x.models), x.last_seen DESC
+				  -- у роли есть команда — нужен свободный подходящий агент; без
+				  -- агентов роли участник работает по шаблону через capability
+				  AND (ag.id IS NOT NULL OR r.role = ''
+				       OR NOT EXISTS (SELECT 1 FROM team_agents ta WHERE ta.role_id = r.role AND ta.enabled))
+				-- агент команды: исправление — тому же агенту роли, что вёл задачу,
+				-- и по возможности на том же runner'е (тёплая рабочая копия);
+				-- роль (add-agent-roles): сначала runner с моделью роли, если она
+				-- задана; тестировщику — runner, не писавший код задачи (оба
+				-- правила — предпочтение: без такого runner'а подойдёт любой);
+				-- дальше беречь специалистов: из подходящих берём наименее
+				-- «богатого» по capabilities и моделям, чтобы runner с редкой
+				-- моделью достался участнику, которому без него не обойтись
+				ORDER BY (ag.id IS NOT NULL AND ag.id = (
+						SELECT o.agent_id FROM task_step_runs o
+						WHERE o.task_id = t.id AND o.role = r.role AND o.agent_id IS NOT NULL
+						ORDER BY o.id DESC LIMIT 1)) DESC,
+					(ag.id IS NOT NULL AND r.step_kind = 'code' AND x.id IS NOT DISTINCT FROM (
+						SELECT o.runner_id FROM task_step_runs o
+						WHERE o.task_id = t.id AND o.step_kind = 'code' AND o.runner_id IS NOT NULL
+						ORDER BY o.id DESC LIMIT 1)) DESC,
+					(r.pref_agent <> '' AND x.agent = r.pref_agent) DESC,
+					(r.pref_model <> '' AND (r.pref_model = ANY(x.models) OR x.model = r.pref_model)) DESC,
+					(r.step_kind = 'test' AND r.role <> '' AND x.id IS NOT DISTINCT FROM t.runner_id) ASC,
+					cardinality(x.capabilities), cardinality(x.models), x.last_seen DESC, ag.position
 				FOR UPDATE OF x SKIP LOCKED
 				LIMIT 1
 			) x ON true
 			WHERE r.runner_id IS NULL AND r.verdict IS NULL AND `+agentRunsOnly+`
 			  AND t.status IN ('ready','running','fixing','testing','review')
+			  AND r.id <> ALL($4::bigint[])
+			  AND (r.not_before IS NULL OR r.not_before <= now())
 			ORDER BY t.num, r.id
 			FOR UPDATE OF t, r SKIP LOCKED
-			LIMIT 1`, excludedProjects, excludedEpics).
-			Scan(&runID, &taskID, &epicID, &projectID, &runnerID, &kind, &entry, &from, &num, &branch)
+			LIMIT 1`, excludedProjects, excludedEpics, excludedRunners, excludedRuns).
+			Scan(&runID, &taskID, &epicID, &projectID, &runnerID, &kind, &entry, &from, &num, &branch, &role, &roleTitle, &runnerName, &rolesFeature,
+				&agentID, &agentName, &seen)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
+		}
+		// Исполнитель для людей: роль и имя runner'а (спека agent-roles
+		// «Роль исполнителя в событиях и API»).
+		who := "runner " + runnerID
+		payload := map[string]any{"runner": runnerID, "runner_name": runnerName}
+		if role != "" && roleTitle != "" {
+			who = roleTitle + " (runner " + runnerID + ")"
+			if agentName != "" {
+				who = roleTitle + " " + agentName + " (runner " + runnerID + ")"
+				payload["agent"] = map[string]any{"id": agentID, "name": agentName}
+			}
+			payload["role"] = map[string]any{"id": role, "title": roleTitle}
+			// Runner без поддержки ролей выполнит стадию по прежнему
+			// заданию: инструкция роли до агента не дойдёт.
+			if !rolesFeature {
+				payload["role_delivered"] = false
+				who += ", роль не передана: runner без поддержки ролей"
+			}
 		}
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE task_step_runs SET runner_id=$2 WHERE id=$1 AND verdict IS NULL`, runID, runnerID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE task_step_runs SET runner_id=$2, agent_id=NULLIF($3, '') WHERE id=$1 AND verdict IS NULL`,
+			runID, runnerID, agentID); err != nil {
 			return err
 		}
 		if err := bindRunner(ctx, tx, taskID, kind, runnerID); err != nil {
@@ -543,30 +705,33 @@ func (s *Store) AssignRun(ctx context.Context, excludedProjects, excludedEpics [
 				taskID, to, branch); err != nil {
 				return err
 			}
-			if _, err := appendEvent(ctx, tx, EventInput{
+			a.Pending = &PendingAssign{To: to, Event: EventInput{
 				ActorKind: domain.ActorScheduler, Type: "task.status",
 				ProjectID: projectID, EpicID: epicID, TaskID: taskID,
-				Text:    "назначена на runner " + runnerID,
-				Payload: map[string]any{"status": string(to), "runner": runnerID},
-			}); err != nil {
-				return err
-			}
+				Text:    "назначена: " + who,
+				Payload: withPayload(payload, "status", string(to)),
+			}}
 		} else {
 			if _, err := tx.Exec(ctx, `UPDATE tasks SET wait_reason='', updated_at=now() WHERE id=$1`, taskID); err != nil {
 				return err
 			}
-			if _, err := appendEvent(ctx, tx, EventInput{
+			a.Pending = &PendingAssign{Event: EventInput{
 				ActorKind: domain.ActorScheduler, Type: "task.assign",
 				ProjectID: projectID, EpicID: epicID, TaskID: taskID,
-				Text: text + runnerID, Payload: map[string]any{"runner": runnerID},
-			}); err != nil {
-				return err
-			}
+				Text: text + who, Payload: payload,
+			}}
 		}
-		a.Run.ID, a.Task.ID, a.Runner.ID = runID, taskID, runnerID
+		a.Run.ID, a.Task.ID, a.Runner.ID, a.Runner.LastSeen = runID, taskID, runnerID, seen
 		assigned = true
 		return nil
 	})
+	// Два назначения выбрали одного свободного агента одновременно:
+	// уникальный индекс открытого запуска агента отклонил второе, запуск
+	// назначится на следующем тике.
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "task_step_runs_agent_open" {
+		return a, false, nil
+	}
 	if err != nil || !assigned {
 		return a, false, err
 	}
@@ -577,16 +742,20 @@ func (s *Store) AssignRun(ctx context.Context, excludedProjects, excludedEpics [
 	if a.Run, err = scanRun(s.Pool.QueryRow(ctx, `SELECT `+runCols+` FROM task_step_runs r WHERE r.id=$1`, a.Run.ID)); err != nil {
 		return a, true, err
 	}
+	seen := a.Runner.LastSeen
 	if a.Runner, err = s.GetRunner(ctx, a.Runner.ID); err != nil {
 		return a, true, err
 	}
+	// LastSeen — снимок из транзакции назначения: по нему недоставка
+	// отличает мёртвый runner от переподключившегося (MarkRunnerOffline).
+	a.Runner.LastSeen = seen
 	return a, true, nil
 }
 
 // GetRunner — runner по идентификатору.
 func (s *Store) GetRunner(ctx context.Context, id string) (domain.Runner, error) {
 	r, err := scanRunner(s.Pool.QueryRow(ctx, `
-		SELECT `+runnerCols+` FROM runners r LEFT JOIN agents a ON a.id = r.agent WHERE r.id=$1`, id))
+		SELECT `+runnerCols+` FROM `+runnerFrom+` WHERE r.id=$1`, id))
 	return r, nf(err)
 }
 
@@ -599,11 +768,14 @@ func (s *Store) WaitingRuns(ctx context.Context) ([]StepRun, error) {
 		JOIN tasks t ON t.id=r.task_id
 		JOIN epics e ON e.id=t.epic_id AND e.status='running'
 		WHERE r.runner_id IS NULL AND r.verdict IS NULL AND t.wait_reason='' AND `+agentRunsOnly+`
+		  -- роли с командой разбирает WaitingTeamRuns (агенты и их профили)
+		  AND (r.role = '' OR NOT EXISTS (SELECT 1 FROM team_agents ta WHERE ta.role_id = r.role AND ta.enabled))
 		  AND NOT EXISTS (
 			SELECT 1 FROM runners x
 			WHERE x.status <> 'offline' AND NOT x.draining
 			  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)
 			  AND (r.agent_kind = '' OR x.agent = r.agent_kind)
+			  AND (r.role_agent = '' OR x.agent = r.role_agent)
 			  AND (r.model = '' OR r.model = ANY(x.models))
 			  AND (r.step_kind <> 'prompt' OR 'PROMPT' = ANY(x.stages)))
 		ORDER BY r.id`)
@@ -851,7 +1023,7 @@ func (s *Store) MySteps(ctx context.Context, userID, login string) ([]StepItem, 
 	rows, err := s.Pool.Query(ctx, `
 		SELECT `+runCols+`, `+taskCols+`, p.id::text, p.name, e.id::text, e.title
 		FROM task_step_runs r
-		JOIN tasks t ON t.id = r.task_id
+		JOIN (`+taskFrom+`) ON t.id = r.task_id
 		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
 		JOIN projects p ON p.id = e.project_id
 		JOIN project_members m ON m.project_id = p.id AND m.user_id = $1::uuid
@@ -869,11 +1041,13 @@ func (s *Store) MySteps(ctx context.Context, userID, login string) ([]StepItem, 
 		var crit, proc, rej []byte
 		if err := rows.Scan(&r.ID, &r.TaskID, &r.StepID, &r.StepKind, &r.Pass, &r.Participant, &r.AgentKind, &r.Model,
 			&r.Capabilities, &r.UserLogin, &r.UserRole, &r.RunnerID, &r.SessionID, &r.Verdict, &r.VerdictBy,
-			&r.Detail, &r.CreatedAt, &r.FinishedAt,
+			&r.Detail, &r.CreatedAt, &r.FinishedAt, &r.Role, &r.PrefModel, &r.AgentID, &r.AgentName,
+			&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel,
 			&t.ID, &t.EpicID, &t.Num, &t.Title, &t.Description, &t.Status, &t.Estimate,
 			&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit, &t.ReviewRejections,
 			&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,
 			&t.StepID, &t.StepEntry, &proc, &t.ProcessHash, &rej, &t.WaitReason, &t.StepGen, &t.Created, &t.Updated,
+			&t.RoleID, &t.RunnerName, &t.AgentID, &t.AgentName,
 			&it.ProjectID, &it.Project, &it.EpicID, &it.Epic); err != nil {
 			return nil, err
 		}
@@ -909,8 +1083,8 @@ func (s *Store) stepContext(ctx context.Context, run StepRun) (string, error) {
 		who := r.Participant
 		if r.VerdictBy != "" {
 			who += " (" + r.VerdictBy + ")"
-		} else if r.AgentKind != "" || r.Model != "" {
-			who += " (" + strings.TrimSuffix(r.AgentKind+"/"+r.Model, "/") + ")"
+		} else if r.AgentKind != "" || r.DisplayModel() != "" {
+			who += " (" + strings.TrimSuffix(r.AgentKind+"/"+r.DisplayModel(), "/") + ")"
 		}
 		parts = append(parts, who+": "+r.Verdict+"\n"+r.Detail)
 	}
@@ -1036,7 +1210,7 @@ func (s *Store) ValidateProcessMembers(ctx context.Context, projectID string, o 
 // движок дожимает их на тике.
 func (s *Store) StepsToReconcile(ctx context.Context) ([]domain.Task, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT `+taskCols+` FROM tasks t
+		SELECT `+taskCols+` FROM `+taskFrom+`
 		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
 		WHERE t.status IN ('ready','running','fixing','testing','review')
 		  AND t.step_gen > t.step_closed_gen
@@ -1056,4 +1230,14 @@ func (s *Store) StepsToReconcile(ctx context.Context) ([]domain.Task, error) {
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+// withPayload — копия payload с добавленным ключом.
+func withPayload(p map[string]any, k string, v any) map[string]any {
+	out := make(map[string]any, len(p)+1)
+	for key, val := range p {
+		out[key] = val
+	}
+	out[k] = v
+	return out
 }

@@ -215,7 +215,7 @@ func TestTouchRunnerNullableCtx(t *testing.T) {
 	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "fake", Model: "m", Host: "h", Capabilities: []string{}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.TouchRunner(ctx, "r1", ptr(37)); err != nil {
+	if _, err := s.TouchRunner(ctx, "r1", ptr(37)); err != nil {
 		t.Fatal(err)
 	}
 	runners, err := s.ListRunners(ctx)
@@ -225,7 +225,7 @@ func TestTouchRunnerNullableCtx(t *testing.T) {
 	if len(runners) != 1 || runners[0].CtxPct == nil || *runners[0].CtxPct != 37 {
 		t.Fatalf("ожидался ctx_pct=37, получено %+v", runners)
 	}
-	if err := s.TouchRunner(ctx, "r1", nil); err != nil {
+	if _, err := s.TouchRunner(ctx, "r1", nil); err != nil {
 		t.Fatal(err)
 	}
 	runners, err = s.ListRunners(ctx)

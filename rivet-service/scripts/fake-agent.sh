@@ -1,6 +1,9 @@
 #!/bin/sh
 # Fake-агент для e2e-стендов: играет роль CLI-агента без модели и токенов.
 # Поведение управляется содержимым промпта (RIVET_PROMPT_FILE):
+#   - промпт тестировщика -> тест в tests/e2e-tests.txt и VERDICT: OK
+#     ([e2e-tester-changes] — CHANGES на первом проходе, [e2e-tester-code] —
+#     правка src/, которую runner откатит)
 #   - промпт ревьюера  -> VERDICT: APPROVED
 #   - метка [e2e-block] без ответа человека -> BLOCKED: вопрос
 #   - иначе -> правит файл в рабочей копии (коммитит и пушит runner)
@@ -25,6 +28,31 @@ case "$PROMPT" in
   usage
   case "$PROMPT" in
   *"[e2e-changes]"*) echo "VERDICT: CHANGES: e2e-агент просит поправить"; ;;
+  *) echo "VERDICT: OK"; ;;
+  esac
+  exit 0
+  ;;
+*"проверяешь задачу"*)
+  # Тестировщик (add-agent-roles): тест на критерии в тестовом каталоге.
+  echo "Пишу тесты по критериям приёмки."
+  mkdir -p tests
+  printf 'test %s\n' "$(date +%s)" >> tests/e2e-tests.txt
+  usage
+  case "$PROMPT" in
+  *"[e2e-tester-code]"*)
+    mkdir -p src
+    printf 'tester %s\n' "$(date +%s)" >> src/tester-touch.txt
+    echo "VERDICT: OK"
+    ;;
+  *"[e2e-tester-changes]"*)
+    # Первый проход разработчика оставил одну строку результата: критерий
+    # не выполнен; после исправления строк две — всё в порядке.
+    if [ "$(wc -l < e2e-result.txt 2>/dev/null || echo 0)" -ge 2 ]; then
+      echo "VERDICT: OK"
+    else
+      echo "VERDICT: CHANGES: e2e-тестировщик: критерий 1 не выполнен, повторите реализацию"
+    fi
+    ;;
   *) echo "VERDICT: OK"; ;;
   esac
   exit 0

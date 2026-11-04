@@ -150,6 +150,15 @@ func (s *Store) SaveInstallationPolicy(ctx context.Context, p policy.Presets, lo
 	if err := s.ValidateProcessAgents(ctx, p.Process); err != nil {
 		return PolicyVersion{}, err
 	}
+	if err := s.ValidateProcessRoles(ctx, p.Process); err != nil {
+		return PolicyVersion{}, err
+	}
+	// Модели ролей у установки живут в шаблонах; переопределение — только
+	// в политике проекта.
+	if len(p.RoleModels) > 0 {
+		return PolicyVersion{}, &policy.ProcessError{Field: "role_models",
+			Msg: "переопределение моделей ролей задаётся в политике проекта; у установки модели живут в шаблонах ролей"}
+	}
 	return s.savePolicyVersion(ctx, PolicyScopeInstallation, "", p, login)
 }
 
@@ -229,6 +238,12 @@ func (s *Store) SaveProjectPolicy(ctx context.Context, projectID string, o polic
 	if err := s.ValidateAgentModels(ctx, o.AgentModels); err != nil {
 		return PolicyVersion{}, err
 	}
+	if err := s.ValidateProcessRoles(ctx, o.Process); err != nil {
+		return PolicyVersion{}, err
+	}
+	if err := s.ValidateRoleModels(ctx, o.RoleModels); err != nil {
+		return PolicyVersion{}, err
+	}
 	if err := s.checkProjectLocks(ctx, o); err != nil {
 		return PolicyVersion{}, err
 	}
@@ -299,6 +314,12 @@ func (s *Store) SaveProjectPolicyFromGit(ctx context.Context, projectID string, 
 	if err := s.ValidateAgentModels(ctx, o.AgentModels); err != nil {
 		return false, err
 	}
+	if err := s.ValidateProcessRoles(ctx, o.Process); err != nil {
+		return false, err
+	}
+	if err := s.ValidateRoleModels(ctx, o.RoleModels); err != nil {
+		return false, err
+	}
 	if err := s.checkProjectLocks(ctx, o); err != nil {
 		return false, err
 	}
@@ -324,6 +345,15 @@ func (s *Store) SaveProjectPolicyFromGit(ctx context.Context, projectID string, 
 		}
 		if _, err := tx.Exec(ctx,
 			`SELECT pg_advisory_xact_lock(hashtext('policy:' || $1 || ':' || $2))`, PolicyScopeProject, projectID); err != nil {
+			return err
+		}
+		// Порядок замков: строка проекта → advisory политики → шаблоны
+		// ролей; роли процесса перепроверяются под замком, как у
+		// savePolicyVersion (add-agent-roles).
+		if err := lockRoles(ctx, tx); err != nil {
+			return err
+		}
+		if err := validateProcessRolesTx(ctx, tx, o.Process); err != nil {
 			return err
 		}
 		v, err := scanPolicyVersion(tx.QueryRow(ctx, `
@@ -368,6 +398,19 @@ func (s *Store) savePolicyVersion(ctx context.Context, scope, projectID string, 
 		if _, err := tx.Exec(ctx,
 			`SELECT pg_advisory_xact_lock(hashtext('policy:' || $1 || ':' || $2))`, scope, projectID); err != nil {
 			return err
+		}
+		// Роли процесса перепроверяются под замком шаблонов: выключение
+		// шаблона между проверкой и записью версии не проскочит.
+		if err := lockRoles(ctx, tx); err != nil {
+			return err
+		}
+		var doc struct {
+			Process *policy.Process `json:"process"`
+		}
+		if err := json.Unmarshal(raw, &doc); err == nil {
+			if err := validateProcessRolesTx(ctx, tx, doc.Process); err != nil {
+				return err
+			}
 		}
 		v, err = scanPolicyVersion(tx.QueryRow(ctx, `
 			INSERT INTO policy_versions (scope, project_id, version, hash, content, created_by)

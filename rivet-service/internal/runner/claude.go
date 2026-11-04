@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
@@ -125,6 +126,16 @@ func (c *claudeAdapter) Run(ctx context.Context, dir, prompt string, sink runSin
 	// вызывает её сам вместо чтения settings-файла.
 	// Окружение профиля агента (ключ и адрес подключения) поверх окружения хоста.
 	cmd.Env = append(append(os.Environ(), c.cfg.ExtraEnv...), "RIVET_HOOK_SOCK="+sockPath, "RIVET_HOOK_CMD="+hookCmd)
+	// Отмена убивает всю группу процессов: фоновые процессы, которые агент
+	// запустил (dev-сервер, watcher), не переживают стадию.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = adapterWaitDelay
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return agentRun{}, err

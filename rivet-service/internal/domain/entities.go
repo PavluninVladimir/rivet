@@ -122,8 +122,15 @@ type Task struct {
 	StepRejections map[string]int  `json:"StepAttempts"`
 	WaitReason     string          `json:"WaitReason"`
 	StepGen        int             `json:"-"`
-	Created        time.Time
-	Updated        time.Time
+	// Текущий исполнитель (add-agent-roles): роль и отображаемое имя runner'а
+	// открытого запуска агента. Пусто, если исполнителя нет.
+	RoleID     string `json:"RoleID"`
+	RunnerName string `json:"RunnerName"`
+	// AgentID и AgentName — агент команды текущего исполнителя.
+	AgentID   string `json:"AgentID"`
+	AgentName string `json:"AgentName"`
+	Created   time.Time
+	Updated   time.Time
 }
 
 type Runner struct {
@@ -163,6 +170,43 @@ type Runner struct {
 	// агента (спека agent-integration «Обратный канал контекста»);
 	// без него система контекст этому runner'у не шлёт.
 	ContextChannel bool
+	// DisplayName — отображаемое имя (add-agent-roles): из регистрации или
+	// из консоли (DisplayNameLocked — регистрация его не перезаписывает).
+	// Features — возможности сверх версии протокола ("roles").
+	DisplayName       string
+	DisplayNameLocked bool
+	Features          []string
+	// BootID — идентификатор процесса runner'а (смена = перезапуск).
+	BootID string `json:"-"`
+	// RoleID — роль открытого запуска runner'а, AgentID и AgentName — агент
+	// команды, который на нём работает; Roles — роли, которые runner может
+	// выполнять по capability. Заполняются для API.
+	RoleID    string
+	AgentID   string
+	AgentName string
+	Roles     []string
+}
+
+// Label — имя runner'а для людей: отображаемое имя или идентификатор.
+func (r Runner) Label() string {
+	if r.DisplayName != "" {
+		return r.DisplayName
+	}
+	return r.ID
+}
+
+// FeatureRoles — runner передаёт инструкцию роли агенту и выполняет сессию
+// тестировщика (add-agent-roles).
+const FeatureRoles = "roles"
+
+// HasFeature — объявил ли runner возможность при регистрации.
+func (r Runner) HasFeature(f string) bool {
+	for _, x := range r.Features {
+		if x == f {
+			return true
+		}
+	}
+	return false
 }
 
 // HasCapabilities — подбор по требованиям задачи (спека orchestration).
@@ -716,6 +760,72 @@ type AgentProfile struct {
 	Runners      int
 	UpdatedAt    time.Time
 	UpdatedBy    string
+}
+
+// AgentRole — роль агента в команде (спека backend/agent-roles «Каталог
+// ролей»): кем агент выступает в процессе. Модель роли lead хранится в
+// настройке планировщика (PlannerModel) и подставляется при чтении.
+type AgentRole struct {
+	ID           string
+	Title        string
+	Description  string
+	Instruction  string
+	Color        string
+	Capability   string
+	Agent        string
+	DefaultModel *AgentModelRef
+	Enabled      bool
+	Builtin      bool
+	Position     int
+	UpdatedAt    time.Time
+	UpdatedBy    string
+}
+
+// Встроенные роли.
+const (
+	RoleAnalyst   = "analyst"
+	RoleArchitect = "architect"
+	RoleLead      = "lead"
+	RoleDeveloper = "developer"
+	RoleTester    = "tester"
+	RoleReviewer  = "reviewer"
+)
+
+// RoleColors — палитра ролей: имена токенов консоли.
+var RoleColors = []string{"blue", "violet", "green", "amber", "rose", "teal", "indigo", "slate"}
+
+// RoleCapabilities — capability, которую может требовать роль; пусто —
+// роль выполняет control plane (lead, analyst).
+var RoleCapabilities = []string{"coding", "review", "explore", ""}
+
+// ControlPlaneRole — встроенная роль, которую выполняет control plane
+// запросом к модели, а не runner: у неё нет capability и профиля.
+func ControlPlaneRole(id string) bool { return id == RoleLead || id == RoleAnalyst }
+
+// TeamAgent — агент команды (спека agent-roles «Команда агентов»):
+// именованный агент из шаблона роли. Пустые Agent, ConnectionID и Model —
+// как в шаблоне. Поля работы заполняются по открытому запуску агента.
+type TeamAgent struct {
+	ID               string
+	Name             string
+	RoleID           string
+	Agent            string
+	ConnectionID     string
+	Model            string
+	InstructionExtra string
+	Enabled          bool
+	Position         int
+	UpdatedAt        time.Time
+	UpdatedBy        string
+	// Текущая работа: задача, шаг, runner (пусто — свободен).
+	TaskID     string
+	TaskNum    int64
+	ProjectID  string
+	EpicID     string
+	StepKind   string
+	StepEntry  string
+	RunnerID   string
+	RunnerName string
 }
 
 // PlannerModel — выбранная модель декомпозиции: подключение и модель.

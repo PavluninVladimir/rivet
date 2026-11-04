@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -18,8 +19,10 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/store"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 // Версия 10: рабочая копия репозитория в деплой-джобе — доставка
@@ -203,6 +206,20 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 		return &pb.RegisterResponse{Accepted: false,
 			Message: "неизвестная глубина данных " + req.Depth + ": ожидается full, partial или minimal"}, nil
 	}
+	// Перезапуск runner'а (новый идентификатор процесса): его открытые
+	// стадии потеряны — запуски отвязываются и назначаются заново, иначе
+	// они держали бы агентов команды занятыми навсегда (add-agent-roles).
+	if req.BootId != "" {
+		prev, err := s.St.RunnerBootID(ctx, req.RunnerId)
+		if err != nil {
+			return nil, err
+		}
+		if prev != "" && prev != req.BootId {
+			if err := s.Engine.ReleaseRunnerRuns(ctx, req.RunnerId, req.PendingSessions); err != nil {
+				return nil, err
+			}
+		}
+	}
 	// Регистрация фиксирует токен и пишет событие установки (спека runners
 	// «Регистрация фиксируется»).
 	token := tokenFromContext(ctx)
@@ -212,6 +229,7 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 		Host: req.Host, Capabilities: req.Capabilities,
 		Adapter: req.Adapter, Depth: domain.SessionDepth(req.Depth),
 		ContextChannel: req.ContextChannel, Secure: secure, Protocol: req.ProtocolVersion,
+		DisplayName: displayName(req.DisplayName), Features: req.Features, BootID: req.BootId,
 	}, token)
 	if err != nil {
 		return nil, err
@@ -263,6 +281,11 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 	sendCh := s.Reg.Attach(runnerID)
 	defer s.Reg.Detach(runnerID, sendCh)
 	slog.Info("runner connected", "runner", runnerID)
+	// Канал открыт — признак жизни: отметка offline после недоставки в окне
+	// между Register и Hello снимается (add-agent-roles, ревью круг 3).
+	if err := s.St.RunnerAttached(ctx, runnerID); err != nil {
+		slog.Warn("runner attached", "runner", runnerID, "err", err)
+	}
 
 	// Отправка plane → runner.
 	go func() {
@@ -292,6 +315,13 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 		seen[msg.MsgId] = struct{}{}
 
 		if err := s.handle(ctx, runnerID, msg); err != nil {
+			if errors.Is(err, errStaleRunner) {
+				// Стадии runner'а сняты по таймауту и назначены другим, а
+				// его процесс ещё может их выполнять: канал закрывается,
+				// runner переподключится и отменит прежние стадии.
+				slog.Warn("heartbeat от runner'а, потерянного по таймауту: канал закрыт", "runner", runnerID)
+				return status.Error(codes.FailedPrecondition, "runner потерян по таймауту heartbeat: переподключитесь")
+			}
 			slog.Error("runner msg", "runner", runnerID, "err", err)
 			continue // без Ack — runner повторит
 		}
@@ -531,7 +561,14 @@ func (s *Server) ack(runnerID, msgID string) {
 func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg) error {
 	switch k := msg.Kind.(type) {
 	case *pb.RunnerMsg_Heartbeat:
-		return s.St.TouchRunner(ctx, runnerID, ctxPct(k.Heartbeat.CtxPct))
+		stale, err := s.St.TouchRunner(ctx, runnerID, ctxPct(k.Heartbeat.CtxPct))
+		if err != nil {
+			return err
+		}
+		if stale {
+			return errStaleRunner
+		}
+		return nil
 
 	case *pb.RunnerMsg_Event:
 		if !s.Engine.SessionMatches(ctx, k.Event.TaskId, k.Event.SessionId) {
@@ -574,6 +611,9 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		if private {
 			return nil
 		}
+		// Роль и имя исполнителя (спека agent-roles «Роль исполнителя в
+		// событиях и API»).
+		payload = s.Engine.PerformerPayload(ctx, k.Event.SessionId, payload)
 		_, err = s.St.AppendEvent(ctx, store.EventInput{
 			ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "session.step",
 			ProjectID: projectID, EpicID: epicID, TaskID: k.Event.TaskId,
@@ -616,7 +656,7 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		}
 		// Свежий ctx_pct из отчёта агента не ждёт следующего heartbeat.
 		if k.Usage.CtxPct != nil {
-			if err := s.St.TouchRunner(ctx, runnerID, ctxPct(k.Usage.CtxPct)); err != nil {
+			if _, err := s.St.TouchRunner(ctx, runnerID, ctxPct(k.Usage.CtxPct)); err != nil {
 				return err
 			}
 		}
@@ -651,8 +691,21 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 
 var errMissingHello = errHello{}
 
+// errStaleRunner — heartbeat от runner'а, потерянного по таймауту.
+var errStaleRunner = errors.New("runner потерян по таймауту heartbeat")
+
 type errHello struct{}
 
 func (errHello) Error() string {
 	return "первым сообщением Channel должен быть Hello"
+}
+
+// displayName — имя runner'а из регистрации: одна строка до 40 символов,
+// иначе без имени (показывается идентификатор).
+func displayName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || utf8.RuneCountInString(name) > 40 || strings.ContainsFunc(name, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		return ""
+	}
+	return name
 }
