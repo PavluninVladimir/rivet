@@ -173,7 +173,10 @@ func TestStaleRunnerHeartbeatClosesChannel(t *testing.T) {
 		}
 	}()
 	select {
-	case <-closed:
+	case err := <-closed:
+		if err == nil {
+			t.Fatal("канал потерянного runner'а закрыт без ошибки")
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("канал потерянного runner'а закрыт")
 	}
