@@ -112,7 +112,7 @@ func (s *Server) putAgent(w http.ResponseWriter, r *http.Request) {
 		Models: in.Models, DefaultModel: in.DefaultModel, Env: in.Env, Args: in.Args, Secrets: in.Secrets, Enabled: in.Enabled,
 	}, u.ID, u.Login)
 	if err != nil {
-		s.writeConnErr(w, err)
+		s.writeConnErr(w, err, "профиль агента")
 		return
 	}
 	status := http.StatusOK
@@ -127,7 +127,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.St.DeleteAgent(r.Context(), r.PathValue("id"), currentUser(r).Login); err != nil {
-		s.writeConnErr(w, err)
+		s.writeConnErr(w, err, "профиль агента")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

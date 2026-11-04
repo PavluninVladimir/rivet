@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
@@ -61,8 +62,9 @@ func checkState(err error) (domain.LLMProviderState, string) {
 	}
 }
 
-// writeFieldErr — 422 с полем формы, 503 без ключа шифрования, 409 при ссылках.
-func (s *Server) writeConnErr(w http.ResponseWriter, err error) {
+// writeConnErr — 422 с полем формы, 503 без ключа шифрования, 409 при
+// ссылках. what — объект правки для текста отказа (по умолчанию подключение).
+func (s *Server) writeConnErr(w http.ResponseWriter, err error, what ...string) {
 	var fe *store.FieldError
 	var inUse *store.ErrInUse
 	switch {
@@ -71,8 +73,12 @@ func (s *Server) writeConnErr(w http.ResponseWriter, err error) {
 			"error": apiError{Code: "invalid", Message: fe.Msg}, "field": fe.Field,
 		})
 	case errors.As(err, &inUse):
+		obj := "подключение"
+		if len(what) > 0 {
+			obj = what[0]
+		}
 		writeJSON(w, http.StatusConflict, map[string]any{
-			"error": apiError{Code: "in_use", Message: "подключение используется: отключите его вместо удаления"},
+			"error": apiError{Code: "in_use", Message: inUseMessage(obj, inUse.Refs)},
 			"refs":  inUse.Refs,
 		})
 	case errors.Is(err, secretbox.ErrNoKey):
@@ -283,12 +289,15 @@ type plannerView struct {
 	Model        string `json:"model,omitempty"`
 	State        string `json:"state,omitempty"`
 	Detail       string `json:"detail,omitempty"`
+	// Role — модель планировщика — модель роли Тимлида (add-agent-roles).
+	Role string `json:"role"`
 }
 
 func (s *Server) plannerView() plannerView {
 	_, st := s.plannerStatus()
 	// У источника env в ConnectionID имя провайдера окружения.
-	return plannerView{Source: string(st.Source), ConnectionID: st.ConnectionID, Model: st.Model, State: st.State, Detail: st.Detail}
+	return plannerView{Source: string(st.Source), ConnectionID: st.ConnectionID, Model: st.Model, State: st.State, Detail: st.Detail,
+		Role: domain.RoleLead}
 }
 
 func (s *Server) getPlanner(w http.ResponseWriter, r *http.Request) {
@@ -329,4 +338,33 @@ func (s *Server) putPlanner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.plannerView())
+}
+
+// refKindNames — виды ссылок для текста отказа.
+var refKindNames = map[string]string{
+	"planner":    "модель декомпозиции",
+	"agent":      "профили агентов",
+	"runner":     "runner'ы",
+	"project":    "процессы и политики проектов",
+	"team_agent": "агенты команды",
+	"role":       "шаблоны ролей",
+	"role_model": "переопределения моделей ролей",
+}
+
+// inUseMessage — отказ правки с перечнем видов ссылок: что именно мешает и
+// что сделать.
+func inUseMessage(obj string, refs []store.Ref) string {
+	var kinds []string
+	seen := map[string]bool{}
+	for _, r := range refs {
+		name := refKindNames[r.Kind]
+		if name == "" {
+			name = r.Kind
+		}
+		if !seen[name] {
+			seen[name] = true
+			kinds = append(kinds, name)
+		}
+	}
+	return obj + " используется (" + strings.Join(kinds, ", ") + "): сначала уберите эти ссылки"
 }

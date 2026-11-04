@@ -612,7 +612,7 @@ func (s *Store) MarkStaleRunnersOffline(ctx context.Context, timeoutSeconds int)
 		}
 		for _, st := range stales {
 			if _, err := tx.Exec(ctx,
-				`UPDATE runners SET status='offline', task_id=NULL, deployment_id=NULL WHERE id=$1`, st.runnerID); err != nil {
+				`UPDATE runners SET status='offline', task_id=NULL, deployment_id=NULL, offline_reason='stale' WHERE id=$1`, st.runnerID); err != nil {
 				return err
 			}
 			if st.depID != "" {

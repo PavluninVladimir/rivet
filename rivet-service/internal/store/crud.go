@@ -175,7 +175,17 @@ const taskCols = `t.id, t.epic_id, t.num, t.title, t.description, t.status, t.es
 	t.capabilities, t.criteria, t.attempt_used, t.attempt_limit, t.review_rejections,
 	COALESCE(t.runner_id,''), COALESCE(t.branch,''), COALESCE(t.pr_url,''), COALESCE(t.block_reason,''),
 	COALESCE(t.blocked_by::text,''), t.step_id, t.step_entry, t.process, t.process_hash, t.step_rejections,
-	t.wait_reason, t.step_gen, t.created_at, t.updated_at`
+	t.wait_reason, t.step_gen, t.created_at, t.updated_at,
+	COALESCE(cur.role, ''), COALESCE(cur.runner_name, ''), COALESCE(cur.agent_id, ''), COALESCE(cur.agent_name, '')`
+
+// taskFrom — задачи с текущим исполнителем (add-agent-roles): роль и имя
+// runner'а открытого запуска агента с назначенным runner'ом.
+const taskFrom = `tasks t LEFT JOIN LATERAL (
+		SELECT sr.role, COALESCE(NULLIF(x.display_name, ''), x.id) AS runner_name, sr.agent_id, ta.name AS agent_name
+		FROM task_step_runs sr JOIN runners x ON x.id = sr.runner_id
+		LEFT JOIN team_agents ta ON ta.id = sr.agent_id
+		WHERE sr.task_id = t.id AND sr.verdict IS NULL
+		ORDER BY sr.id LIMIT 1) cur ON true`
 
 func scanTask(row pgx.Row) (domain.Task, error) {
 	var t domain.Task
@@ -183,7 +193,8 @@ func scanTask(row pgx.Row) (domain.Task, error) {
 	err := row.Scan(&t.ID, &t.EpicID, &t.Num, &t.Title, &t.Description, &t.Status, &t.Estimate,
 		&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit, &t.ReviewRejections,
 		&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,
-		&t.StepID, &t.StepEntry, &proc, &t.ProcessHash, &rej, &t.WaitReason, &t.StepGen, &t.Created, &t.Updated)
+		&t.StepID, &t.StepEntry, &proc, &t.ProcessHash, &rej, &t.WaitReason, &t.StepGen, &t.Created, &t.Updated,
+		&t.RoleID, &t.RunnerName, &t.AgentID, &t.AgentName)
 	if err != nil {
 		return t, err
 	}
@@ -214,7 +225,7 @@ func (s *Store) taskDeps(ctx context.Context, taskID string) ([]string, error) {
 }
 
 func (s *Store) GetTask(ctx context.Context, id string) (domain.Task, error) {
-	t, err := scanTask(s.Pool.QueryRow(ctx, `SELECT `+taskCols+` FROM tasks t WHERE t.id=$1`, id))
+	t, err := scanTask(s.Pool.QueryRow(ctx, `SELECT `+taskCols+` FROM `+taskFrom+` WHERE t.id=$1`, id))
 	if err != nil {
 		return t, nf(err)
 	}
@@ -223,7 +234,7 @@ func (s *Store) GetTask(ctx context.Context, id string) (domain.Task, error) {
 }
 
 func (s *Store) ListEpicTasks(ctx context.Context, epicID string) ([]domain.Task, error) {
-	rows, err := s.Pool.Query(ctx, `SELECT `+taskCols+` FROM tasks t WHERE t.epic_id=$1 ORDER BY t.num`, epicID)
+	rows, err := s.Pool.Query(ctx, `SELECT `+taskCols+` FROM `+taskFrom+` WHERE t.epic_id=$1 ORDER BY t.num`, epicID)
 	if err != nil {
 		return nil, err
 	}
@@ -253,22 +264,36 @@ func (s *Store) ListEpicTasks(ctx context.Context, epicID string) ([]domain.Task
 // занятость целиком, и задачу, и публикацию (активную публикацию перед этим
 // проваливает вызывающий — Register). $6 — токен регистрации (RegisterRunner).
 const upsertRunnerSQL = `
-		INSERT INTO runners (id, agent, model, host, capabilities, adapter, depth, context_channel, models, stages, status, last_seen, token_id, declared_models, secure, catalog, declared_capabilities, protocol)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$9,$10,$11,'idle',now(),$8,$10,$12,false,$5,$13)
+		INSERT INTO runners (id, agent, model, host, capabilities, adapter, depth, context_channel, models, stages, status, last_seen, token_id, declared_models, secure, catalog, declared_capabilities, protocol,
+			display_name, registered_name, features)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$9,$10,$11,'idle',now(),$8,$10,$12,false,$5,$13,$14,$14,$15)
 		ON CONFLICT (id) DO UPDATE SET agent=$2, model=$3, host=$4, capabilities=$5,
 			adapter=$6, depth=$7, context_channel=$9, models=$10, stages=$11, declared_models=$10, secure=$12, catalog=false,
 			declared_capabilities=$5, protocol=$13,
-			status='idle', task_id=NULL, deployment_id=NULL, ctx_pct=NULL, last_seen=now()`
+			registered_name=$14, features=$15,
+			display_name=CASE WHEN runners.display_name_locked THEN runners.display_name ELSE $14 END,
+			status='idle', task_id=NULL, deployment_id=NULL, ctx_pct=NULL, last_seen=now(), offline_reason=''`
 
 // runnerCols — колонки runner'а с профилем агента (add-agent-profiles).
 const runnerCols = `r.id, r.agent, r.model, r.models, r.stages, r.host, r.capabilities, r.status, COALESCE(r.task_id::text,''), r.ctx_pct, r.draining, r.last_seen, r.adapter, r.depth, r.context_channel,
-	r.catalog, r.secure, COALESCE(a.name, ''), r.declared_models, r.declared_capabilities, r.protocol`
+	r.catalog, r.secure, COALESCE(a.name, ''), r.declared_models, r.declared_capabilities, r.protocol,
+	r.display_name, r.display_name_locked, r.features,
+	COALESCE(cur.role, ''), COALESCE(cur.agent_id, ''), COALESCE(cur.agent_name, '')`
+
+// runnerFrom — runner'ы с профилем агента и текущим агентом команды
+// (add-agent-roles): роль и агент открытого запуска на runner'е.
+const runnerFrom = `runners r LEFT JOIN agents a ON a.id = r.agent
+	LEFT JOIN LATERAL (
+		SELECT sr.role, sr.agent_id, ta.name AS agent_name FROM task_step_runs sr
+		LEFT JOIN team_agents ta ON ta.id = sr.agent_id
+		WHERE sr.runner_id = r.id AND sr.verdict IS NULL ORDER BY sr.id DESC LIMIT 1) cur ON true`
 
 func scanRunner(row pgx.Row) (domain.Runner, error) {
 	var r domain.Runner
 	err := row.Scan(&r.ID, &r.Agent, &r.Model, &r.Models, &r.Stages, &r.Host, &r.Capabilities,
 		&r.Status, &r.TaskID, &r.CtxPct, &r.Draining, &r.LastSeen, &r.Adapter, &r.Depth, &r.ContextChannel,
-		&r.Catalog, &r.Secure, &r.ProfileName, &r.DeclaredModels, &r.DeclaredCapabilities, &r.Protocol)
+		&r.Catalog, &r.Secure, &r.ProfileName, &r.DeclaredModels, &r.DeclaredCapabilities, &r.Protocol,
+		&r.DisplayName, &r.DisplayNameLocked, &r.Features, &r.RoleID, &r.AgentID, &r.AgentName)
 	return r, err
 }
 
@@ -296,6 +321,14 @@ func runnerModels(r domain.Runner) []string {
 		return []string{r.Model}
 	}
 	return []string{}
+}
+
+// runnerFeatures — объявленные возможности, пустой список вместо nil.
+func runnerFeatures(r domain.Runner) []string {
+	if r.Features == nil {
+		return []string{}
+	}
+	return r.Features
 }
 
 // runnerStages — объявленные стадии; пусто у старых runner'ов означает
@@ -327,7 +360,8 @@ func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
 	r = normalizeAdapter(r)
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, upsertRunnerSQL, r.ID, r.Agent, r.Model, r.Host, r.Capabilities,
-			r.Adapter, r.Depth, nil, r.ContextChannel, runnerModels(r), runnerStages(r), r.Secure, r.Protocol); err != nil {
+			r.Adapter, r.Depth, nil, r.ContextChannel, runnerModels(r), runnerStages(r), r.Secure, r.Protocol,
+			r.DisplayName, runnerFeatures(r)); err != nil {
 			return err
 		}
 		return adoptRunnerProfile(ctx, tx, r.ID, r.Agent)
@@ -335,15 +369,22 @@ func (s *Store) UpsertRunner(ctx context.Context, r domain.Runner) error {
 }
 
 // TouchRunner обновляет heartbeat; ctxPct == nil — заполненность неизвестна.
-func (s *Store) TouchRunner(ctx context.Context, id string, ctxPct *int) error {
-	_, err := s.Pool.Exec(ctx,
-		`UPDATE runners SET last_seen=now(), ctx_pct=$2 WHERE id=$1`, id, ctxPct)
-	return err
+// Heartbeat снимает только отметку offline после недоставки. stale — runner
+// потерян по таймауту heartbeat'ов (его стадии уже сняты): вызывающий
+// закрывает канал, runner переподключится и отменит прежние стадии.
+func (s *Store) TouchRunner(ctx context.Context, id string, ctxPct *int) (stale bool, err error) {
+	err = s.Pool.QueryRow(ctx,
+		`UPDATE runners SET last_seen=now(), ctx_pct=$2, `+reviveRunnerSQL(`offline_reason = 'undelivered'`)+`
+		WHERE id=$1 RETURNING status = 'offline' AND offline_reason = 'stale'`, id, ctxPct).Scan(&stale)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return stale, err
 }
 
 func (s *Store) ListRunners(ctx context.Context) ([]domain.Runner, error) {
 	rows, err := s.Pool.Query(ctx, `
-		SELECT `+runnerCols+` FROM runners r LEFT JOIN agents a ON a.id = r.agent ORDER BY r.id`)
+		SELECT `+runnerCols+` FROM `+runnerFrom+` ORDER BY r.id`)
 	if err != nil {
 		return nil, err
 	}

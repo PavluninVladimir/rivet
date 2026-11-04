@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/policy"
@@ -128,6 +129,7 @@ func (e *Engine) enterStep(ctx context.Context, task domain.Task, proc *policy.R
 	in := store.EnterStep{
 		TaskID: task.ID, Step: step, Entry: entry,
 		ReuseRunner: reuseRunner, ReleaseRunners: step.Kind == policy.StepReview,
+		Roles:   e.roleBindings(ctx, task, step),
 		Payload: map[string]any{"process_hash": hash},
 	}
 	if len(task.Process) == 0 {
@@ -147,26 +149,128 @@ func (e *Engine) enterStep(ctx context.Context, task domain.Task, proc *policy.R
 	if err != nil {
 		return err
 	}
-	if reuseRunner != "" && len(runs) > 0 {
+	// Store мог отказаться переиспользовать runner (его уже освободили):
+	// тогда запуск ждёт планировщика.
+	if reuseRunner != "" && len(runs) > 0 && runs[0].RunnerID == reuseRunner {
 		task.StepID, task.StepEntry = step.ID, entry
-		e.dispatchRun(ctx, task, runs[0], domain.Runner{ID: reuseRunner}, step, entry, nil)
+		e.dispatchOrRelease(ctx, task, runs[0], domain.Runner{ID: reuseRunner}, step, entry, nil)
 	}
 	return nil
 }
 
-// dispatchAssigned — запуск, назначенный планировщиком: стадия по шагу снимка.
-func (e *Engine) dispatchAssigned(ctx context.Context, a store.RunAssignment) {
+// startRetryPause и startRetryMax — пауза перед повторным назначением
+// стадии, которая не смогла стартовать по причине до отправки (проект,
+// сессия, учётные данные, шаг в снимке): 30 с, 60 с, 120 с и до 5 мин,
+// пока стадия не будет доставлена.
+const (
+	startRetryPause = 30 * time.Second
+	startRetryMax   = 5 * time.Minute
+)
+
+// connChecker — отправитель знает, подключён ли runner (реестр каналов).
+type connChecker interface{ Connected(runnerID string) bool }
+
+// dispatchOrRelease — назначение стадии. Если стадия не стартовала, запуск
+// отвязывается от runner'а и агента команды, а runner освобождается: иначе
+// открытый запуск держал бы агента занятым навсегда. Причина до отправки
+// откладывает повтор с причиной ожидания; недоставка на отключённый runner
+// переводит его в offline (признак жизни вернёт). false — стадия не
+// стартовала.
+func (e *Engine) dispatchOrRelease(ctx context.Context, task domain.Task, run store.StepRun, runner domain.Runner,
+	step policy.ResolvedStep, entry string, assigned *store.PendingAssign) bool {
+	// Снимок last_seen до отправки: по нему недоставка отличает мёртвый
+	// runner от переподключившегося. Назначение планировщика несёт снимок
+	// из своей транзакции, переиспользование runner'а — только его id.
+	if runner.LastSeen.IsZero() {
+		if r, err := e.St.GetRunner(ctx, runner.ID); err == nil {
+			runner = r
+		}
+	}
+	sessionID, delivered, startErr := e.dispatchRun(ctx, task, run, runner, step, entry, nil)
+	if sessionID != "" && delivered {
+		if err := e.St.RunDelivered(ctx, run.ID, assigned); err != nil {
+			slog.Error("dispatch: delivered", "run", run.ID, "err", err)
+		}
+		return true
+	}
+	if sessionID != "" {
+		if _, err := e.St.EndSession(ctx, sessionID, "", "стадия не запущена: runner недоступен"); err != nil {
+			slog.Error("dispatch: end undelivered session", "session", sessionID, "err", err)
+		}
+		e.dropSessionID(sessionID)
+	}
+	if err := e.St.UndoAssign(ctx, task.ID, assigned); err != nil {
+		slog.Error("dispatch: undo assign", "task", task.ID, "err", err)
+	}
+	if startErr != nil {
+		e.deferRun(ctx, task, run, runner.ID, "стадия не запустилась: "+startErr.Error())
+		return false
+	}
+	if err := e.St.UnbindRun(ctx, run.ID); err != nil {
+		slog.Error("dispatch: unbind run", "run", run.ID, "err", err)
+	}
+	if err := e.St.FreeRunnerFor(ctx, runner.ID, task.ID); err != nil {
+		slog.Error("dispatch: free runner", "runner", runner.ID, "err", err)
+	}
+	if c, ok := e.Out.(connChecker); ok && sessionID != "" && !c.Connected(runner.ID) {
+		if marked, err := e.St.MarkRunnerOffline(ctx, runner.ID, runner.LastSeen); err != nil {
+			slog.Error("dispatch: runner offline", "runner", runner.ID, "err", err)
+		} else if marked {
+			slog.Warn("runner не подключён: назначения до признака жизни не идут", "runner", runner.ID)
+		}
+	}
+	return false
+}
+
+// deferRun — запуск откладывается с причиной ожидания, runner свободен.
+func (e *Engine) deferRun(ctx context.Context, task domain.Task, run store.StepRun, runnerID, reason string) {
+	first, pause, err := e.St.DeferRun(ctx, run.ID, task.ID, startRetryPause, startRetryMax, reason)
+	if err != nil {
+		slog.Error("dispatch: defer run", "run", run.ID, "err", err)
+	}
+	if err := e.St.FreeRunnerFor(ctx, runnerID, task.ID); err != nil {
+		slog.Error("dispatch: free runner", "runner", runnerID, "err", err)
+	}
+	if !first {
+		return
+	}
+	projectID, epicID, err := e.St.TaskRefs(ctx, task.ID)
+	if err != nil {
+		slog.Error("dispatch: task refs", "task", task.ID, "err", err)
+		return
+	}
+	if _, err := e.St.AppendEvent(ctx, store.EventInput{
+		ActorKind: domain.ActorScheduler, Type: "task.wait",
+		ProjectID: projectID, EpicID: epicID, TaskID: task.ID,
+		Text: "ожидание: " + reason + " (шаг " + run.StepID + ")",
+		Payload: map[string]any{"step": run.StepID, "participant": run.Participant, "role": run.Role,
+			"reason": reason, "deferred": true, "retry_in_s": int(pause.Seconds())},
+	}); err != nil {
+		slog.Error("dispatch: wait event", "task", task.ID, "err", err)
+	}
+}
+
+// dispatchAssigned — запуск, назначенный планировщиком: стадия по шагу
+// снимка. false — стадия не стартовала (запуск отвязан, runner свободен).
+func (e *Engine) dispatchAssigned(ctx context.Context, a store.RunAssignment) bool {
+	deferAssigned := func(reason string) bool {
+		if err := e.St.UndoAssign(ctx, a.Task.ID, a.Pending); err != nil {
+			slog.Error("dispatch: undo assign", "task", a.Task.ID, "err", err)
+		}
+		e.deferRun(ctx, a.Task, a.Run, a.Runner.ID, reason)
+		return false
+	}
 	proc, _, err := e.processFor(ctx, a.Task)
 	if err != nil {
 		slog.Error("dispatch: process", "task", a.Task.ID, "err", err)
-		return
+		return deferAssigned("стадия не запустилась: процесс задачи: " + err.Error())
 	}
 	step, ok := proc.Step(a.Run.StepID)
 	if !ok {
 		slog.Error("dispatch: шаг запуска не найден в снимке", "task", a.Task.ID, "step", a.Run.StepID)
-		return
+		return deferAssigned("стадия не запустилась: шага " + a.Run.StepID + " нет в процессе задачи")
 	}
-	e.dispatchRun(ctx, a.Task, a.Run, a.Runner, step, a.Task.StepEntry, nil)
+	return e.dispatchOrRelease(ctx, a.Task, a.Run, a.Runner, step, a.Task.StepEntry, a.Pending)
 }
 
 // reviewContext — контекст ревьюера: diff PR и отчёт автопроверок.
@@ -216,6 +320,11 @@ func verdictOf(kind string, ok bool, explicit string) string {
 		case policy.OutcomeOk, policy.OutcomeChanges, policy.OutcomeFail:
 			return explicit
 		}
+	}
+	// Тестировщик (add-agent-roles) не может одобрить красные проверки и не
+	// валит задачу: его «нет» — замечания разработчику.
+	if kind == policy.StepTest && (explicit == policy.OutcomeChanges || explicit == policy.OutcomeFail) {
+		return policy.OutcomeChanges
 	}
 	if ok {
 		return policy.OutcomeOk
@@ -269,11 +378,50 @@ func (e *Engine) reuseTarget(ctx context.Context, task domain.Task, next policy.
 	if runnerID == "" || (next.Kind != policy.StepCode && next.Kind != policy.StepTest && next.Kind != policy.StepPrompt) || len(next.Participants) != 1 {
 		return false
 	}
+	p := next.Participants[0]
+	rb := e.roleBindings(ctx, task, next)[p.ID]
 	r, err := e.St.GetRunner(ctx, runnerID)
-	if err != nil || r.Draining {
+	// Runner, который уже освободили (решение принималось раньше, а между
+	// вызовами его могли отдать другой задаче), не переиспользуется.
+	if err != nil || r.Draining || r.TaskID != task.ID {
 		return false
 	}
-	return runnerFits(r, task, next, next.Participants[0])
+	if !runnerFits(r, task, next, p) || !roleFits(r, p, rb) {
+		return false
+	}
+	// Роль с командой (add-agent-roles): стадию ведёт свободный агент роли,
+	// его вместе с runner'ом подбирает планировщик.
+	if rb.Team {
+		return false
+	}
+	// Тестировщик (add-agent-roles) по возможности работает на другом
+	// runner'е, чем разработчик: если сейчас свободен другой подходящий,
+	// шаг уходит планировщику, он предпочтёт не писавший код runner. Иначе
+	// тот же runner продолжает без ожидания.
+	if next.Kind == policy.StepTest && rb.Role != "" && e.otherIdleRunner(ctx, task, next, p, rb, runnerID) {
+		return false
+	}
+	return true
+}
+
+// otherIdleRunner — есть ли свободный подходящий участнику runner, кроме
+// исключённого.
+func (e *Engine) otherIdleRunner(ctx context.Context, task domain.Task, step policy.ResolvedStep,
+	p policy.ResolvedParticipant, rb store.RoleBinding, exclude string) bool {
+	list, err := e.St.ListRunners(ctx)
+	if err != nil {
+		slog.Error("свободные runner'ы", "task", task.ID, "err", err)
+		return false
+	}
+	for _, r := range list {
+		if r.ID == exclude || r.Status != domain.RunnerIdle || r.Draining {
+			continue
+		}
+		if runnerFits(r, task, step, p) && roleFits(r, p, rb) {
+			return true
+		}
+	}
+	return false
 }
 
 // evaluateStep решает исход шага по вердиктам запусков прохода: sequential
@@ -309,7 +457,8 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 		last := runs[len(runs)-1]
 		if last.Verdict == policy.OutcomeOk {
 			if len(runs) < len(step.Participants) {
-				_, err := e.St.AddSequentialRun(ctx, task.ID, step, pass, step.Participants[len(runs)])
+				next := step.Participants[len(runs)]
+				_, err := e.St.AddSequentialRun(ctx, task.ID, step, pass, next, e.roleBindings(ctx, task, step)[next.ID])
 				return err
 			}
 			outcome = policy.OutcomeOk
@@ -356,14 +505,36 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 		e.cancelOpenRuns(ctx, task, 0)
 	}
 	verdicts := make([]map[string]any, 0, len(runs))
+	titles, labels := e.roleTitles(ctx), e.runnerLabels(ctx)
 	for _, r := range runs {
 		v := map[string]any{
-			"participant": r.Participant, "runner": r.RunnerID, "model": r.Model, "verdict": r.Verdict,
+			"participant": r.Participant, "runner": r.RunnerID, "model": r.DisplayModel(), "verdict": r.Verdict,
 		}
 		if r.IsUser() {
 			v["user"] = r.VerdictBy
 		}
+		// Агент, роль и имя runner'а исполнителя (спека agent-roles
+		// «Агент-исполнитель в событиях и API»).
+		if r.RunnerID != "" {
+			v["runner_name"] = labels[r.RunnerID]
+		}
+		if r.Role != "" && titles[r.Role] != "" {
+			v["role"] = map[string]any{"id": r.Role, "title": titles[r.Role]}
+		}
+		if r.AgentID != "" {
+			v["agent"] = map[string]any{"id": r.AgentID, "name": r.AgentName}
+		}
+		if r.AgentVerdict != "" {
+			v["agent_verdict"] = r.AgentVerdict
+		}
 		verdicts = append(verdicts, v)
+	}
+	// Автор блока замечаний — роль и имя исполнителя, если они есть.
+	remarks = remarks[:0]
+	for _, r := range runs {
+		if r.Verdict == policy.OutcomeChanges || r.Verdict == policy.OutcomeFail {
+			remarks = append(remarks, remarkBy(step, r, performerLabel(r, titles, labels)))
+		}
 	}
 	detail := strings.Join(remarks, "\n\n")
 	if outcome == policy.OutcomeOk && len(runs) == 1 {
@@ -374,17 +545,41 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 
 // remark — блок замечаний участника с указанием автора.
 func remark(step policy.ResolvedStep, r store.StepRun) string {
+	return remarkBy(step, r, "")
+}
+
+// remarkBy — блок замечаний участника; performer — роль и имя исполнителя
+// (add-agent-roles), пусто у участника без роли.
+func remarkBy(step policy.ResolvedStep, r store.StepRun, performer string) string {
 	who := r.Participant
 	switch {
 	case r.VerdictBy != "":
 		who += " (" + r.VerdictBy + ")"
-	case r.AgentKind != "" || r.Model != "":
-		who += " (" + strings.TrimSuffix(r.AgentKind+"/"+r.Model, "/") + ")"
+	case performer != "":
+		who += " (" + performer + ")"
+	case r.AgentKind != "" || r.DisplayModel() != "":
+		who += " (" + strings.TrimSuffix(r.AgentKind+"/"+r.DisplayModel(), "/") + ")"
 	}
 	if len(step.Participants) == 1 {
 		return r.Detail
 	}
 	return "Замечания участника " + who + ":\n" + r.Detail
+}
+
+// performerLabel — «Роль Имя» исполнителя запуска (агент команды, иначе
+// runner) или пусто без роли.
+func performerLabel(r store.StepRun, titles, labels map[string]string) string {
+	t := titles[r.Role]
+	if r.Role == "" || t == "" {
+		return ""
+	}
+	if r.AgentName != "" {
+		return t + " " + r.AgentName
+	}
+	if name := labels[r.RunnerID]; name != "" {
+		return t + " " + name
+	}
+	return t
 }
 
 // cancelOpenRuns прерывает остальные запуски шага (any удовлетворён,
@@ -444,7 +639,11 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 			// Отчёт автопроверок — ревьюеру; PR создаётся после проверок.
 			e.setStageContext(task.ID, "")
 			if detail != "" {
-				e.setStageContext(task.ID, "Результаты автопроверок:\n"+detail)
+				label := "Результаты автопроверок:\n"
+				if testerRan(verdicts) {
+					label = "Отчёт тестировщика и автопроверок:\n"
+				}
+				e.setStageContext(task.ID, label+detail)
 			}
 			if task.PRURL == "" {
 				if err := e.createPR(ctx, task, p); err != nil {
@@ -466,6 +665,10 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 	case policy.OutcomeChanges:
 		reason := domain.AttTestFailed
 		prefix := "Вывод проверок:\n"
+		tester := step.Kind == policy.StepTest && testerRan(verdicts)
+		if tester {
+			prefix = "Замечания тестировщика и вывод проверок:\n"
+		}
 		if step.Kind == policy.StepReview {
 			reason, prefix = domain.AttReviewLimit, "Замечания review:\n"
 		}
@@ -488,6 +691,9 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 			text = fmt.Sprintf("review вернул замечания — исправление (попытка %d/%d)", rej, step.Attempts)
 		case policy.StepTest:
 			text = fmt.Sprintf("проверки упали — исправление (попытка %d/%d)", rej, step.Attempts)
+			if tester && testerObjected(verdicts) {
+				text = fmt.Sprintf("тестировщик вернул замечания — исправление (попытка %d/%d)", rej, step.Attempts)
+			}
 		default:
 			text = fmt.Sprintf("%s — исправление (проход %d/%d)", strings.TrimSuffix(prefix, ":\n"), rej, step.Attempts)
 		}
@@ -568,7 +774,13 @@ func (e *Engine) gotoTarget(ctx context.Context, task domain.Task, proc *policy.
 	} else if lastRunner != "" && next.Kind != policy.StepReview {
 		// Runner не подходит следующему шагу или Epic на паузе: он
 		// освобождается, запуск подхватит планировщик (на паузе — после resume).
-		if err := e.St.ReleaseTaskRunner(ctx, task.ID); err != nil {
+		// Тестировщику (add-agent-roles) исполнитель кода нужен и дальше:
+		// планировщик предпочтёт другой runner, а ревьюер не совпадёт с ним.
+		release := e.St.ReleaseTaskRunner
+		if next.Kind == policy.StepTest && hasRoleParticipant(e.roleBindings(ctx, task, next)) {
+			release = e.St.FreeTaskRunner
+		}
+		if err := release(ctx, task.ID); err != nil {
 			return err
 		}
 	}
@@ -757,6 +969,42 @@ func (e *Engine) markWaiting(ctx context.Context) error {
 			return err
 		}
 	}
+	return e.markTeamWaiting(ctx, seen)
+}
+
+// markTeamWaiting — причина ожидания запусков ролей с командой (add-agent-roles):
+// все агенты роли заняты или ни одному агенту роли не подходит ни один
+// подключённый runner.
+func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool) error {
+	waits, err := e.St.WaitingTeamRuns(ctx)
+	if err != nil {
+		return err
+	}
+	for _, w := range waits {
+		if seen[w.Run.TaskID] {
+			continue
+		}
+		seen[w.Run.TaskID] = true
+		reason := "нет runner'а для свободных агентов роли «" + w.RoleTitle + "»"
+		if w.Busy {
+			reason = "нет свободного агента роли «" + w.RoleTitle + "»: все заняты"
+		}
+		if err := e.St.SetTaskWaitReason(ctx, w.Run.TaskID, reason); err != nil {
+			return err
+		}
+		projectID, epicID, err := e.St.TaskRefs(ctx, w.Run.TaskID)
+		if err != nil {
+			return err
+		}
+		if _, err := e.St.AppendEvent(ctx, store.EventInput{
+			ActorKind: domain.ActorScheduler, Type: "task.wait",
+			ProjectID: projectID, EpicID: epicID, TaskID: w.Run.TaskID,
+			Text:    "ожидание: " + reason + " (шаг " + w.Run.StepID + ")",
+			Payload: map[string]any{"step": w.Run.StepID, "participant": w.Run.Participant, "role": w.Run.Role, "reason": reason, "busy": w.Busy},
+		}); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -843,4 +1091,71 @@ func (e *Engine) reconcileSteps(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// testerRan — на шаге работал тестировщик: агент вернул свой вердикт
+// (runner без поддержки ролей гонит только проверки и вердикта не даёт).
+func testerRan(verdicts []map[string]any) bool {
+	for _, v := range verdicts {
+		if av, _ := v["agent_verdict"].(string); av != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// testerObjected — тестировщик сам вернул замечания (а не только упали
+// проверки при его одобрении).
+func testerObjected(verdicts []map[string]any) bool {
+	for _, v := range verdicts {
+		if av, _ := v["agent_verdict"].(string); av == policy.OutcomeChanges || av == policy.OutcomeFail {
+			return true
+		}
+	}
+	return false
+}
+
+// verdictInfraError — вердикт runner'а о сбое инфраструктуры стадии
+// тестировщика (git, push, падение агента): не замечания разработчику.
+const verdictInfraError = "error"
+
+// infraRetryLimit — сколько раз шаг повторяется после сбоя инфраструктуры
+// тестировщика без расхода попытки; следующий сбой эскалирует.
+const infraRetryLimit = 1
+
+// retryInfra — повтор шага после сбоя инфраструктуры: запуск отвязывается
+// от runner'а и агента и ждёт нового назначения в том же проходе. false —
+// повторы исчерпаны, вызывающий эскалирует.
+func (e *Engine) retryInfra(ctx context.Context, task domain.Task, step policy.ResolvedStep, run store.StepRun, runnerID, detail string) (bool, error) {
+	retry, n, err := e.St.RecordInfraRetry(ctx, task.ID, step.ID, infraRetryLimit)
+	if err != nil || !retry {
+		return false, err
+	}
+	if err := e.St.UnbindRun(ctx, run.ID); err != nil {
+		return false, err
+	}
+	if err := e.St.FreeRunnerFor(ctx, runnerID, task.ID); err != nil {
+		return false, err
+	}
+	p, epic, err := e.projectOf(ctx, task)
+	if err != nil {
+		return false, err
+	}
+	_, err = e.St.AppendEvent(ctx, store.EventInput{
+		ActorKind: domain.ActorScheduler, Type: "task.assign",
+		ProjectID: p.ID, EpicID: epic.ID, TaskID: task.ID,
+		Text:    fmt.Sprintf("сбой инфраструктуры тестировщика — повтор шага без расхода попытки (%d/%d)", n, infraRetryLimit),
+		Payload: map[string]any{"step": step.ID, "infra_error": detail, "retry": n},
+	})
+	return true, err
+}
+
+// hasRoleParticipant — у шага есть участник с ролью.
+func hasRoleParticipant(rb map[string]store.RoleBinding) bool {
+	for _, b := range rb {
+		if b.Role != "" {
+			return true
+		}
+	}
+	return false
 }

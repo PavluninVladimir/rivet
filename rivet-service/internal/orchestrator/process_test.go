@@ -34,12 +34,34 @@ func (c *capture) count() int {
 	return len(c.sent)
 }
 
-// setProcess сохраняет процесс проекта до первой задачи.
+// setProcess сохраняет процесс проекта до первой задачи. Тесты механики
+// процесса закрепляют шаг test без сессии тестировщика: роль tester
+// снимается (add-agent-roles), тестировщика проверяют отдельные тесты.
 func setProcess(t *testing.T, f policyFixture, proc policy.Process) {
 	t.Helper()
+	proc = withoutTesterRole(proc)
 	if _, err := f.st.SaveProjectPolicy(context.Background(), f.p.ID, policy.Overrides{Process: &proc}, "owner"); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// withoutTesterRole — процесс без роли tester у участников шагов test.
+func withoutTesterRole(proc policy.Process) policy.Process {
+	out := policy.Process{Steps: make([]policy.Step, len(proc.Steps))}
+	for i, s := range proc.Steps {
+		out.Steps[i] = s
+		parts := make([]policy.Participant, len(s.Participants))
+		for j, p := range s.Participants {
+			parts[j] = p
+			if s.Kind == policy.StepTest && p.Agent != nil && p.Agent.Role == policy.RoleTester {
+				a := *p.Agent
+				a.Role = ""
+				parts[j].Agent = &a
+			}
+		}
+		out.Steps[i].Participants = parts
+	}
+	return out
 }
 
 // driveToReview проводит задачу через coding и testing одним runner'ом.

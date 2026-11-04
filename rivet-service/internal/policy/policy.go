@@ -38,6 +38,39 @@ type Presets struct {
 	// AgentModels — модели по умолчанию агентов, переопределённые проектом
 	// (add-agent-profiles); у установки пусто: умолчания живут в каталоге.
 	AgentModels map[string]AgentModel `json:"agent_models,omitempty"`
+	// TesterAgent — сессия тестировщика на шаге test процесса по умолчанию
+	// (add-agent-roles); nil — включена. TestPaths — шаблоны тестовых
+	// файлов: сессия тестировщика меняет только их; пусто — DefaultTestPaths.
+	// RoleModels — модели ролей, переопределённые проектом; у установки
+	// пусто: умолчания живут в каталоге ролей. Все поля omitempty, чтобы
+	// хэши прежних версий не менялись.
+	TesterAgent *bool                `json:"tester_agent,omitempty"`
+	TestPaths   []string             `json:"test_paths,omitempty"`
+	RoleModels  map[string]RoleModel `json:"role_models,omitempty"`
+}
+
+// RoleModel — переопределение модели роли в проекте: профиль агента,
+// подключение и модель одной тройкой (привязка профиля). Пустой профиль —
+// профиль шаблона роли.
+type RoleModel struct {
+	Agent        string `json:"agent,omitempty"`
+	ConnectionID string `json:"connection_id"`
+	Model        string `json:"model"`
+}
+
+// DefaultTestPaths — шаблоны тестовых файлов по умолчанию (спека process
+// «Шаг test с тестировщиком»).
+var DefaultTestPaths = []string{"test/**", "tests/**", "**/*_test.*", "**/*.test.*", "**/*.spec.*"}
+
+// TesterEnabled — включена ли сессия тестировщика в процессе по умолчанию.
+func (p Presets) TesterEnabled() bool { return p.TesterAgent == nil || *p.TesterAgent }
+
+// EffectiveTestPaths — шаблоны тестовых файлов проекта или умолчания.
+func (p Presets) EffectiveTestPaths() []string {
+	if len(p.TestPaths) > 0 {
+		return append([]string{}, p.TestPaths...)
+	}
+	return append([]string{}, DefaultTestPaths...)
 }
 
 // Overrides — документ проекта: каждое поле nil означает «наследуется от
@@ -57,6 +90,11 @@ type Overrides struct {
 	// одна из привязок профиля (спека agents «Переопределение модели агента
 	// в проекте»). Отсутствие ключа — модель установки.
 	AgentModels map[string]AgentModel `json:"agent_models,omitempty"`
+	// TesterAgent, TestPaths, RoleModels — как в Presets (add-agent-roles):
+	// nil — наследуется от установки.
+	TesterAgent *bool                `json:"tester_agent,omitempty"`
+	TestPaths   *[]string            `json:"test_paths,omitempty"`
+	RoleModels  map[string]RoleModel `json:"role_models,omitempty"`
 }
 
 // AgentModel — пара подключение/модель из привязок профиля агента.
@@ -138,6 +176,12 @@ func (p Presets) Validate() error {
 	if err := validatePatterns(p.HumanReviewPaths); err != nil {
 		return err
 	}
+	if err := validatePatterns(p.TestPaths); err != nil {
+		return err
+	}
+	if err := validateRoleModels(p.RoleModels); err != nil {
+		return err
+	}
 	if p.ProcessLocks != nil {
 		if err := p.ProcessLocks.Validate(); err != nil {
 			return err
@@ -165,13 +209,32 @@ func (p Presets) Locks() ProcessLocks {
 }
 
 // EffectiveProcess — разрешённый процесс действующей политики: документ
-// политики или процесс по умолчанию, с лимитами из пресетов.
+// политики или процесс по умолчанию, с лимитами из пресетов. Выключенный
+// тестировщик снимает роль только в процессе по умолчанию: явный процесс
+// проекта выражает намерение сам.
 func (p Presets) EffectiveProcess() Resolved {
 	doc := DefaultProcess()
+	if !p.TesterEnabled() {
+		doc = withoutTester(doc)
+	}
 	if p.Process != nil {
 		doc = *p.Process
 	}
 	return Resolve(doc, p)
+}
+
+// validateRoleModels — переопределения моделей ролей: роль и пара
+// подключение/модель заданы (привязки проверяет store по каталогу).
+func validateRoleModels(rm map[string]RoleModel) error {
+	for id, m := range rm {
+		if !ValidRoleID(id) {
+			return &ProcessError{Field: "role_models." + id, Msg: "неизвестный идентификатор роли"}
+		}
+		if m.ConnectionID == "" || m.Model == "" {
+			return &ProcessError{Field: "role_models." + id + ".model", Msg: "укажите подключение и модель"}
+		}
+	}
+	return nil
 }
 
 // Validate проверяет переопределения: те же правила для заданных полей.
@@ -194,6 +257,14 @@ func (o Overrides) Validate() error {
 		if strings.TrimSpace(id) == "" || m.ConnectionID == "" || m.Model == "" {
 			return &ProcessError{Field: "agent_models." + id, Msg: "укажите подключение и модель"}
 		}
+	}
+	if o.TestPaths != nil {
+		if err := validatePatterns(*o.TestPaths); err != nil {
+			return err
+		}
+	}
+	if err := validateRoleModels(o.RoleModels); err != nil {
+		return err
 	}
 	if o.Process != nil {
 		return o.Process.Validate()
@@ -265,6 +336,19 @@ func Effective(installation Presets, o Overrides) Presets {
 		eff.AgentModels = map[string]AgentModel{}
 		for k, v := range o.AgentModels {
 			eff.AgentModels[k] = v
+		}
+	}
+	if o.TesterAgent != nil {
+		v := *o.TesterAgent
+		eff.TesterAgent = &v
+	}
+	if o.TestPaths != nil {
+		eff.TestPaths = append([]string{}, (*o.TestPaths)...)
+	}
+	if len(o.RoleModels) > 0 {
+		eff.RoleModels = map[string]RoleModel{}
+		for k, v := range o.RoleModels {
+			eff.RoleModels[k] = v
 		}
 	}
 	// Ограничения установки проектом не переопределяются: остаются как есть.

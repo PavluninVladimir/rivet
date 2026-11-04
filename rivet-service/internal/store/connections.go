@@ -215,6 +215,17 @@ func (s *Store) UpsertConnection(ctx context.Context, in ConnectionInput, box *s
 				return err
 			}
 		} else {
+			// Выключение подключения, модели которого у агентов команды,
+			// шаблонов или переопределений ролей, оставило бы их без модели.
+			if in.Enabled != nil && !*in.Enabled {
+				refs, err := connectionUseRefs(ctx, tx, in.ID, nil)
+				if err != nil {
+					return err
+				}
+				if len(refs) > 0 {
+					return &ErrInUse{Refs: refs}
+				}
+			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE model_connections SET name=$2, kind=$3, api=$4, base_url=$5, headers=$6,
 					enabled=COALESCE($7, enabled), updated_at=now(), updated_by=$8 WHERE id=$1`,
@@ -326,7 +337,11 @@ func (s *Store) ConnectionRefs(ctx context.Context, id string) ([]Ref, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(refs, agents...), nil
+	team, err := connectionUseRefs(ctx, s.Pool, id, nil)
+	if err != nil {
+		return nil, err
+	}
+	return append(append(refs, agents...), team...), nil
 }
 
 func (s *Store) DeleteConnection(ctx context.Context, id, actorLogin string) error {
@@ -354,7 +369,11 @@ func (s *Store) DeleteConnection(ctx context.Context, id, actorLogin string) err
 		if err != nil {
 			return err
 		}
-		if refs = append(refs, agents...); len(refs) > 0 {
+		team, err := connectionUseRefs(ctx, tx, id, nil)
+		if err != nil {
+			return err
+		}
+		if refs = append(append(refs, agents...), team...); len(refs) > 0 {
 			return &ErrInUse{Refs: refs}
 		}
 		tag, err := tx.Exec(ctx, `DELETE FROM model_connections WHERE id=$1`, id)
@@ -501,6 +520,26 @@ func (s *Store) SetConnectionModels(ctx context.Context, id string, models []dom
 			}
 			if !kept {
 				return &FieldError{Field: "models", Msg: "модель " + pm.Model + " выбрана для декомпозиции: сначала смените её"}
+			}
+		}
+		// Модели агентов команды, шаблонов и переопределений ролей тоже нельзя
+		// убрать или скрыть: агент перестал бы назначаться.
+		gone := map[string]bool{}
+		for _, m := range cur {
+			gone[m.ID] = true
+		}
+		for _, m := range next {
+			if !m.Hidden {
+				delete(gone, m.ID)
+			}
+		}
+		if len(gone) > 0 {
+			refs, err := connectionUseRefs(ctx, tx, id, gone)
+			if err != nil {
+				return err
+			}
+			if len(refs) > 0 {
+				return &ErrInUse{Refs: refs}
 			}
 		}
 		mj, _ := json.Marshal(next)
@@ -655,7 +694,49 @@ func (s *Store) SetPlannerModel(ctx context.Context, pm *domain.PlannerModel, ac
 		if pm != nil {
 			text = "модель декомпозиции: " + pm.ConnectionID + "/" + pm.Model
 		}
-		_, err := appendEvent(ctx, tx, EventInput{ActorKind: domain.ActorUser, ActorID: actorLogin, Type: "planner.model_changed", Text: text, Payload: payload})
-		return err
+		if _, err := appendEvent(ctx, tx, EventInput{ActorKind: domain.ActorUser, ActorID: actorLogin, Type: "planner.model_changed", Text: text, Payload: payload}); err != nil {
+			return err
+		}
+		return plannerRoleEvents(ctx, tx, actorLogin, payload)
 	})
+}
+
+// plannerRoleEvents — модель планировщика — модель Тимлида (add-agent-roles):
+// шаблон lead и агенты-тимлиды тоже изменились, консоль перечитывает их по
+// role.updated и team.agent_updated.
+func plannerRoleEvents(ctx context.Context, tx pgx.Tx, actorLogin string, model map[string]any) error {
+	// Версии шаблона и агентов-тимлидов сдвигаются: вкладка с устаревшей
+	// формой получит 409 stale, а не откатит модель.
+	if _, err := tx.Exec(ctx, `UPDATE agent_roles SET updated_at=now() WHERE id=$1`, domain.RoleLead); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE team_agents SET updated_at=now() WHERE role_id=$1`, domain.RoleLead); err != nil {
+		return err
+	}
+	if _, err := appendEvent(ctx, tx, EventInput{ActorKind: domain.ActorUser, ActorID: actorLogin, Type: "role.updated",
+		Text: "изменена модель Тимлида", Payload: map[string]any{"id": domain.RoleLead, "planner_model": model}}); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT id, name FROM team_agents WHERE role_id=$1 ORDER BY position, id`, domain.RoleLead)
+	if err != nil {
+		return err
+	}
+	type agent struct{ id, name string }
+	var leads []agent
+	for rows.Next() {
+		var a agent
+		if err := rows.Scan(&a.id, &a.name); err != nil {
+			rows.Close()
+			return err
+		}
+		leads = append(leads, a)
+	}
+	rows.Close()
+	for _, a := range leads {
+		if _, err := appendEvent(ctx, tx, EventInput{ActorKind: domain.ActorUser, ActorID: actorLogin, Type: "team.agent_updated",
+			Text: "изменена модель агента «" + a.name + "»", Payload: map[string]any{"id": a.id, "name": a.name, "role": domain.RoleLead, "planner_model": model}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }

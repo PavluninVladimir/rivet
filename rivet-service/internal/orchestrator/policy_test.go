@@ -375,7 +375,7 @@ func TestAttemptLimitFromPolicy(t *testing.T) {
 		t.Fatalf("лимит по умолчанию 3, got %d", f.task.AttemptLimit)
 	}
 	five := 5
-	if _, err := f.st.SaveInstallationPolicy(ctx, func() policy.Presets { p := policy.Defaults(); p.AttemptLimit = 5; return p }(), "root"); err != nil {
+	if _, err := f.st.SaveInstallationPolicy(ctx, func() policy.Presets { p := defaultsNoTester(); p.AttemptLimit = 5; return p }(), "root"); err != nil {
 		t.Fatal(err)
 	}
 	b, err := f.st.CreateTask(ctx, f.epic.ID, store.NewTask{Title: "B"})
@@ -462,7 +462,7 @@ func TestDailyBudgetPausesAssignments(t *testing.T) {
 	f2 := newPolicyFixture(t, "")
 	f2.e.Now = func() time.Time { return now }
 	small := int64(10)
-	if _, err := f2.st.SaveInstallationPolicy(ctx, func() policy.Presets { p := policy.Defaults(); p.DailyTokenBudget = &small; return p }(), "root"); err != nil {
+	if _, err := f2.st.SaveInstallationPolicy(ctx, func() policy.Presets { p := defaultsNoTester(); p.DailyTokenBudget = &small; return p }(), "root"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f2.st.RecordUsage(ctx, store.UsageInput{SourceMsgID: "m3", ProjectID: f2.p.ID, TokensIn: &in}); err != nil {

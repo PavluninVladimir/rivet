@@ -129,10 +129,14 @@ func (s *Store) RegisterRunner(ctx context.Context, r domain.Runner, token domai
 		r = normalizeAdapter(r)
 		if _, err := tx.Exec(ctx, upsertRunnerSQL+`, token_id=$8`,
 			r.ID, r.Agent, r.Model, r.Host, r.Capabilities, r.Adapter, r.Depth,
-			tokenID(token), r.ContextChannel, runnerModels(r), runnerStages(r), r.Secure, r.Protocol); err != nil {
+			tokenID(token), r.ContextChannel, runnerModels(r), runnerStages(r), r.Secure, r.Protocol,
+			r.DisplayName, runnerFeatures(r)); err != nil {
 			return err
 		}
 		if err := adoptRunnerProfile(ctx, tx, r.ID, r.Agent); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE runners SET boot_id=$2 WHERE id=$1`, r.ID, r.BootID); err != nil {
 			return err
 		}
 		var catalog bool

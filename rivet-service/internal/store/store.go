@@ -105,7 +105,15 @@ type EventFilter struct {
 	// (спека observability «Лента аудита установки»). Фильтры проекта, Epic и
 	// задачи при этом не применяются; право администратора проверяет API.
 	Installation bool
+	// GlobalTypes — типы событий установки (без проекта), которые
+	// добавляются к ленте проекта: правки каталога ролей и имён runner'ов
+	// нужны консоли в потоке проекта (add-agent-roles).
+	GlobalTypes []string
 }
+
+// RoleStreamTypes — события установки, которые идут и в потоки проектов.
+var RoleStreamTypes = []string{"role.created", "role.updated", "role.deleted", "runner.renamed",
+	"team.agent_created", "team.agent_updated", "team.agent_deleted"}
 
 func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, error) {
 	if f.Limit <= 0 || f.Limit > 500 {
@@ -125,7 +133,7 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 		SELECT id, ts, actor_kind, actor_id, type, COALESCE(project_id::text,''),
 		       COALESCE(epic_id::text,''), COALESCE(task_id::text,''), text, payload
 		FROM events
-		WHERE ($1 = '' OR project_id = $1::uuid)
+		WHERE ($1 = '' OR project_id = $1::uuid OR (project_id IS NULL AND type = ANY($9::text[])))
 		  AND ($2 = '' OR epic_id = $2::uuid)
 		  AND ($3 = '' OR task_id = $3::uuid)
 		  AND ($4 = '' OR type = $4)
@@ -135,7 +143,7 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 		`+order+`
 		LIMIT $6) page
 		ORDER BY id`,
-		f.ProjectID, f.EpicID, f.TaskID, f.Type, f.AfterID, f.Limit, f.ViewerID, f.Installation)
+		f.ProjectID, f.EpicID, f.TaskID, f.Type, f.AfterID, f.Limit, f.ViewerID, f.Installation, globalTypes(f.GlobalTypes))
 	if err != nil {
 		return nil, err
 	}
@@ -252,4 +260,12 @@ func nf(err error) error {
 		return ErrNotFound
 	}
 	return err
+}
+
+// globalTypes — пустой список вместо nil для параметра запроса.
+func globalTypes(t []string) []string {
+	if t == nil {
+		return []string{}
+	}
+	return t
 }

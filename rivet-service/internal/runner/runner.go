@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,16 @@ import (
 // младших версий отклоняются при Register.
 const protocolVersion = "12"
 
+// Идентификатор поколения стадий (RegisterRequest.boot_id) новый на каждом
+// подключении: стадии привязаны к каналу и отменяются при его обрыве и при
+// остановке процесса, поэтому control plane по смене boot_id снимает
+// открытые запуски runner'а (кроме сессий из журнала) и назначает их заново
+// без расхода попытки.
+
+// featureRoles — runner передаёт инструкцию роли агенту и выполняет сессию
+// тестировщика на TESTING (add-agent-roles). Аддитивно к версии протокола.
+const featureRoles = "roles"
+
 type Config struct {
 	PlaneAddr string
 	// Token — токен регистрации, выданный администратором (спека runners);
@@ -43,6 +54,8 @@ type Config struct {
 	TLS   bool
 	TLSCA string
 	ID    string
+	// Name — отображаемое имя runner'а (add-agent-roles): «Разработчик Макс».
+	Name  string
 	Agent string
 	// Model — модель по умолчанию; Models — все поддерживаемые (протокол
 	// v11): модель сессии приходит в Assignment.model и передаётся агенту.
@@ -108,11 +121,20 @@ func Run(ctx context.Context, cfg Config) error {
 	r := &agent{cfg: cfg, client: client, outbox: outbox,
 		adapter: newAdapter(cfg), contexts: newContextHub()}
 	r.ctxPct.Store(ctxUnknown)
+	if err := checkGitEnvConfig(); err != nil {
+		slog.Warn("сессии тестировщика не запустятся", "err", err)
+	}
+	// Сигнал завершения отменяет стадии: runner ждёт их откат и запись
+	// результата в журнал, иначе рабочая копия осталась бы в середине сессии.
+	defer r.waitStages(r.stopGrace())
 	// Переподключение с бэкоффом: соединение всегда исходящее от runner'а.
 	for {
 		if err := r.session(ctx); err != nil {
 			if ctx.Err() != nil {
 				return nil
+			}
+			if errors.Is(err, errStagesStuck) {
+				return err
 			}
 			slog.Warn("сессия оборвалась — переподключение", "err", err)
 		}
@@ -141,7 +163,187 @@ type agent struct {
 	contexts *contextHub
 
 	mu     sync.Mutex
-	cancel map[string]context.CancelFunc // отмена стадий по task_id
+	cancel map[string]*stageCancel // отмена стадий по task_id
+
+	// gen — стадии и публикации текущего подключения (поколения): новое
+	// подключение регистрируется только после отката стадий прошлого, а
+	// завершение runner'а ждёт их не дольше grace.
+	genMu sync.Mutex
+	gen   *stageGroup
+	// grace — сколько завершение runner'а ждёт стадии (0 — stopGrace),
+	// stuck — сколько новое подключение ждёт откат прошлого (0 — stuckLimit).
+	grace, stuck time.Duration
+}
+
+// stageGroup — выполняющиеся стадии одного подключения. Ожидание без
+// горутины и без повторного использования WaitGroup: канал zero закрыт,
+// пока стадий нет.
+type stageGroup struct {
+	mu     sync.Mutex
+	seq    int
+	active map[int]stageInfo
+	zero   chan struct{}
+}
+
+// stageInfo — что за стадия выполняется: для журнала ожидания.
+type stageInfo struct {
+	Task, Session, Stage string
+}
+
+func newStageGroup() *stageGroup {
+	z := make(chan struct{})
+	close(z)
+	return &stageGroup{zero: z, active: map[int]stageInfo{}}
+}
+
+func (g *stageGroup) add(info stageInfo) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.active) == 0 {
+		g.zero = make(chan struct{})
+	}
+	g.seq++
+	g.active[g.seq] = info
+	return g.seq
+}
+
+func (g *stageGroup) done(id int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.active, id)
+	if len(g.active) == 0 {
+		close(g.zero)
+	}
+}
+
+// running — выполняющиеся стадии.
+func (g *stageGroup) running() []stageInfo {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := make([]stageInfo, 0, len(g.active))
+	for _, s := range g.active {
+		out = append(out, s)
+	}
+	return out
+}
+
+// idle — канал, закрытый, когда стадий поколения нет.
+func (g *stageGroup) idle() <-chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.zero
+}
+
+// generation — стадии текущего подключения.
+func (a *agent) generation() *stageGroup {
+	a.genMu.Lock()
+	defer a.genMu.Unlock()
+	if a.gen == nil {
+		a.gen = newStageGroup()
+	}
+	return a.gen
+}
+
+func (a *agent) stopGrace() time.Duration {
+	if a.grace > 0 {
+		return a.grace
+	}
+	return stopGrace
+}
+
+// stuckLimit — сколько новое подключение ждёт откат стадий прошлого.
+// Дольше — стадия зависла: runner завершается с ошибкой, супервизор
+// (launchd, systemd, compose) перезапустит процесс, а следующие стадии
+// откатят рабочие копии при подготовке.
+const stuckLimit = 10 * time.Minute
+
+// errStagesStuck — стадии прошлого подключения не завершились за stuckLimit.
+var errStagesStuck = errors.New("стадии прошлого подключения не завершились")
+
+func (a *agent) stuckLimit() time.Duration {
+	if a.stuck > 0 {
+		return a.stuck
+	}
+	return stuckLimit
+}
+
+// stageCancel — отмена выполняющейся стадии. byPlane — отмену прислал
+// control plane (CancelTask): результат такой стадии отправляется. Стадия,
+// отменённая остановкой runner'а или обрывом канала, результата не шлёт и в
+// журнал его не пишет: control plane назначит её заново без расхода попытки.
+type stageCancel struct {
+	cancel  context.CancelFunc
+	byPlane atomic.Bool
+}
+
+// stopGrace — сколько завершение runner'а ждёт отменённые стадии: откат
+// рабочей копии и запись результата в журнал, который проиграется после
+// следующей регистрации.
+const stopGrace = 30 * time.Second
+
+// waitStages ждёт стадии текущего подключения не дольше grace (завершение
+// runner'а). false — не дождались.
+func (a *agent) waitStages(grace time.Duration) bool {
+	t := time.NewTimer(grace)
+	defer t.Stop()
+	select {
+	case <-a.generation().idle():
+		return true
+	case <-t.C:
+		slog.Warn("стадии не завершились за отведённое время — выход", "grace", grace)
+		return false
+	}
+}
+
+// nextGeneration — новое подключение: стадии прошлого отменены вместе с его
+// каналом, и до их отката (рабочая копия, журнал) runner не регистрируется,
+// иначе новые назначения пришли бы в те же каталоги. Откат ограничен своими
+// таймаутами (settleTimeout, убийство группы процессов агента), а до
+// регистрации control plane новых стадий этому runner'у не даёт. Стадия,
+// которая не завершилась за stuckLimit, зависла: errStagesStuck, процесс
+// runner'а завершается.
+func (a *agent) nextGeneration(ctx context.Context) error {
+	prev := a.generation()
+	start := time.Now()
+	for {
+		t := time.NewTimer(a.stopGrace())
+		select {
+		case <-prev.idle():
+			t.Stop()
+			a.genMu.Lock()
+			a.gen = newStageGroup()
+			a.genMu.Unlock()
+			return nil
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
+		waited := time.Since(start).Round(time.Second)
+		stuck := prev.running()
+		if time.Since(start) >= a.stuckLimit() {
+			var names []string
+			for _, s := range stuck {
+				names = append(names, fmt.Sprintf("task %s, сессия %s, стадия %s", s.Task, s.Session, s.Stage))
+			}
+			return fmt.Errorf("%w за %v (%s): runner завершается, супервизор перезапустит процесс",
+				errStagesStuck, a.stuckLimit(), strings.Join(names, "; "))
+		}
+		for _, s := range stuck {
+			slog.Warn("стадия прошлого подключения ещё откатывается: регистрация ждёт",
+				"task", s.Task, "session", s.Session, "stage", s.Stage, "waited", waited, "limit", a.stuckLimit())
+		}
+	}
+}
+
+// goStage запускает стадию или публикацию в текущем подключении.
+func (a *agent) goStage(info stageInfo, f func()) {
+	g := a.generation()
+	id := g.add(info)
+	go func() {
+		defer g.done(id)
+		f()
+	}()
 }
 
 // supportedStages — стадии, которые исполняет этот runner (спека
@@ -269,6 +471,12 @@ func maskSecrets(values []string, sink func([]byte)) func([]byte) {
 }
 
 func (a *agent) session(ctx context.Context) error {
+	// Стадии прошлого подключения отменены вместе с его каналом: их откат
+	// должен закончиться до новых назначений в те же каталоги.
+	if err := a.nextGeneration(ctx); err != nil {
+		return err
+	}
+	bootID := newMsgID()
 	// Токен регистрации — на обоих RPC (api-contract, протокол v5).
 	ctx = metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+a.cfg.Token)
 	reg, err := a.client.Register(ctx, &pb.RegisterRequest{
@@ -276,7 +484,11 @@ func (a *agent) session(ctx context.Context) error {
 		Stages: supportedStages,
 		Host:   hostname(), Capabilities: a.cfg.Capabilities, ProtocolVersion: protocolVersion,
 		Adapter: a.cfg.Adapter, Depth: a.cfg.depth(),
-		ContextChannel: a.cfg.contextChannel(),
+		ContextChannel:  a.cfg.contextChannel(),
+		DisplayName:     a.cfg.Name,
+		Features:        []string{featureRoles},
+		BootId:          bootID,
+		PendingSessions: a.pendingSessions(),
 	})
 	if err != nil {
 		return err
@@ -352,7 +564,9 @@ func (a *agent) session(ctx context.Context) error {
 	}
 
 	a.mu.Lock()
-	a.cancel = map[string]context.CancelFunc{}
+	if a.cancel == nil {
+		a.cancel = map[string]*stageCancel{}
+	}
 	a.mu.Unlock()
 
 	for {
@@ -364,13 +578,18 @@ func (a *agent) session(ctx context.Context) error {
 		case *pb.PlaneMsg_Ack:
 			a.outbox.ack(k.Ack.AckedMsgId)
 		case *pb.PlaneMsg_Assign:
-			go a.executeStage(sctx, k.Assign, emit)
+			as := k.Assign
+			a.goStage(stageInfo{Task: as.TaskId, Session: as.SessionId, Stage: as.Stage.String()},
+				func() { a.executeStage(sctx, as, emit) })
 		case *pb.PlaneMsg_Deploy:
-			go a.executeDeploy(sctx, k.Deploy, emit)
+			dep := k.Deploy
+			a.goStage(stageInfo{Session: dep.DeploymentId, Stage: "DEPLOY"},
+				func() { a.executeDeploy(sctx, dep, emit) })
 		case *pb.PlaneMsg_Cancel:
 			a.mu.Lock()
 			if c := a.cancel[k.Cancel.TaskId]; c != nil {
-				c()
+				c.byPlane.Store(true)
+				c.cancel()
 			}
 			a.mu.Unlock()
 		case *pb.PlaneMsg_Context:
@@ -391,4 +610,29 @@ func (a *agent) session(ctx context.Context) error {
 func hostname() string {
 	h, _ := os.Hostname()
 	return h
+}
+
+// pendingSessions — сессии, результаты которых лежат в журнале и ещё не
+// доставлены (прошлый процесс runner'а): control plane их не снимает при
+// перезапуске, журнал проиграется после регистрации.
+func (a *agent) pendingSessions() []string {
+	if a.outbox == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, m := range a.outbox.pending() {
+		sid := ""
+		switch k := m.Kind.(type) {
+		case *pb.RunnerMsg_StageResult:
+			sid = k.StageResult.GetSessionId()
+		case *pb.RunnerMsg_Blocked:
+			sid = k.Blocked.GetSessionId()
+		}
+		if sid != "" && !seen[sid] {
+			seen[sid] = true
+			out = append(out, sid)
+		}
+	}
+	return out
 }

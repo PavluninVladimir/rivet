@@ -72,9 +72,12 @@ type Participant struct {
 	User  *UserRef  `json:"user,omitempty"`
 }
 
-// AgentRef — агент участника: тип и модель; пустые — любой runner с
-// capabilities шага.
+// AgentRef — агент участника: роль, тип и модель; пустые — любой runner с
+// capabilities шага. Роль (add-agent-roles) ссылается на каталог ролей:
+// тип агента, capability и модель по умолчанию берутся из неё при
+// назначении, явные значения участника важнее.
 type AgentRef struct {
+	Role  string `json:"role,omitempty"`
 	Kind  string `json:"kind,omitempty"`
 	Model string `json:"model,omitempty"`
 }
@@ -119,19 +122,67 @@ func perr(step, field, format string, args ...any) error {
 	return &ProcessError{Step: step, Field: field, Msg: fmt.Sprintf(format, args...)}
 }
 
+// Роли процесса по умолчанию (add-agent-roles): идентификаторы встроенных
+// ролей каталога.
+const (
+	RoleDeveloper = "developer"
+	RoleTester    = "tester"
+	RoleReviewer  = "reviewer"
+)
+
 // DefaultProcess — процесс установки по умолчанию, воспроизводящий
-// стандартный конвейер: code → test → review → merge → deploy с одним
-// агентом любого типа на шаге.
+// стандартный конвейер: code → test → review → merge → deploy. Шаги
+// выполняют роли (add-agent-roles): код пишет Разработчик, тесты
+// Тестировщик, проверку проводит Ревьюер. Тип агента и модель не заданы:
+// любой runner с capability шага и роли.
 func DefaultProcess() Process {
-	anyAgent := []Participant{{Agent: &AgentRef{}}}
+	role := func(id string) []Participant { return []Participant{{Agent: &AgentRef{Role: id}}} }
 	return Process{Steps: []Step{
-		{ID: StepCode, Kind: StepCode, Title: "Реализация", Participants: anyAgent},
-		{ID: StepTest, Kind: StepTest, Title: "Проверки", Participants: anyAgent},
-		{ID: StepReview, Kind: StepReview, Title: "Review", Participants: anyAgent},
+		{ID: StepCode, Kind: StepCode, Title: "Реализация", Participants: role(RoleDeveloper)},
+		{ID: StepTest, Kind: StepTest, Title: "Проверки", Participants: role(RoleTester)},
+		{ID: StepReview, Kind: StepReview, Title: "Review", Participants: role(RoleReviewer)},
 		{ID: StepMerge, Kind: StepMerge, Title: "Merge"},
 		{ID: StepDeploy, Kind: StepDeploy, Title: "Публикация"},
 	}}
 }
+
+// DefaultProcessFor — процесс по умолчанию с учётом флага тестировщика.
+func DefaultProcessFor(tester bool) Process {
+	if tester {
+		return DefaultProcess()
+	}
+	return withoutTester(DefaultProcess())
+}
+
+// withoutTester — процесс по умолчанию с выключенным тестировщиком
+// (tester_agent: false): участник шага test без роли, шаг выполняет только
+// проверки проекта, как до появления ролей.
+func withoutTester(p Process) Process {
+	out := Process{Steps: make([]Step, len(p.Steps))}
+	for i, s := range p.Steps {
+		out.Steps[i] = s
+		if s.Kind != StepTest {
+			continue
+		}
+		parts := make([]Participant, len(s.Participants))
+		for j, part := range s.Participants {
+			parts[j] = part
+			if part.Agent != nil && part.Agent.Role == RoleTester {
+				a := *part.Agent
+				a.Role = ""
+				parts[j].Agent = &a
+			}
+		}
+		out.Steps[i].Participants = parts
+	}
+	return out
+}
+
+// roleIDRe — идентификатор роли каталога.
+var roleIDRe = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
+
+// ValidRoleID — идентификатор роли: латиница, цифры, дефис, 2–32 символа.
+func ValidRoleID(id string) bool { return roleIDRe.MatchString(id) }
 
 var stepIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
@@ -284,7 +335,26 @@ func (part Participant) validate(stepID string, i int) error {
 			return perr(stepID, field+"."+name, "значение %q содержит недопустимые символы", v)
 		}
 	}
+	if r := part.Agent.Role; r != "" && !ValidRoleID(r) {
+		return perr(stepID, field+".agent.role", "роль %q: латиница, цифры, дефис", r)
+	}
 	return nil
+}
+
+// AgentRoles — роли участников-агентов документа: роль → шаг (проверка по
+// каталогу ролей при сохранении политики).
+func (p Process) AgentRoles() map[string]string {
+	out := map[string]string{}
+	for _, s := range p.Steps {
+		for _, part := range s.Participants {
+			if part.Agent != nil && part.Agent.Role != "" {
+				if _, ok := out[part.Agent.Role]; !ok {
+					out[part.Agent.Role] = s.ID
+				}
+			}
+		}
+	}
+	return out
 }
 
 // UserLogins — логины участников-людей документа с шагом (проверка
