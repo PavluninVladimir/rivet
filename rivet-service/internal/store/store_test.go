@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"testing"
@@ -26,7 +27,7 @@ func testStore(t *testing.T) *Store {
 	if err != nil {
 		t.Skipf("postgres недоступен: %v", err)
 	}
-	name := fmt.Sprintf("rivet_test_%d", time.Now().UnixNano())
+	name := fmt.Sprintf("rivet_test_%d_%x", time.Now().UnixNano(), rand.Uint32())
 	if _, err := admin.Exec(ctx, "CREATE DATABASE "+name); err != nil {
 		t.Fatal(err)
 	}

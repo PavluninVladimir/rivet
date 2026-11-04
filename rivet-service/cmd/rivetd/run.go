@@ -67,7 +67,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	if err := bl.EnsureBucket(ctx); err != nil {
-		slog.Warn("minio недоступен — транскрипты не будут сохраняться", "err", err)
+		slog.Warn("S3-хранилище недоступно, транскрипты не будут сохраняться", "err", err)
 		bl = nil
 	}
 
