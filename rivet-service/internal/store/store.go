@@ -109,11 +109,50 @@ type EventFilter struct {
 	// добавляются к ленте проекта: правки каталога ролей и имён runner'ов
 	// нужны консоли в потоке проекта (add-agent-roles).
 	GlobalTypes []string
+	// GlobalAfterID — события GlobalTypes только с id больше этого: поток
+	// проекта отдаёт события установки вживую, без реплея истории.
+	GlobalAfterID int64
+}
+
+// Занятость агента команды (add-agent-roles): событие уровня установки, по
+// которому консоль любого проекта перечитывает команду. Запуски шагов
+// пишет триггер rivet_team_agent_work (миграция 0033), декомпозицию
+// Тимлида пишет API. В payload только {"id", "busy"}: чужая задача, проект
+// и Epic в событие не попадают.
+const (
+	EventAgentBusy = "team.agent_busy"
+	EventAgentFree = "team.agent_free"
+)
+
+// AgentWorkEvent — событие занятости агента. Текст совпадает с текстом
+// триггера.
+func AgentWorkEvent(id, name string, busy bool) EventInput {
+	typ, text := EventAgentFree, "агент команды «"+name+"» свободен"
+	if busy {
+		typ, text = EventAgentBusy, "агент команды «"+name+"» занят"
+	}
+	return EventInput{ActorKind: domain.ActorScheduler, Type: typ, Text: text,
+		Payload: map[string]any{"id": id, "busy": busy}}
 }
 
 // RoleStreamTypes — события установки, которые идут и в потоки проектов.
 var RoleStreamTypes = []string{"role.created", "role.updated", "role.deleted", "runner.renamed",
-	"team.agent_created", "team.agent_updated", "team.agent_deleted"}
+	"team.agent_created", "team.agent_updated", "team.agent_deleted", EventAgentBusy, EventAgentFree}
+
+// auditFeedSQL — лента аудита без фильтра по типу. Занятость агентов
+// служебная: пишется на каждую стадию и нужна потокам консоли, а не аудиту,
+// с явным фильтром по типу она видна. Условие написано литералом и совпадает
+// с предикатом частичного индекса events_audit (миграция 0033), иначе
+// планировщик не возьмёт индекс и будет листать скрытые строки.
+const auditFeedSQL = ` AND project_id IS NULL AND type NOT IN ('` + EventAgentBusy + `', '` + EventAgentFree + `')`
+
+// LastEventID — id последнего события (0 — событий нет): с него поток
+// проекта начинает события установки.
+func (s *Store) LastEventID(ctx context.Context) (int64, error) {
+	var id int64
+	err := s.Pool.QueryRow(ctx, `SELECT COALESCE(max(id), 0) FROM events`).Scan(&id)
+	return id, err
+}
 
 func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, error) {
 	if f.Limit <= 0 || f.Limit > 500 {
@@ -128,22 +167,28 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 	if f.Latest && f.AfterID == 0 {
 		order = "ORDER BY id DESC"
 	}
+	audit := ""
+	if f.Installation && f.Type == "" {
+		audit = auditFeedSQL
+	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT * FROM (
 		SELECT id, ts, actor_kind, actor_id, type, COALESCE(project_id::text,''),
 		       COALESCE(epic_id::text,''), COALESCE(task_id::text,''), text, payload
 		FROM events
-		WHERE ($1 = '' OR project_id = $1::uuid OR (project_id IS NULL AND type = ANY($9::text[])))
+		WHERE ($1 = '' OR project_id = $1::uuid OR (project_id IS NULL AND type = ANY($9::text[]) AND id > $10))
 		  AND ($2 = '' OR epic_id = $2::uuid)
 		  AND ($3 = '' OR task_id = $3::uuid)
 		  AND ($4 = '' OR type = $4)
 		  AND id > $5
 		  AND (CASE WHEN $8 THEN project_id IS NULL
 		       ELSE ($7 = '' OR project_id IN (SELECT project_id FROM project_members WHERE user_id = $7::uuid)) END)
+		`+audit+`
 		`+order+`
 		LIMIT $6) page
 		ORDER BY id`,
-		f.ProjectID, f.EpicID, f.TaskID, f.Type, f.AfterID, f.Limit, f.ViewerID, f.Installation, globalTypes(f.GlobalTypes))
+		f.ProjectID, f.EpicID, f.TaskID, f.Type, f.AfterID, f.Limit, f.ViewerID, f.Installation, globalTypes(f.GlobalTypes),
+		f.GlobalAfterID)
 	if err != nil {
 		return nil, err
 	}

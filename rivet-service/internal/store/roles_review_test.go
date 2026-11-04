@@ -180,9 +180,20 @@ func TestWaitReasonFreeAgentWithoutRunner(t *testing.T) {
 	if _, ok, err := s.AssignRun(ctx, nil, nil); err != nil || ok {
 		t.Fatalf("вторую некому: %v %v", ok, err)
 	}
-	waits, err := s.WaitingTeamRuns(ctx)
+	waits, err := s.WaitingTeamRuns(ctx, nil, nil)
 	if err != nil || len(waits) != 1 || waits[0].Busy {
 		t.Fatalf("причина «нет runner'а для свободных агентов»: %+v %v", waits, err)
+	}
+	// Проект или Epic, исключённые из назначений по бюджету, причины про
+	// агентов не получают.
+	projectID, epicID, err := s.TaskRefs(ctx, waits[0].Run.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, ex := range map[string][2][]string{"проект": {{projectID}, nil}, "Epic": {nil, {epicID}}} {
+		if waits, err := s.WaitingTeamRuns(ctx, ex[0], ex[1]); err != nil || len(waits) != 0 {
+			t.Fatalf("%s исключён по бюджету: %+v %v", name, waits, err)
+		}
 	}
 }
 

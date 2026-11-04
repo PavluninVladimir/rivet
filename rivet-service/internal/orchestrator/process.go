@@ -933,8 +933,10 @@ func nearestCodeBefore(proc *policy.Resolved, stepID string) string {
 
 // markWaiting пишет причину ожидания задачам, чьим запускам не подходит ни
 // один зарегистрированный runner (спека orchestration «Нет runner'а с
-// нужным агентом и моделью»).
-func (e *Engine) markWaiting(ctx context.Context) error {
+// нужным агентом и моделью»). excluded и excludedEpics — исключённые из
+// назначений этого прохода (бюджет, зависимости Epic'а): причину про
+// агентов им не пишем, а записанную раньше снимаем.
+func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []string) error {
 	runs, err := e.St.WaitingRuns(ctx)
 	if err != nil {
 		return err
@@ -969,14 +971,23 @@ func (e *Engine) markWaiting(ctx context.Context) error {
 			return err
 		}
 	}
-	return e.markTeamWaiting(ctx, seen)
+	return e.markTeamWaiting(ctx, seen, excluded, excludedEpics)
 }
 
 // markTeamWaiting — причина ожидания запусков ролей с командой (add-agent-roles):
 // все агенты роли заняты или ни одному агенту роли не подходит ни один
-// подключённый runner.
-func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool) error {
-	waits, err := e.St.WaitingTeamRuns(ctx)
+// подключённый runner. Задачи проектов и Epic'ов, исключённых из
+// назначений (бюджет, ожидание зависимостей Epic'а), пропускаются: они
+// стоят не из-за агентов, и «нет свободного агента» ввело бы в
+// заблуждение. Свою причину показывают Epic и проект. Командную
+// причину, записанную до исключения, планировщик снимает: иначе она
+// держалась бы и после того, как агенты освободились. После снятия
+// исключения причина пишется заново, если задача всё ещё ждёт агента.
+func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool, excluded, excludedEpics []string) error {
+	if _, err := e.St.ClearTeamWaits(ctx, excluded, excludedEpics); err != nil {
+		return err
+	}
+	waits, err := e.St.WaitingTeamRuns(ctx, excluded, excludedEpics)
 	if err != nil {
 		return err
 	}
@@ -989,7 +1000,7 @@ func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool) erro
 		if w.Busy {
 			reason = "нет свободного агента роли «" + w.RoleTitle + "»: все заняты"
 		}
-		if err := e.St.SetTaskWaitReason(ctx, w.Run.TaskID, reason); err != nil {
+		if err := e.St.SetTaskTeamWait(ctx, w.Run.TaskID, reason); err != nil {
 			return err
 		}
 		projectID, epicID, err := e.St.TaskRefs(ctx, w.Run.TaskID)

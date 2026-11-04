@@ -44,6 +44,9 @@ type Server struct {
 	// decompEpics — Epic'и, чья декомпозиция идёт сейчас: вторая
 	// декомпозиция того же Epic'а отклоняется (add-product-discovery).
 	decompEpics map[string]bool
+	// decompSignalMu — порядок событий занятости Тимлида совпадает с
+	// порядком переходов: запись события не держит decompMu.
+	decompSignalMu sync.Mutex
 	// Planner — горячо заменяемый планировщик декомпозиции; пересобирается
 	// ReloadPlanner из базы либо EnvPlanner (design add-operations-management).
 	Planner    *planner.Holder
@@ -1123,6 +1126,16 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 
 	var after int64
 	_, _ = fmt.Sscanf(r.Header.Get("Last-Event-ID"), "%d", &after)
+	// События установки (RoleStreamTypes) идут в поток только вживую, с
+	// момента подключения. Иначе поток любого проекта, даже нового, при
+	// каждом открытии проигрывал бы всю историю занятости агентов
+	// установки. Пропущенное за разрыв не нужно: при подключении консоль
+	// перечитывает шаблоны, команду и runner'ов целиком.
+	liveFrom, err := s.St.LastEventID(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 
 	logs, unsub := s.Hub.Subscribe(projectID)
 	defer unsub()
@@ -1145,7 +1158,8 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 	}
 
 	flushEvents := func() bool {
-		evs, err := s.St.Events(r.Context(), store.EventFilter{ProjectID: projectID, AfterID: after, Limit: 200, GlobalTypes: store.RoleStreamTypes})
+		evs, err := s.St.Events(r.Context(), store.EventFilter{ProjectID: projectID, AfterID: after, Limit: 200,
+			GlobalTypes: store.RoleStreamTypes, GlobalAfterID: liveFrom})
 		if err != nil {
 			return false
 		}

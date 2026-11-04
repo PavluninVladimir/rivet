@@ -209,7 +209,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 			badRuns = append(badRuns, a.Run.ID)
 		}
 	}
-	if err := e.markWaiting(ctx); err != nil {
+	if err := e.markWaiting(ctx, excluded, excludedEpics); err != nil {
 		return err
 	}
 	if err := e.reconcileSteps(ctx); err != nil {

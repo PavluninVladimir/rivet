@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -211,6 +212,24 @@ func TestDecomposingLeadSignal(t *testing.T) {
 	if strings.Join(types, ",") != "epic.decomposing,epic.decomposed" {
 		t.Fatalf("события декомпозиции: %v", types)
 	}
+	// Занятость Тимлида видна командам всех проектов: события установки
+	// без проекта, в payload только id и busy.
+	leadWork := func() string {
+		var out []string
+		for _, typ := range []string{store.EventAgentBusy, store.EventAgentFree} {
+			evs, _ := f.st.Events(ctx, store.EventFilter{Installation: true, Type: typ})
+			for _, e := range evs {
+				if e.ProjectID != "" || e.EpicID != "" || len(e.Payload) != 2 || e.Payload["id"] != "timur" {
+					t.Fatalf("событие занятости Тимлида: %+v", e)
+				}
+				out = append(out, typ)
+			}
+		}
+		return strings.Join(out, ",")
+	}
+	if got := leadWork(); got != "team.agent_busy,team.agent_free" {
+		t.Fatalf("занятость Тимлида: %s", got)
+	}
 
 	// Провал: epic.plan_failed с агентом и причиной.
 	epic2, _ := f.st.CreateEpic(ctx, p.ID, "Второй", "цель")
@@ -222,6 +241,9 @@ func TestDecomposingLeadSignal(t *testing.T) {
 	evs, _ = f.st.Events(ctx, store.EventFilter{EpicID: epic2.ID, Type: "epic.plan_failed"})
 	if len(evs) != 1 || !strings.Contains(evs[0].Text, "модель недоступна") {
 		t.Fatalf("событие провала: %+v", evs)
+	}
+	if got := leadWork(); got != "team.agent_busy,team.agent_busy,team.agent_free,team.agent_free" {
+		t.Fatalf("провал декомпозиции освобождает Тимлида: %s", got)
 	}
 }
 
@@ -235,15 +257,18 @@ func TestStepRunViewCarriesAgent(t *testing.T) {
 
 // Две декомпозиции одного Тимлида: окончание первой не снимает признак
 // второй, повторная по тому же Epic считается отдельно (круг 2, P3-5).
+// Сигнал занятости один на серию: занят с первой, свободен после последней.
 func TestParallelDecompositionsOfLead(t *testing.T) {
 	s := &Server{}
 	lead := &domain.TeamAgent{ID: "timur"}
-	doneA := s.startDecomposition(lead, domain.Epic{ID: "a", ProjectID: "p"})
-	doneB := s.startDecomposition(lead, domain.Epic{ID: "b", ProjectID: "p"})
+	var signals []bool
+	signal := func(busy bool) { signals = append(signals, busy) }
+	doneA := s.startDecomposition(lead, domain.Epic{ID: "a", ProjectID: "p"}, signal)
+	doneB := s.startDecomposition(lead, domain.Epic{ID: "b", ProjectID: "p"}, signal)
 	if d, ok := s.decompositionOf("timur"); !ok || d.EpicID != "b" {
 		t.Fatalf("показывается последняя начатая: %+v %v", d, ok)
 	}
-	doneB2 := s.startDecomposition(lead, domain.Epic{ID: "b", ProjectID: "p"})
+	doneB2 := s.startDecomposition(lead, domain.Epic{ID: "b", ProjectID: "p"}, signal)
 	doneB()
 	if d, ok := s.decompositionOf("timur"); !ok || d.EpicID != "b" {
 		t.Fatalf("повторная декомпозиция Epic b ещё идёт: %+v %v", d, ok)
@@ -252,9 +277,20 @@ func TestParallelDecompositionsOfLead(t *testing.T) {
 	if d, ok := s.decompositionOf("timur"); !ok || d.EpicID != "a" {
 		t.Fatalf("окончание b не снимает a: %+v %v", d, ok)
 	}
+	if fmt.Sprint(signals) != "[true]" {
+		t.Fatalf("пока идёт декомпозиция a, сигнал только о занятости: %v", signals)
+	}
 	doneA()
 	if _, ok := s.decompositionOf("timur"); ok {
 		t.Fatal("все декомпозиции закончены")
+	}
+	if fmt.Sprint(signals) != "[true false]" {
+		t.Fatalf("сигналы занятости: %v", signals)
+	}
+	// Новая серия снова начинается с сигнала занятости.
+	s.startDecomposition(lead, domain.Epic{ID: "c", ProjectID: "p"}, signal)()
+	if fmt.Sprint(signals) != "[true false true false]" {
+		t.Fatalf("сигналы второй серии: %v", signals)
 	}
 }
 
