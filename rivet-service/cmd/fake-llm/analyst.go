@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/discovery"
 )
@@ -20,6 +21,11 @@ const (
 	// badQuoteLabel — метка в названии интервью: первая потребность этого
 	// интервью получает искажённую цитату (проверка отбрасывания).
 	badQuoteLabel = "[e2e-bad-quote]"
+	// slowLabel ставится в название интервью: конспект этого интервью и
+	// синтез с ним отвечают с задержкой slowDelay, чтобы e2e успел увидеть
+	// ход анализа («конспектирует: 1 из 2», затем «синтезирует»).
+	slowLabel = "[e2e-slow]"
+	slowDelay = 3 * time.Second
 	// quoteRunes — длина цитаты из реплики респондента.
 	quoteRunes = 60
 	// summaryFindings — сколько находок даёт конспект.
@@ -38,6 +44,20 @@ func analystReply(prompt string) (string, bool) {
 		return synthesisReply(prompt), true
 	}
 	return "", false
+}
+
+// analystDelay возвращает задержку ответа на задание Аналитика: slowDelay,
+// если в задании есть интервью с меткой slowLabel (название попадает и в
+// задание конспекта, и в задание синтеза), иначе ноль.
+func analystDelay(prompt string) time.Duration {
+	first, _, _ := strings.Cut(prompt, "\n")
+	switch strings.TrimSpace(first) {
+	case markerSummary, markerSynthesis:
+		if strings.Contains(prompt, slowLabel) {
+			return slowDelay
+		}
+	}
+	return 0
 }
 
 type quote struct {

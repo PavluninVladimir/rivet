@@ -118,3 +118,40 @@ func TestAnalystReplyIgnoresOtherPrompts(t *testing.T) {
 		}
 	}
 }
+
+// Метка [e2e-slow] в названии интервью задерживает конспект и синтез с этим
+// интервью, остальные задания отвечают сразу.
+func TestAnalystDelay(t *testing.T) {
+	raw, err := os.ReadFile("../../internal/discovery/testdata/interviews/manager.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := discovery.NormalizeText(string(raw))
+	chunk := discovery.SplitInterview(text, discovery.SummaryChunkChars, discovery.ChunkOverlapLines)[0]
+	summary := func(title string) string {
+		return discovery.SummaryPrompt(discovery.SummaryTask{InterviewID: "iv-1", Title: title, RespondentRole: "Менеджер", Chunk: chunk, Part: 1, Parts: 1})
+	}
+	if d := analystDelay(summary("Менеджер")); d != 0 {
+		t.Fatalf("без метки ответ сразу, задержка %v", d)
+	}
+	slow := summary("Менеджер " + slowLabel)
+	if d := analystDelay(slow); d != slowDelay {
+		t.Fatalf("конспект с меткой: задержка %v", d)
+	}
+	reply, _ := analystReply(slow)
+	sc := discovery.CheckSummary("iv-1", text, reply)
+	synthesis := func(title string) string {
+		ivs := []discovery.InterviewInput{{ID: "iv-1", Title: title, RespondentRole: "Менеджер", Text: text, Summary: sc.Summary}}
+		sp, _ := discovery.SynthesisPrompt(discovery.SynthesisTask{Interviews: ivs})
+		return sp
+	}
+	if d := analystDelay(synthesis("Менеджер")); d != 0 {
+		t.Fatalf("синтез без метки отвечает сразу, задержка %v", d)
+	}
+	if d := analystDelay(synthesis("Менеджер " + slowLabel)); d != slowDelay {
+		t.Fatalf("синтез с интервью с меткой: задержка %v", d)
+	}
+	if d := analystDelay("# Epic: " + slowLabel); d != 0 {
+		t.Fatalf("задание планировщика не задерживается: %v", d)
+	}
+}
