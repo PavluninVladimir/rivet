@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -48,6 +49,13 @@ func main() {
 		// первой строке сообщения.
 		for _, msg := range in.Messages {
 			if content, ok := analystReply(msg.Content); ok {
+				if d := analystDelay(msg.Content); d > 0 {
+					select {
+					case <-time.After(d):
+					case <-r.Context().Done():
+						return
+					}
+				}
 				writeCompletion(w, in.Model, content)
 				return
 			}
