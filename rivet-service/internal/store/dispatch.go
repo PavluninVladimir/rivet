@@ -198,7 +198,23 @@ func (s *Store) DeferRun(ctx context.Context, runID int64, taskID string, base, 
 			WHERE id=$1`, runID, pause.Seconds()); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `UPDATE tasks SET wait_reason=$2, updated_at=now() WHERE id=$1`, taskID, clipRunes(reason, 300))
+		// Начало ожидания серии живёт в самом запуске (deferred_since) и
+		// пишется в этой же транзакции. Первое откладывание запоминает
+		// начало ожидания задачи (уже идущее или с этого момента). Назначения
+		// между откладываниями очищают причину ожидания, а следующие
+		// откладывания возвращают начало серии.
+		if first {
+			var since time.Time
+			if err := tx.QueryRow(ctx, `UPDATE tasks SET wait_reason=$2, updated_at=now() WHERE id=$1
+				RETURNING COALESCE(wait_since, now())`, taskID, clipRunes(reason, 300)).Scan(&since); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `UPDATE task_step_runs SET deferred_since=$2 WHERE id=$1`, runID, since)
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE tasks t SET wait_reason=$2, updated_at=now(),
+			wait_since = COALESCE((SELECT r.deferred_since FROM task_step_runs r WHERE r.id=$3), t.wait_since, now())
+			WHERE t.id=$1`, taskID, clipRunes(reason, 300), runID)
 		return err
 	})
 	return first, pause, err
@@ -220,8 +236,8 @@ func deferPause(n int, base, max time.Duration) time.Duration {
 // событие назначения (p, если есть) пишется только теперь.
 func (s *Store) RunDelivered(ctx context.Context, runID int64, p *PendingAssign) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE task_step_runs SET defer_count=0, not_before=NULL
-			WHERE id=$1 AND (defer_count > 0 OR not_before IS NOT NULL)`, runID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE task_step_runs SET defer_count=0, not_before=NULL, deferred_since=NULL
+			WHERE id=$1 AND (defer_count > 0 OR not_before IS NOT NULL OR deferred_since IS NOT NULL)`, runID); err != nil {
 			return err
 		}
 		if p == nil {
@@ -234,11 +250,15 @@ func (s *Store) RunDelivered(ctx context.Context, runID int64, p *PendingAssign)
 
 // UndoAssign — стадия не доставлена: задача, которую назначение перевело
 // из ready, возвращается в ready (если её статус с тех пор не менялся).
+// Время начала, поставленное этим назначением, снимается: работа не
+// начиналась.
 func (s *Store) UndoAssign(ctx context.Context, taskID string, p *PendingAssign) error {
 	if p == nil || p.To == "" {
 		return nil
 	}
-	_, err := s.Pool.Exec(ctx, `UPDATE tasks SET status='ready', updated_at=now() WHERE id=$1 AND status=$2`, taskID, p.To)
+	_, err := s.Pool.Exec(ctx, `UPDATE tasks SET status='ready',
+		started_at = CASE WHEN $3 THEN NULL ELSE started_at END, updated_at=now()
+		WHERE id=$1 AND status=$2`, taskID, p.To, p.FirstStart)
 	return err
 }
 

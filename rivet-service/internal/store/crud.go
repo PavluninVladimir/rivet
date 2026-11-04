@@ -82,17 +82,25 @@ func (s *Store) CreateEpic(ctx context.Context, projectID, title, goal string) (
 	return e, err
 }
 
+// epicCols — колонки Epic'а для epicDest.
+const epicCols = `id, project_id, title, goal, status, token_budget, COALESCE(source_key,''), created_at, started_at, due_at`
+
+// epicDest — адреса полей Epic'а в порядке epicCols.
+func epicDest(e *domain.Epic) []any {
+	return []any{&e.ID, &e.ProjectID, &e.Title, &e.Goal, &e.Status, &e.TokenBudget, &e.SourceKey, &e.Created, &e.StartedAt, &e.DueAt}
+}
+
 func (s *Store) GetEpic(ctx context.Context, id string) (domain.Epic, error) {
 	var e domain.Epic
 	err := s.Pool.QueryRow(ctx,
-		`SELECT id, project_id, title, goal, status, token_budget, COALESCE(source_key,''), created_at FROM epics WHERE id=$1`, id).
-		Scan(&e.ID, &e.ProjectID, &e.Title, &e.Goal, &e.Status, &e.TokenBudget, &e.SourceKey, &e.Created)
+		`SELECT `+epicCols+` FROM epics WHERE id=$1`, id).
+		Scan(epicDest(&e)...)
 	return e, nf(err)
 }
 
 func (s *Store) ListEpics(ctx context.Context, projectID string) ([]domain.Epic, error) {
 	rows, err := s.Pool.Query(ctx,
-		`SELECT id, project_id, title, goal, status, token_budget, COALESCE(source_key,''), created_at FROM epics WHERE project_id=$1 ORDER BY created_at`,
+		`SELECT `+epicCols+` FROM epics WHERE project_id=$1 ORDER BY created_at`,
 		projectID)
 	if err != nil {
 		return nil, err
@@ -101,7 +109,7 @@ func (s *Store) ListEpics(ctx context.Context, projectID string) ([]domain.Epic,
 	var out []domain.Epic
 	for rows.Next() {
 		var e domain.Epic
-		if err := rows.Scan(&e.ID, &e.ProjectID, &e.Title, &e.Goal, &e.Status, &e.TokenBudget, &e.SourceKey, &e.Created); err != nil {
+		if err := rows.Scan(epicDest(&e)...); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -176,7 +184,8 @@ const taskCols = `t.id, t.epic_id, t.num, t.title, t.description, t.status, t.es
 	COALESCE(t.runner_id,''), COALESCE(t.branch,''), COALESCE(t.pr_url,''), COALESCE(t.block_reason,''),
 	COALESCE(t.blocked_by::text,''), t.step_id, t.step_entry, t.process, t.process_hash, t.step_rejections,
 	t.wait_reason, t.step_gen, t.created_at, t.updated_at,
-	COALESCE(cur.role, ''), COALESCE(cur.runner_name, ''), COALESCE(cur.agent_id, ''), COALESCE(cur.agent_name, '')`
+	COALESCE(cur.role, ''), COALESCE(cur.runner_name, ''), COALESCE(cur.agent_id, ''), COALESCE(cur.agent_name, ''),
+	t.started_at, t.done_at`
 
 // taskFrom — задачи с текущим исполнителем (add-agent-roles): роль и имя
 // runner'а открытого запуска агента с назначенным runner'ом.
@@ -194,7 +203,7 @@ func scanTask(row pgx.Row) (domain.Task, error) {
 		&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit, &t.ReviewRejections,
 		&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,
 		&t.StepID, &t.StepEntry, &proc, &t.ProcessHash, &rej, &t.WaitReason, &t.StepGen, &t.Created, &t.Updated,
-		&t.RoleID, &t.RunnerName, &t.AgentID, &t.AgentName)
+		&t.RoleID, &t.RunnerName, &t.AgentID, &t.AgentName, &t.StartedAt, &t.DoneAt)
 	if err != nil {
 		return t, err
 	}
@@ -641,25 +650,27 @@ func (s *Store) EndSession(ctx context.Context, id, transcriptRef, outcome strin
 // сообщил значение» (спека observability «Учёт usage»), не ноль.
 type UsageInput struct {
 	SourceMsgID string // идемпотентность billing-grade
-	ProjectID   string
-	EpicID      string
-	TaskID      string
-	RunnerID    string
-	Model       string
-	TokensIn    *int64
-	TokensOut   *int64
-	CostUSD     *float64
-	DurationS   int
+	// SessionID — сессия стадии (разрез расхода по ролям в обзоре проекта).
+	SessionID string
+	ProjectID string
+	EpicID    string
+	TaskID    string
+	RunnerID  string
+	Model     string
+	TokensIn  *int64
+	TokensOut *int64
+	CostUSD   *float64
+	DurationS int
 }
 
 func (s *Store) RecordUsage(ctx context.Context, u UsageInput) error {
 	_, err := s.Pool.Exec(ctx, `
 		INSERT INTO usage_records (source_msg_id, project_id, epic_id, task_id, runner_id, model,
-			tokens_in, tokens_out, cost_usd, duration_s)
-		VALUES (NULLIF($1,''),$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,NULLIF($5,''),$6,$7,$8,$9,$10)
+			tokens_in, tokens_out, cost_usd, duration_s, session_id)
+		VALUES (NULLIF($1,''),$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,NULLIF($5,''),$6,$7,$8,$9,$10,NULLIF($11,'')::uuid)
 		ON CONFLICT (source_msg_id) DO NOTHING`,
 		u.SourceMsgID, u.ProjectID, u.EpicID, u.TaskID, u.RunnerID, u.Model,
-		u.TokensIn, u.TokensOut, u.CostUSD, u.DurationS)
+		u.TokensIn, u.TokensOut, u.CostUSD, u.DurationS, u.SessionID)
 	return err
 }
 

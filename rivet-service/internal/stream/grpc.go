@@ -661,7 +661,7 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 			}
 		}
 		return s.St.RecordUsage(ctx, store.UsageInput{
-			SourceMsgID: msg.MsgId, ProjectID: projectID, EpicID: epicID,
+			SourceMsgID: msg.MsgId, SessionID: k.Usage.SessionId, ProjectID: projectID, EpicID: epicID,
 			TaskID: k.Usage.TaskId, RunnerID: runnerID, Model: k.Usage.Model,
 			TokensIn: nonNegative(k.Usage.TokensIn), TokensOut: nonNegative(k.Usage.TokensOut),
 			CostUSD: nonNegative(k.Usage.CostUsd), DurationS: max(int(k.Usage.DurationS), 0),

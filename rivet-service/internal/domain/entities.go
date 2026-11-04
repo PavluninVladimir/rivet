@@ -84,6 +84,10 @@ type Epic struct {
 	// История не назначается runner'ам и не входит в оценки и бюджеты.
 	SourceKey string
 	Created   time.Time
+	// StartedAt — первый переход в running, DueAt — целевая дата Epic'а
+	// (add-project-lead-view); nil — не было или не задана.
+	StartedAt *time.Time
+	DueAt     *time.Time
 }
 
 type Criterion struct {
@@ -131,6 +135,10 @@ type Task struct {
 	AgentName string `json:"AgentName"`
 	Created   time.Time
 	Updated   time.Time
+	// StartedAt — первое назначение в работу, DoneAt — переход в done
+	// (add-project-lead-view); nil — ещё не было.
+	StartedAt *time.Time
+	DoneAt    *time.Time
 }
 
 type Runner struct {

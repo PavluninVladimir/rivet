@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"unicode"
 
@@ -47,6 +48,10 @@ type Presets struct {
 	TesterAgent *bool                `json:"tester_agent,omitempty"`
 	TestPaths   []string             `json:"test_paths,omitempty"`
 	RoleModels  map[string]RoleModel `json:"role_models,omitempty"`
+	// MonthlyBudgetUSD — плановый бюджет месяца в долларах (add-project-lead-view):
+	// только для прогноза, конвейер не останавливает. Задаётся только
+	// проектом; omitempty, чтобы хэши прежних версий не менялись.
+	MonthlyBudgetUSD *float64 `json:"monthly_budget_usd,omitempty"`
 }
 
 // RoleModel — переопределение модели роли в проекте: профиль агента,
@@ -95,6 +100,10 @@ type Overrides struct {
 	TesterAgent *bool                `json:"tester_agent,omitempty"`
 	TestPaths   *[]string            `json:"test_paths,omitempty"`
 	RoleModels  map[string]RoleModel `json:"role_models,omitempty"`
+	// MonthlyBudgetUSD — плановый бюджет месяца в долларах (add-project-lead-view):
+	// только для прогноза, конвейер не останавливает. Задаётся только
+	// проектом; omitempty, чтобы хэши прежних версий не менялись.
+	MonthlyBudgetUSD *float64 `json:"monthly_budget_usd,omitempty"`
 }
 
 // AgentModel — пара подключение/модель из привязок профиля агента.
@@ -182,6 +191,9 @@ func (p Presets) Validate() error {
 	if err := validateRoleModels(p.RoleModels); err != nil {
 		return err
 	}
+	if err := validateMonthlyBudget(p.MonthlyBudgetUSD); err != nil {
+		return err
+	}
 	if p.ProcessLocks != nil {
 		if err := p.ProcessLocks.Validate(); err != nil {
 			return err
@@ -266,6 +278,9 @@ func (o Overrides) Validate() error {
 	if err := validateRoleModels(o.RoleModels); err != nil {
 		return err
 	}
+	if err := validateMonthlyBudget(o.MonthlyBudgetUSD); err != nil {
+		return err
+	}
 	if o.Process != nil {
 		return o.Process.Validate()
 	}
@@ -344,6 +359,10 @@ func Effective(installation Presets, o Overrides) Presets {
 	}
 	if o.TestPaths != nil {
 		eff.TestPaths = append([]string{}, (*o.TestPaths)...)
+	}
+	if o.MonthlyBudgetUSD != nil {
+		v := *o.MonthlyBudgetUSD
+		eff.MonthlyBudgetUSD = &v
 	}
 	if len(o.RoleModels) > 0 {
 		eff.RoleModels = map[string]RoleModel{}
@@ -481,3 +500,15 @@ func unquote(s string) (string, string) {
 }
 
 func isOctal(c byte) bool { return c >= '0' && c <= '7' }
+
+// validateMonthlyBudget — плановый бюджет месяца больше нуля (api-contract:
+// 0 и меньше дают 422 с field monthly_budget_usd).
+func validateMonthlyBudget(v *float64) error {
+	if v == nil {
+		return nil
+	}
+	if !(*v > 0) || math.IsInf(*v, 0) {
+		return &ProcessError{Field: "monthly_budget_usd", Msg: "плановый бюджет месяца должен быть больше 0"}
+	}
+	return nil
+}

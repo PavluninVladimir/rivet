@@ -556,6 +556,9 @@ type PendingAssign struct {
 	// To — статус, в который назначение перевело задачу из ready (пусто —
 	// задача уже была в работе).
 	To domain.TaskStatus
+	// FirstStart — назначение первым поставило задаче started_at: при
+	// недоставке время начала снимается.
+	FirstStart bool
 }
 
 // AssignRun атомарно назначает один ожидающий запуск подходящему свободному
@@ -700,12 +703,18 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 			if branch == "" {
 				branch = fmt.Sprintf("agent/task-%d", num)
 			}
+			// Первое назначение ставит started_at (триггер 0030). Если стадия
+			// не будет доставлена, UndoAssign его снимет.
+			var firstStart bool
+			if err := tx.QueryRow(ctx, `SELECT started_at IS NULL FROM tasks WHERE id=$1`, taskID).Scan(&firstStart); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE tasks SET status=$2, branch=$3, wait_reason='', updated_at=now() WHERE id=$1 AND status='ready'`,
 				taskID, to, branch); err != nil {
 				return err
 			}
-			a.Pending = &PendingAssign{To: to, Event: EventInput{
+			a.Pending = &PendingAssign{To: to, FirstStart: firstStart, Event: EventInput{
 				ActorKind: domain.ActorScheduler, Type: "task.status",
 				ProjectID: projectID, EpicID: epicID, TaskID: taskID,
 				Text:    "назначена: " + who,
@@ -1047,7 +1056,7 @@ func (s *Store) MySteps(ctx context.Context, userID, login string) ([]StepItem, 
 			&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit, &t.ReviewRejections,
 			&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,
 			&t.StepID, &t.StepEntry, &proc, &t.ProcessHash, &rej, &t.WaitReason, &t.StepGen, &t.Created, &t.Updated,
-			&t.RoleID, &t.RunnerName, &t.AgentID, &t.AgentName,
+			&t.RoleID, &t.RunnerName, &t.AgentID, &t.AgentName, &t.StartedAt, &t.DoneAt,
 			&it.ProjectID, &it.Project, &it.EpicID, &it.Epic); err != nil {
 			return nil, err
 		}

@@ -122,6 +122,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/system/policy", s.putInstallationPolicy)
 	mux.HandleFunc("GET /api/v1/system/policy/versions", s.listInstallationPolicyVersions)
 	mux.HandleFunc("GET /api/v1/projects/{id}/policy", s.getProjectPolicy)
+	mux.HandleFunc("GET /api/v1/projects/{id}/overview", s.getProjectOverview)
+	mux.HandleFunc("GET /api/v1/projects/{id}/report", s.getProjectReport)
 	mux.HandleFunc("PUT /api/v1/projects/{id}/policy", s.putProjectPolicy)
 	mux.HandleFunc("PUT /api/v1/projects/{id}/policy/source", s.putProjectPolicySource)
 	mux.HandleFunc("GET /api/v1/projects/{id}/policy/versions", s.listProjectPolicyVersions)
@@ -567,8 +569,9 @@ type epicBudgetView struct {
 // patchEpic — бюджет Epic в токенах (api-contract add-cost-transparency):
 // null снимает, возобновление назначений — следующим проходом планировщика.
 func (s *Server) patchEpic(w http.ResponseWriter, r *http.Request) {
-	// Слой видимости — членство (404 чужим), право на бюджет — владелец
-	// проекта: бюджет — spend-control, участник не должен его ослаблять.
+	// Слой видимости — членство (404 чужим), право на бюджет и целевую дату —
+	// владелец проекта: бюджет — spend-control, участник не должен его
+	// ослаблять; целевую дату ставит тот, кто отвечает за срок.
 	epicForRole, err := s.St.EpicForViewer(r.Context(), r.PathValue("id"), currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
@@ -577,33 +580,50 @@ func (s *Server) patchEpic(w http.ResponseWriter, r *http.Request) {
 	if !s.requireOwner(w, r, epicForRole.ProjectID) {
 		return
 	}
-	var in struct {
-		TokenBudget json.RawMessage `json:"token_budget"`
-	}
-	if err := decode(r, &in); err != nil || in.TokenBudget == nil {
-		unprocessable(w, "нужен token_budget (число или null)")
+	var in map[string]json.RawMessage
+	if err := decode(r, &in); err != nil {
+		unprocessable(w, "нужен объект с token_budget и/или due_at")
 		return
 	}
+	rawBudget, hasBudget := in["token_budget"]
+	rawDue, hasDue := in["due_at"]
+	if !hasBudget && !hasDue {
+		unprocessable(w, "нужен token_budget (число или null) или due_at (RFC 3339 или null)")
+		return
+	}
+	// Оба поля проверяются до записи: неверное поле не оставляет
+	// сохранённым другое (store применяет правку одной транзакцией).
 	var budget *int64
-	if string(in.TokenBudget) != "null" {
+	if hasBudget && string(rawBudget) != "null" {
 		var v int64
-		if err := json.Unmarshal(in.TokenBudget, &v); err != nil {
-			unprocessable(w, "token_budget: ожидается число или null")
+		if err := json.Unmarshal(rawBudget, &v); err != nil {
+			fieldInvalid(w, "token_budget", "token_budget: ожидается число или null")
+			return
+		}
+		if v < 1 {
+			fieldInvalid(w, "token_budget", "token_budget: бюджет должен быть не меньше 1 токена")
 			return
 		}
 		budget = &v
 	}
-	epic, err := s.St.SetEpicBudget(r.Context(), r.PathValue("id"), budget)
-	if err != nil {
-		writeErr(w, err)
-		return
+	var due *time.Time
+	if hasDue && string(rawDue) != "null" {
+		var str string
+		if err := json.Unmarshal(rawDue, &str); err != nil {
+			fieldInvalid(w, "due_at", "due_at: ожидается время RFC 3339 или null")
+			return
+		}
+		t, err := time.Parse(time.RFC3339, str)
+		if err != nil {
+			fieldInvalid(w, "due_at", "due_at: ожидается время RFC 3339 или null")
+			return
+		}
+		due = &t
 	}
-	if _, err := s.St.AppendEvent(r.Context(), store.EventInput{
-		ActorKind: domain.ActorUser, ActorID: user(r), Type: "epic.status",
-		ProjectID: epic.ProjectID, EpicID: epic.ID,
-		Text:    "бюджет Epic изменён",
-		Payload: map[string]any{"token_budget": epic.TokenBudget},
-	}); err != nil {
+	epic, err := s.St.PatchEpic(r.Context(), epicForRole.ID, store.EpicPatch{
+		SetBudget: hasBudget, Budget: budget, SetDue: hasDue, Due: due,
+	}, user(r))
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
