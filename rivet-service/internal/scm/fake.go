@@ -3,6 +3,7 @@ package scm
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,12 +17,28 @@ type Fake struct {
 	// files — файлы фиктивного репозитория для публикации GitOps.
 	mu    sync.Mutex
 	files map[string]string
+	// conflicts — PR с меткой FakeConflictMarker («repo#номер»), первый
+	// merge которых отклоняется как конфликт с базовой веткой.
+	conflicts map[string]bool
 }
+
+// FakeConflictMarker — метка в заголовке задачи, по которой fake-хостинг
+// имитирует конфликт PR с базовой веткой: первая попытка merge получает
+// ErrMergeConflict, следующая проходит (e2e конфликта при merge).
+const FakeConflictMarker = "[e2e-conflict]"
 
 func NewFake() *Fake { return &Fake{} }
 
 func (f *Fake) CreatePR(ctx context.Context, repo, branch, base, title, body string) (PR, error) {
 	n := int(f.seq.Add(1))
+	if strings.Contains(title, FakeConflictMarker) {
+		f.mu.Lock()
+		if f.conflicts == nil {
+			f.conflicts = map[string]bool{}
+		}
+		f.conflicts[fmt.Sprintf("%s#%d", repo, n)] = true
+		f.mu.Unlock()
+	}
 	return PR{Number: n, URL: fmt.Sprintf("https://fake.local/%s/pull/%d", repo, n)}, nil
 }
 
@@ -33,6 +50,14 @@ func (f *Fake) Diff(ctx context.Context, repo string, number int) (string, error
 // базовая ветка. Она существует в репозитории стенда, и доставка, которой
 // нужна рабочая копия версии (Kubernetes), на стенде работает.
 func (f *Fake) Merge(ctx context.Context, repo string, number int) (string, error) {
+	key := fmt.Sprintf("%s#%d", repo, number)
+	f.mu.Lock()
+	conflict := f.conflicts[key]
+	delete(f.conflicts, key)
+	f.mu.Unlock()
+	if conflict {
+		return "", fmt.Errorf("fake merge: %w", ErrMergeConflict)
+	}
 	return "main", nil
 }
 

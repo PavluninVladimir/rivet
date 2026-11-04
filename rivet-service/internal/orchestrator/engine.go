@@ -5,6 +5,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -80,6 +81,10 @@ type Engine struct {
 	// сериализованы между тиком планировщика и публикациями.
 	policyMu   sync.Mutex
 	policyDown map[string]bool
+	// mergeLocks сериализуют операцию merge задачи (вызов хостинга и
+	// применение исхода): авто-merge и подтверждения человеком одной задачи
+	// идут по очереди (change add-merge-conflict-recovery).
+	mergeLocks taskLocks
 	// Now — источник времени для бюджета (подменяется в тестах).
 	Now func() time.Time
 }
@@ -871,17 +876,40 @@ func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login str
 // MergeTask — подтверждение человека: merge PR → done → пересчёт DAG.
 // Доступно при любой политике, в том числе когда авто-merge отложен.
 func (e *Engine) MergeTask(ctx context.Context, taskID, userID string) error {
-	task, err := e.St.GetTask(ctx, taskID)
+	// Операция merge задачи сериализована с авто-merge и другими
+	// подтверждениями: id берётся из базы (неизвестная задача — 404),
+	// а сама задача перечитывается уже под блокировкой.
+	known, err := e.St.GetTask(ctx, taskID)
 	if err != nil {
 		return err
 	}
-	p, _, err := e.projectOf(ctx, task)
-	if err != nil {
-		return err
-	}
-	return e.mergeTask(ctx, task, p, store.EventInput{
-		ActorKind: domain.ActorUser, ActorID: userID, Type: "task.status",
-		Text: "PR смержен — задача выполнена", Payload: map[string]any{"status": "done"},
+	return e.withMergeLock(known.ID, func() error {
+		task, err := e.St.GetTask(ctx, known.ID)
+		if err != nil {
+			return err
+		}
+		p, _, err := e.projectOf(ctx, task)
+		if err != nil {
+			return err
+		}
+		err = e.mergeTask(ctx, task, p, store.EventInput{
+			ActorKind: domain.ActorUser, ActorID: userID, Type: "task.status",
+			Text: "PR смержен — задача выполнена", Payload: map[string]any{"status": "done"},
+		})
+		if !errors.Is(err, scm.ErrMergeConflict) {
+			return err
+		}
+		// Конфликт при подтверждении человеком: счётчик возвратов
+		// сбрасывается, задача уходит агенту, кнопке — 409 с пояснением.
+		returned, cerr := e.mergeConflict(ctx, task, p, userID)
+		if cerr != nil {
+			return cerr
+		}
+		base := p.DefaultBranch
+		if base == "" {
+			base = "main"
+		}
+		return &MergeConflictError{Base: base, Returned: returned}
 	})
 }
 
@@ -985,24 +1013,42 @@ func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Proje
 	payload := eff.Ref()
 	payload["status"], payload["auto_merge"] = "done", true
 	payload["point"] = policy.PointMerge
-	err = e.mergeTask(ctx, task, p, store.EventInput{
-		ActorKind: domain.ActorSystem, Type: "task.status",
-		Text: "PR смержен автоматически по политике " + shortHash(eff.Hash) + " — задача выполнена", Payload: payload,
+	// Операция merge сериализована с подтверждениями человека: под
+	// блокировкой задача перечитывается, и если её уже увели с этого входа
+	// в merge (смержил или вернул агенту человек), авто-merge ничего не делает.
+	return e.withMergeLock(task.ID, func() error {
+		fresh, err := e.St.GetTask(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if fresh.Status != domain.TaskReview || fresh.StepID != task.StepID || fresh.StepGen != task.StepGen {
+			return nil
+		}
+		err = e.mergeTask(ctx, fresh, p, store.EventInput{
+			ActorKind: domain.ActorSystem, Type: "task.status",
+			Text: "PR смержен автоматически по политике " + shortHash(eff.Hash) + " — задача выполнена", Payload: payload,
+		})
+		if err == nil {
+			return nil
+		}
+		// Конфликт с базовой веткой разрешает агент (change
+		// add-merge-conflict-recovery): задача уходит на шаг code.
+		if errors.Is(err, scm.ErrMergeConflict) {
+			_, cerr := e.mergeConflict(ctx, fresh, p, "")
+			return cerr
+		}
+		// Хостинг отказал по другой причине (защита ветки, обязательные
+		// проверки): задача остаётся в review, причина видна человеку событием.
+		slog.Error("auto-merge", "task", task.ID, "err", err)
+		failPayload := eff.Ref()
+		failPayload["error"] = err.Error()
+		_, evErr := e.St.AppendEvent(ctx, store.EventInput{
+			ActorKind: domain.ActorSystem, Type: "task.merge_failed",
+			ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
+			Text: "авто-merge не выполнен: " + err.Error() + " — ожидание подтверждения человеком", Payload: failPayload,
+		})
+		return evErr
 	})
-	if err == nil {
-		return nil
-	}
-	// Хостинг отказал (конфликт, защита ветки): как при ручном merge задача
-	// остаётся в review, а причина видна человеку — событием, не только логом.
-	slog.Error("auto-merge", "task", task.ID, "err", err)
-	failPayload := eff.Ref()
-	failPayload["error"] = err.Error()
-	_, evErr := e.St.AppendEvent(ctx, store.EventInput{
-		ActorKind: domain.ActorSystem, Type: "task.merge_failed",
-		ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
-		Text: "авто-merge не выполнен: " + err.Error() + " — ожидание подтверждения человеком", Payload: failPayload,
-	})
-	return evErr
 }
 
 // shortID — первые 8 символов id для ключей и текстов.

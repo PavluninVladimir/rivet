@@ -64,6 +64,12 @@ var ErrDiffTruncated = errors.New("diff PR обрезан: превышен ли
 // ErrFileNotFound — файла нет в репозитории на этой ветке.
 var ErrFileNotFound = errors.New("файла нет в репозитории")
 
+// ErrMergeConflict — хостинг отказал в merge из-за конфликта PR/MR с
+// базовой веткой (спека scm-integration «Распознавание конфликта при
+// merge»). Адаптер возвращает её, только когда причина установлена точно:
+// защита ветки, обязательные проверки и неизвестный ответ — обычная ошибка.
+var ErrMergeConflict = errors.New("PR конфликтует с базовой веткой")
+
 // MaxResponseBytes — лимит чтения тела ответа хостинга.
 const MaxResponseBytes = 4 << 20
 

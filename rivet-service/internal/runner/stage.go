@@ -363,9 +363,13 @@ func gitCommitPush(ctx context.Context, dir, branch string, env []string, messag
 	if err := validBranch(branch); err != nil {
 		return err
 	}
-	// Identity задаём явно: на CI глобального git config нет.
+	// Identity задаём явно: на CI глобального git config нет. Коммит нужен и
+	// при пустом diff, если агент оставил незавершённый merge (MERGE_HEAD):
+	// разрешение конфликта с базовой веткой может дать дерево, равное HEAD,
+	// но без merge-коммита базовая ветка не станет предком ветки задачи.
 	script := fmt.Sprintf(
-		`git add -A && (git diff --cached --quiet || git -c user.name=rivet-runner -c user.email=runner@rivet.local commit -m %s) && git push -u origin %s`,
+		`git add -A && { if git rev-parse -q --verify MERGE_HEAD >/dev/null || ! git diff --cached --quiet; then `+
+			`git -c user.name=rivet-runner -c user.email=runner@rivet.local commit -m %s; fi; } && git push -u origin %s`,
 		shellQuote(message), shellQuote(branch))
 	if out, err := runShellEnv(ctx, dir, script, env, nil); err != nil {
 		return fmt.Errorf("%v: %s", err, out)

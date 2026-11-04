@@ -98,6 +98,9 @@ func (g *GitHub) Merge(ctx context.Context, repo string, number int) (string, er
 		return "", err
 	}
 	if code != http.StatusOK {
+		if code == http.StatusMethodNotAllowed && g.conflicting(ctx, repo, number, raw) {
+			return "", fmt.Errorf("github merge: %w: %s", ErrMergeConflict, tailMsg(raw))
+		}
 		return "", fmt.Errorf("github merge: %d: %s", code, raw)
 	}
 	var out struct {
@@ -107,6 +110,32 @@ func (g *GitHub) Merge(ctx context.Context, repo string, number int) (string, er
 		return "", err
 	}
 	return out.SHA, nil
+}
+
+// conflicting — отказ 405 вызван конфликтом с базовой веткой. GitHub
+// называет причину в тексте («Pull Request has merge conflicts»), а если
+// текст другой («is not mergeable» бывает и при обязательных проверках),
+// решает состояние PR: mergeable=false при mergeable_state=dirty. Пока
+// GitHub считает mergeable (null), конфликт не признаётся.
+func (g *GitHub) conflicting(ctx context.Context, repo string, number int, mergeResp []byte) bool {
+	var msg struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(mergeResp, &msg) == nil && strings.Contains(strings.ToLower(msg.Message), "merge conflict") {
+		return true
+	}
+	raw, code, err := g.do(ctx, "GET", fmt.Sprintf("/repos/%s/pulls/%d", repo, number), nil, "")
+	if err != nil || code != http.StatusOK {
+		return false
+	}
+	var pr struct {
+		Mergeable      *bool  `json:"mergeable"`
+		MergeableState string `json:"mergeable_state"`
+	}
+	if json.Unmarshal(raw, &pr) != nil {
+		return false
+	}
+	return pr.Mergeable != nil && !*pr.Mergeable && pr.MergeableState == "dirty"
 }
 
 // HeadSHA — sha вершины ветки через branches API.

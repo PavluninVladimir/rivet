@@ -120,6 +120,9 @@ func (g *GitLab) Merge(ctx context.Context, repo string, number int) (string, er
 		return "", err
 	}
 	if code != http.StatusOK {
+		if mergeRefusal(code) && g.conflicting(ctx, repo, number) {
+			return "", fmt.Errorf("gitlab merge: %w: %s", ErrMergeConflict, tailMsg(raw))
+		}
 		return "", fmt.Errorf("gitlab merge: %d: %s", code, tailMsg(raw))
 	}
 	var out struct {
@@ -136,6 +139,33 @@ func (g *GitLab) Merge(ctx context.Context, repo string, number int) (string, er
 		}
 	}
 	return "", nil
+}
+
+// mergeRefusal — коды, которыми GitLab отказывает в merge по состоянию MR
+// (конфликт, пайплайн, обсуждения). Прочие (403 без прав, 5xx) конфликтом
+// не бывают, даже если MR при этом конфликтует.
+func mergeRefusal(code int) bool {
+	return code == http.StatusMethodNotAllowed || code == http.StatusNotAcceptable || code == http.StatusUnprocessableEntity
+}
+
+// conflicting — отказ merge вызван конфликтом MR с целевой веткой. Коды
+// отказа у GitLab не различают причины (405/406/422 бывают и при
+// обязательных пайплайнах), поэтому решает состояние MR: has_conflicts или
+// detailed_merge_status=conflict в новых версиях.
+func (g *GitLab) conflicting(ctx context.Context, repo string, number int) bool {
+	raw, code, err := g.do(ctx, "GET",
+		fmt.Sprintf("/projects/%s/merge_requests/%d", projectID(repo), number), nil)
+	if err != nil || code != http.StatusOK {
+		return false
+	}
+	var mr struct {
+		HasConflicts        bool   `json:"has_conflicts"`
+		DetailedMergeStatus string `json:"detailed_merge_status"`
+	}
+	if json.Unmarshal(raw, &mr) != nil {
+		return false
+	}
+	return mr.HasConflicts || mr.DetailedMergeStatus == "conflict"
 }
 
 // HeadSHA — вершина ветки.

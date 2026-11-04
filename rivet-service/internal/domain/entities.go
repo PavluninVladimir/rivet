@@ -600,6 +600,11 @@ const (
 	// проходит валидацию: действует последняя валидная версия
 	// (спека access-policy «Битый файл политики»).
 	AttPolicySource AttentionReason = "POLICY_SOURCE"
+	// AttMergeConflict — PR задачи конфликтует с базовой веткой, а лимит
+	// возвратов агенту на разрешение конфликта исчерпан: задача ждёт
+	// человека на шаге merge (спека task-pipeline «Конфликт с базовой
+	// веткой при merge»).
+	AttMergeConflict AttentionReason = "MERGE_CONFLICT"
 )
 
 type Attention struct {
