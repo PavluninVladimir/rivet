@@ -139,6 +139,80 @@ func TestTeamAgentBusyWaits(t *testing.T) {
 	}
 }
 
+// Задача Epic'а с исчерпанным бюджетом стоит из-за бюджета: причину «нет
+// свободного агента» ей не пишем, даже если все агенты роли заняты, а
+// записанную до исчерпания снимаем.
+func TestTeamWaitSkipsBudgetExcludedEpic(t *testing.T) {
+	ctx := context.Background()
+	f := newPolicyFixture(t, "")
+	withTeam(t, f, [4]string{"maks", "Макс", "developer", ""})
+	other, err := f.st.CreateEpic(ctx, f.p.ID, "Второй", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.st.CreateTask(ctx, other.ID, store.NewTask{Title: "B", Criteria: []domain.Criterion{{Text: "ok"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.TransitionEpic(ctx, other.ID, domain.EpicRunning,
+		store.EventInput{ActorKind: domain.ActorUser, ActorID: "test", Type: "epic.status"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "worker2", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := f.st.GetTask(ctx, f.task.ID); a.AgentID != "maks" {
+		t.Fatalf("первую задачу ведёт Макс: %q", a.AgentID)
+	}
+	b, _ := f.st.GetTask(ctx, second.ID)
+	if !strings.Contains(b.WaitReason, "нет свободного агента роли") {
+		t.Fatalf("без бюджета задача ждёт агента: %q", b.WaitReason)
+	}
+	waits := len(eventsOfType(t, f.st, second.ID, "task.wait"))
+	// Бюджет Epic'а второй задачи исчерпан, Макс всё ещё занят первой.
+	budget := int64(100)
+	if _, err := f.st.PatchEpic(ctx, other.ID, store.EpicPatch{SetBudget: true, Budget: &budget}, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	in := int64(150)
+	if err := f.st.RecordUsage(ctx, store.UsageInput{SourceMsgID: "twb-1", ProjectID: f.p.ID,
+		EpicID: other.ID, TaskID: second.ID, TokensIn: &in}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := f.st.GetTask(ctx, second.ID); b.WaitReason != "" || b.AgentID != "" {
+		t.Fatalf("при исчерпанном бюджете причины про агента нет: %q %q", b.WaitReason, b.AgentID)
+	}
+	if evs, _ := f.st.Events(ctx, store.EventFilter{EpicID: other.ID, Type: "epic.budget_exceeded"}); len(evs) != 1 {
+		t.Fatalf("причину показывает событие бюджета Epic: %+v", evs)
+	}
+	// Повторные проходы причину не возвращают и task.wait не пишут.
+	if err := f.e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := f.st.GetTask(ctx, second.ID); b.WaitReason != "" {
+		t.Fatalf("причина вернулась при исчерпанном бюджете: %q", b.WaitReason)
+	}
+	if n := len(eventsOfType(t, f.st, second.ID, "task.wait")); n != waits {
+		t.Fatalf("task.wait при исчерпанном бюджете: было %d, стало %d", waits, n)
+	}
+	// Бюджет снят, Макс всё ещё занят: причина про агента возвращается.
+	if _, err := f.st.PatchEpic(ctx, other.ID, store.EpicPatch{SetBudget: true}, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := f.st.GetTask(ctx, second.ID); !strings.Contains(b.WaitReason, "нет свободного агента роли «Разработчик»") {
+		t.Fatalf("после снятия бюджета: %q", b.WaitReason)
+	}
+}
+
 func TestTeamAgentModelIsRequired(t *testing.T) {
 	ctx := context.Background()
 	f := newPolicyFixture(t, "")

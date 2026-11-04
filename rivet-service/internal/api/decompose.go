@@ -166,7 +166,14 @@ func (s *Server) decomposeEpic(ctx context.Context, epic domain.Epic) ([]domain.
 	}); err != nil {
 		return nil, err
 	}
-	done := s.startDecomposition(leadAgent, epic)
+	// Занятость Тимлида видна командам всех проектов (team.agent_busy и
+	// team.agent_free): событие освобождения пишется и при обрыве запроса.
+	signalCtx := context.WithoutCancel(ctx)
+	done := s.startDecomposition(leadAgent, epic, func(busy bool) {
+		if _, err := s.St.AppendEvent(signalCtx, store.AgentWorkEvent(leadAgent.ID, leadAgent.Name, busy)); err != nil {
+			slog.Error("событие занятости Тимлида", "agent", leadAgent.ID, "busy", busy, "err", err)
+		}
+	})
 	defer done()
 	failed := func(reason string) {
 		payload := map[string]any{"epic_id": epic.ID, "reason": reason}
@@ -385,17 +392,23 @@ type decomposition struct {
 
 // startDecomposition отмечает агента-Тимлида занятым планом Epic до
 // возврата done. Параллельные декомпозиции считаются по Epic: done снимает
-// только свою.
-func (s *Server) startDecomposition(agent *domain.TeamAgent, epic domain.Epic) (done func()) {
+// только свою. signal(true) вызывается, когда агент начал первую
+// декомпозицию, signal(false), когда закончилась последняя. Сигналы идут
+// по одному в порядке переходов, а чтение команды (decompositionOf) их не
+// ждёт.
+func (s *Server) startDecomposition(agent *domain.TeamAgent, epic domain.Epic, signal func(busy bool)) (done func()) {
 	if agent == nil {
 		return func() {}
 	}
+	s.decompSignalMu.Lock()
+	defer s.decompSignalMu.Unlock()
 	s.decompMu.Lock()
 	if s.decomposing == nil {
 		s.decomposing = map[string]map[string]*decomposition{}
 	}
 	byEpic := s.decomposing[agent.ID]
-	if byEpic == nil {
+	first := byEpic == nil
+	if first {
 		byEpic = map[string]*decomposition{}
 		s.decomposing[agent.ID] = byEpic
 	}
@@ -407,14 +420,23 @@ func (s *Server) startDecomposition(agent *domain.TeamAgent, epic domain.Epic) (
 	s.decompSeq++
 	d.n, d.seq = d.n+1, s.decompSeq
 	s.decompMu.Unlock()
+	if first {
+		signal(true)
+	}
 	return func() {
+		s.decompSignalMu.Lock()
+		defer s.decompSignalMu.Unlock()
 		s.decompMu.Lock()
-		defer s.decompMu.Unlock()
 		if d.n--; d.n <= 0 {
 			delete(byEpic, epic.ID)
 		}
-		if len(byEpic) == 0 {
+		last := len(byEpic) == 0
+		if last {
 			delete(s.decomposing, agent.ID)
+		}
+		s.decompMu.Unlock()
+		if last {
+			signal(false)
 		}
 	}
 }

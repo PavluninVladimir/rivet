@@ -19,6 +19,7 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
+	"github.com/PavluninVladimir/rivet/internal/stream"
 )
 
 // testServer поднимает API поверх изолированной БД (паттерн store/testStore).
@@ -61,7 +62,7 @@ func testServerEngine(t *testing.T) (*store.Store, *httptest.Server, *orchestrat
 	// Оркестратор нужен обработчикам, которые ходят в конвейер (webhook,
 	// merge): в тестах он на fake-хостинге и без отправки runner'ам.
 	engine := orchestrator.New(st, scm.NewFake(), nil, nopSender{}, 90*time.Second)
-	srv := httptest.NewServer((&Server{St: st, Engine: engine}).Handler())
+	srv := httptest.NewServer((&Server{St: st, Engine: engine, Hub: stream.NewHub()}).Handler())
 	t.Cleanup(srv.Close)
 	return st, srv, engine
 }

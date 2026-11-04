@@ -205,14 +205,14 @@ func (s *Store) DeferRun(ctx context.Context, runID int64, taskID string, base, 
 		// откладывания возвращают начало серии.
 		if first {
 			var since time.Time
-			if err := tx.QueryRow(ctx, `UPDATE tasks SET wait_reason=$2, updated_at=now() WHERE id=$1
+			if err := tx.QueryRow(ctx, `UPDATE tasks SET wait_reason=$2, wait_kind='', updated_at=now() WHERE id=$1
 				RETURNING COALESCE(wait_since, now())`, taskID, clipRunes(reason, 300)).Scan(&since); err != nil {
 				return err
 			}
 			_, err := tx.Exec(ctx, `UPDATE task_step_runs SET deferred_since=$2 WHERE id=$1`, runID, since)
 			return err
 		}
-		_, err := tx.Exec(ctx, `UPDATE tasks t SET wait_reason=$2, updated_at=now(),
+		_, err := tx.Exec(ctx, `UPDATE tasks t SET wait_reason=$2, wait_kind='', updated_at=now(),
 			wait_since = COALESCE((SELECT r.deferred_since FROM task_step_runs r WHERE r.id=$3), t.wait_since, now())
 			WHERE t.id=$1`, taskID, clipRunes(reason, 300), runID)
 		return err

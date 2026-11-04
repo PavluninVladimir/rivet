@@ -416,7 +416,17 @@ type TeamWait struct {
 
 // WaitingTeamRuns — ожидающие запуски ролей с командой без причины
 // ожидания у задачи (спека agent-roles «Назначение агенту команды»).
-func (s *Store) WaitingTeamRuns(ctx context.Context) ([]TeamWait, error) {
+// Проекты и Epic'и, исключённые из назначений в этом проходе (бюджет,
+// недоступный движок политик, ожидание зависимостей Epic'а), пропускаются:
+// их задачи стоят не из-за агентов, а свою причину консоль показывает на
+// Epic'е и проекте.
+func (s *Store) WaitingTeamRuns(ctx context.Context, excludedProjects, excludedEpics []string) ([]TeamWait, error) {
+	if excludedProjects == nil {
+		excludedProjects = []string{}
+	}
+	if excludedEpics == nil {
+		excludedEpics = []string{}
+	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT `+runCols+`, ar.title,
 			NOT EXISTS (SELECT 1 FROM team_agents ag WHERE ag.role_id = r.role AND ag.enabled
@@ -424,6 +434,7 @@ func (s *Store) WaitingTeamRuns(ctx context.Context) ([]TeamWait, error) {
 		FROM task_step_runs r
 		JOIN tasks t ON t.id = r.task_id
 		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+			AND e.project_id <> ALL($1::uuid[]) AND e.id <> ALL($2::uuid[])
 		JOIN agent_roles ar ON ar.id = r.role AND ar.enabled AND ar.capability <> ''
 		WHERE r.runner_id IS NULL AND r.verdict IS NULL AND t.wait_reason = '' AND `+agentRunsOnly+`
 		  AND EXISTS (SELECT 1 FROM team_agents ta WHERE ta.role_id = r.role AND ta.enabled)
@@ -439,7 +450,7 @@ func (s *Store) WaitingTeamRuns(ctx context.Context) ([]TeamWait, error) {
 			  AND (r.agent_kind = '' OR x.agent = r.agent_kind)
 			  AND (r.model = '' OR r.model = ANY(x.models))
 			  AND (r.step_kind <> 'prompt' OR 'PROMPT' = ANY(x.stages)))
-		ORDER BY r.id`)
+		ORDER BY r.id`, excludedProjects, excludedEpics)
 	if err != nil {
 		return nil, err
 	}

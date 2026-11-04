@@ -204,7 +204,7 @@ func (s *Store) EnterStep(ctx context.Context, in EnterStep) ([]StepRun, error) 
 			return domain.ErrBadTransition{Entity: "task", From: string(from), To: string(to)}
 		}
 		if _, err := tx.Exec(ctx, `
-			UPDATE tasks SET step_id=$2, step_entry=$3, status=$4, step_gen=$5, wait_reason='', updated_at=now() WHERE id=$1`,
+			UPDATE tasks SET step_id=$2, step_entry=$3, status=$4, step_gen=$5, wait_reason='', wait_kind='', updated_at=now() WHERE id=$1`,
 			in.TaskID, in.Step.ID, in.Entry, to, gen); err != nil {
 			return err
 		}
@@ -710,7 +710,7 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 				return err
 			}
 			if _, err := tx.Exec(ctx, `
-				UPDATE tasks SET status=$2, branch=$3, wait_reason='', updated_at=now() WHERE id=$1 AND status='ready'`,
+				UPDATE tasks SET status=$2, branch=$3, wait_reason='', wait_kind='', updated_at=now() WHERE id=$1 AND status='ready'`,
 				taskID, to, branch); err != nil {
 				return err
 			}
@@ -721,7 +721,7 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 				Payload: withPayload(payload, "status", string(to)),
 			}}
 		} else {
-			if _, err := tx.Exec(ctx, `UPDATE tasks SET wait_reason='', updated_at=now() WHERE id=$1`, taskID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE tasks SET wait_reason='', wait_kind='', updated_at=now() WHERE id=$1`, taskID); err != nil {
 				return err
 			}
 			a.Pending = &PendingAssign{Event: EventInput{
@@ -796,8 +796,44 @@ func (s *Store) WaitingRuns(ctx context.Context) ([]StepRun, error) {
 
 // SetTaskWaitReason фиксирует причину ожидания (пусто — снять).
 func (s *Store) SetTaskWaitReason(ctx context.Context, taskID, reason string) error {
-	_, err := s.Pool.Exec(ctx, `UPDATE tasks SET wait_reason=$2 WHERE id=$1`, taskID, reason)
+	_, err := s.Pool.Exec(ctx, `UPDATE tasks SET wait_reason=$2, wait_kind='' WHERE id=$1`, taskID, reason)
 	return err
+}
+
+// WaitKindTeam — причина ожидания ролей с командой (markTeamWaiting).
+const WaitKindTeam = "team"
+
+// SetTaskTeamWait фиксирует причину ожидания агента команды: её снимает
+// ClearTeamWaits, когда задача стоит из-за бюджета или зависимостей Epic'а.
+func (s *Store) SetTaskTeamWait(ctx context.Context, taskID, reason string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE tasks SET wait_reason=$2, wait_kind=$3 WHERE id=$1`, taskID, reason, WaitKindTeam)
+	return err
+}
+
+// ClearTeamWaits снимает причину ожидания агента команды у задач проектов
+// и Epic'ов, исключённых из назначений (бюджет, зависимости Epic'а): они
+// стоят не из-за агентов. Прочие причины не трогаются. Возвращает задачи,
+// у которых причина снята.
+func (s *Store) ClearTeamWaits(ctx context.Context, excludedProjects, excludedEpics []string) ([]string, error) {
+	if len(excludedProjects) == 0 && len(excludedEpics) == 0 {
+		return nil, nil
+	}
+	if excludedProjects == nil {
+		excludedProjects = []string{}
+	}
+	if excludedEpics == nil {
+		excludedEpics = []string{}
+	}
+	rows, err := s.Pool.Query(ctx, `
+		UPDATE tasks t SET wait_reason='', wait_kind=''
+		FROM epics e
+		WHERE e.id = t.epic_id AND t.wait_kind = $3
+		  AND (e.project_id = ANY($1::uuid[]) OR e.id = ANY($2::uuid[]))
+		RETURNING t.id::text`, excludedProjects, excludedEpics, WaitKindTeam)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // RejectStep фиксирует отказ шага (замечания review, провал проверок):
