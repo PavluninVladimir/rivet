@@ -141,6 +141,11 @@ func run(ctx context.Context, cfg config.Config) error {
 	if err := apiSrv.ReloadPlanner(ctx); err != nil {
 		return err
 	}
+	// Анализы интервью и декомпозиции бэклога, прерванные прошлым
+	// остановом, завершаются failed с причиной (add-product-discovery).
+	if err := apiSrv.RecoverDiscovery(ctx); err != nil {
+		return fmt.Errorf("восстановление исследования: %w", err)
+	}
 	root := http.NewServeMux()
 	root.Handle("/api/", apiSrv.Handler())
 	root.Handle("/", webui.Handler())

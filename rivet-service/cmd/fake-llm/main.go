@@ -40,6 +40,19 @@ func main() {
 			} `json:"messages"`
 		}
 		_ = json.Unmarshal(raw, &in)
+		reply := func(content string) {
+			out := map[string]any{"object": "chat.completion", "model": in.Model,
+				"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": content}}}}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(out)
+		}
+		// Задания Аналитика (add-product-discovery) узнаются по маркеру.
+		for _, msg := range in.Messages {
+			if content, ok := analystReply(msg.Content); ok {
+				reply(content)
+				return
+			}
+		}
 		// Epic виден в промпте строкой «# Epic: <название>».
 		title := "Epic"
 		for _, msg := range in.Messages {
@@ -56,10 +69,7 @@ func main() {
 				"criteria": []string{"result.txt содержит итог"}, "deps": []int{0}, "capabilities": []string{"coding"}, "estimate": 2},
 		}
 		content, _ := json.Marshal(plan)
-		out := map[string]any{"object": "chat.completion", "model": in.Model,
-			"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": string(content)}}}}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(out)
+		reply(string(content))
 	})
 	for _, p := range []string{"/models", "/v1/models"} {
 		mux.HandleFunc("GET "+p, models)

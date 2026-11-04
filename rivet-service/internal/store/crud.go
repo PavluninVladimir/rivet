@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -127,6 +128,91 @@ type NewTask struct {
 	Criteria     []domain.Criterion
 	Deps         []string // id задач-зависимостей
 	AttemptLimit int
+}
+
+// PlanTask — задача плана декомпозиции: DepIdx — индексы задач-зависимостей
+// в том же плане (план уже в топологическом порядке).
+type PlanTask struct {
+	NewTask
+	DepIdx []int
+}
+
+// CreatePlan создаёт план Epic'а одной транзакцией (add-product-discovery):
+// строка Epic'а блокируется, план создаётся только у Epic'а в planned без
+// задач. Две одновременные декомпозиции не дают двух планов, а сбой
+// посередине не оставляет половину плана.
+func (s *Store) CreatePlan(ctx context.Context, epicID string, plan []PlanTask) ([]domain.Task, error) {
+	epic, err := s.GetEpic(ctx, epicID)
+	if err != nil {
+		return nil, err
+	}
+	eff, err := s.EffectivePolicy(ctx, epic.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.Task, 0, len(plan))
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		out = out[:0]
+		var status domain.EpicStatus
+		if err := tx.QueryRow(ctx, `SELECT status FROM epics WHERE id=$1 FOR NO KEY UPDATE`, epicID).Scan(&status); err != nil {
+			return nf(err)
+		}
+		if status != domain.EpicPlanned {
+			return domain.ErrBadTransition{Entity: "epic", From: string(status), To: "decompose"}
+		}
+		var n int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE epic_id=$1`, epicID).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			return ErrPlanExists
+		}
+		ids := make([]string, len(plan))
+		for i, pt := range plan {
+			in := pt.NewTask
+			if in.Estimate <= 0 {
+				in.Estimate = 1
+			}
+			if in.AttemptLimit <= 0 {
+				in.AttemptLimit = eff.Presets.AttemptLimit
+			}
+			if len(in.Capabilities) == 0 {
+				in.Capabilities = []string{"coding"}
+			}
+			crit, _ := json.Marshal(in.Criteria)
+			var t domain.Task
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO tasks (epic_id, title, description, estimate, capabilities, criteria, attempt_limit)
+				VALUES ($1,$2,$3,$4,$5,$6,$7)
+				RETURNING id, num, created_at, updated_at`,
+				epicID, in.Title, in.Description, in.Estimate, in.Capabilities, crit, in.AttemptLimit).
+				Scan(&t.ID, &t.Num, &t.Created, &t.Updated); err != nil {
+				return err
+			}
+			deps := make([]string, 0, len(pt.DepIdx))
+			for _, d := range pt.DepIdx {
+				if d < 0 || d >= i {
+					return fmt.Errorf("%w: зависимость задачи %d вне порядка плана", ErrInvalid, i)
+				}
+				deps = append(deps, ids[d])
+				if _, err := tx.Exec(ctx, `INSERT INTO task_deps (task_id, dep_id) VALUES ($1,$2)`, t.ID, ids[d]); err != nil {
+					return err
+				}
+			}
+			ids[i] = t.ID
+			t.EpicID, t.Title, t.Description = epicID, in.Title, in.Description
+			t.Status, t.Estimate, t.Capabilities = domain.TaskQueued, in.Estimate, in.Capabilities
+			t.Criteria, t.Deps, t.AttemptLimit = in.Criteria, deps, in.AttemptLimit
+			out = append(out, t)
+		}
+		// Строка утверждённого бэклога получает «план готов» в той же
+		// транзакции: рестарт после коммита не оставит её failed.
+		return markEpicDecompose(ctx, tx, epicID, "done", "")
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // CreateTask создаёт задачу. Лимит попыток, если не задан явно, берётся из
@@ -661,16 +747,19 @@ type UsageInput struct {
 	TokensOut *int64
 	CostUSD   *float64
 	DurationS int
+	// Role — роль запроса control plane (analyst) без сессии стадии; пусто
+	// у стадий runner'ов, их роль берётся из запуска шага сессии.
+	Role string
 }
 
 func (s *Store) RecordUsage(ctx context.Context, u UsageInput) error {
 	_, err := s.Pool.Exec(ctx, `
 		INSERT INTO usage_records (source_msg_id, project_id, epic_id, task_id, runner_id, model,
-			tokens_in, tokens_out, cost_usd, duration_s, session_id)
-		VALUES (NULLIF($1,''),$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,NULLIF($5,''),$6,$7,$8,$9,$10,NULLIF($11,'')::uuid)
+			tokens_in, tokens_out, cost_usd, duration_s, session_id, role)
+		VALUES (NULLIF($1,''),$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,NULLIF($5,''),$6,$7,$8,$9,$10,NULLIF($11,'')::uuid,NULLIF($12,''))
 		ON CONFLICT (source_msg_id) DO NOTHING`,
 		u.SourceMsgID, u.ProjectID, u.EpicID, u.TaskID, u.RunnerID, u.Model,
-		u.TokensIn, u.TokensOut, u.CostUSD, u.DurationS, u.SessionID)
+		u.TokensIn, u.TokensOut, u.CostUSD, u.DurationS, u.SessionID, u.Role)
 	return err
 }
 

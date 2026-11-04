@@ -69,6 +69,12 @@ type Engine struct {
 	// epic.budget_exceeded: раз на факт превышения, смена бюджета — новый
 	// факт; повтор после рестарта допустим (спека orchestration «Бюджет Epic»).
 	epicBudgetNotified map[string]bool
+	// depsWaiting — Epic'и, о чьём ожидании зависимостей объявлено событием
+	// (add-product-discovery): снятие ожидания объявляется только им, в том
+	// числе после паузы. depsInit — базовое множество снято: после рестарта
+	// оно восстанавливается без событий.
+	depsWaiting map[string]bool
+	depsInit    bool
 	// policySyncedAt — когда последний раз читалась политика проектов из
 	// репозитория (git-провайдер); policyBroken — по каким проектам и с
 	// какой причиной уже написано, что файл политики сломан (событие раз
@@ -172,6 +178,14 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("epic budget: %w", err)
 	}
+	// Зависимости Epic'ов (спека orchestration «Ожидание зависимостей
+	// Epic'а»): задачи Epic'а с незавершёнными зависимостями не назначаются,
+	// сам Epic остаётся running.
+	waitingEpics, err := e.depsExclusions(ctx, epics)
+	if err != nil {
+		return fmt.Errorf("epic deps: %w", err)
+	}
+	excludedEpics = append(excludedEpics, waitingEpics...)
 	// Ready-задачи входят на шаг процесса, ожидающие запуски участников
 	// назначаются runner'ам по агенту, модели и capabilities.
 	if err := e.enterReady(ctx, excluded, excludedEpics); err != nil {

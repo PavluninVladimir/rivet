@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PavluninVladimir/rivet/internal/analyst"
 	"github.com/PavluninVladimir/rivet/internal/blob"
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
@@ -40,10 +41,16 @@ type Server struct {
 	decompMu    sync.Mutex
 	decomposing map[string]map[string]*decomposition
 	decompSeq   int64
+	// decompEpics — Epic'и, чья декомпозиция идёт сейчас: вторая
+	// декомпозиция того же Epic'а отклоняется (add-product-discovery).
+	decompEpics map[string]bool
 	// Planner — горячо заменяемый планировщик декомпозиции; пересобирается
 	// ReloadPlanner из базы либо EnvPlanner (design add-operations-management).
 	Planner    *planner.Holder
 	EnvPlanner EnvPlanner
+	// Analyst — исполнитель фонового анализа интервью (add-product-discovery);
+	// nil — пределы по умолчанию.
+	Analyst *analyst.Runner
 	// Version, ProtocolVersion, StartedAt — для состояния установки.
 	Version         string
 	ProtocolVersion string
@@ -138,6 +145,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/epics/{id}", s.patchEpic)
 	mux.HandleFunc("POST /api/v1/epics/{id}/tasks", s.addTask)
 	mux.HandleFunc("POST /api/v1/epics/{id}/decompose", s.decompose)
+	mux.HandleFunc("PUT /api/v1/epics/{id}/deps", s.putEpicDeps)
+	mux.HandleFunc("GET /api/v1/projects/{id}/discovery", s.getDiscovery)
+	mux.HandleFunc("POST /api/v1/projects/{id}/discovery/interviews", s.addInterview)
+	mux.HandleFunc("GET /api/v1/projects/{id}/discovery/interviews/{iid}", s.getInterview)
+	mux.HandleFunc("DELETE /api/v1/projects/{id}/discovery/interviews/{iid}", s.deleteInterview)
+	mux.HandleFunc("POST /api/v1/projects/{id}/discovery/analyses", s.startAnalysis)
+	mux.HandleFunc("GET /api/v1/projects/{id}/discovery/analyses/{rid}", s.getAnalysis)
+	mux.HandleFunc("PUT /api/v1/projects/{id}/discovery/analyses/{rid}/backlog", s.putBacklog)
+	mux.HandleFunc("POST /api/v1/projects/{id}/discovery/analyses/{rid}/approve", s.approveBacklog)
 	mux.HandleFunc("POST /api/v1/epics/{id}/start", s.epicAction(domain.EpicRunning, "Epic запущен"))
 	mux.HandleFunc("POST /api/v1/epics/{id}/pause", s.epicAction(domain.EpicPaused, "Epic приостановлен"))
 	mux.HandleFunc("POST /api/v1/epics/{id}/resume", s.epicAction(domain.EpicRunning, "Epic возобновлён"))
@@ -525,6 +541,11 @@ func (s *Server) listEpics(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Приоритет и ожидание зависимостей в списке (add-product-discovery).
+	if err := s.St.EnrichEpics(r.Context(), out); err != nil {
+		writeErr(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -545,7 +566,18 @@ func (s *Server) createEpic(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, e)
+	writeJSON(w, http.StatusCreated, s.enrichedEpic(r, e))
+}
+
+// enrichedEpic — Epic с полями исследования для ответа (одна форма DTO во
+// всех ответах). Ошибка обогащения не ломает ответ: поля остаются пустыми.
+func (s *Server) enrichedEpic(r *http.Request, e domain.Epic) domain.Epic {
+	list := []domain.Epic{e}
+	if err := s.St.EnrichEpics(r.Context(), list); err != nil {
+		e.DependsOn, e.WaitingFor = []string{}, []domain.EpicRef{}
+		return e
+	}
+	return list[0]
 }
 
 type epicView struct {
@@ -627,7 +659,7 @@ func (s *Server) patchEpic(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, epic)
+	writeJSON(w, http.StatusOK, s.enrichedEpic(r, epic))
 }
 
 func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
@@ -636,6 +668,13 @@ func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Приоритет, зависимости и обоснование из исследования.
+	enriched := []domain.Epic{e}
+	if err := s.St.EnrichEpics(r.Context(), enriched); err != nil {
+		writeErr(w, err)
+		return
+	}
+	e = enriched[0]
 	tasks, err := s.St.ListEpicTasks(r.Context(), e.ID)
 	if err != nil {
 		writeErr(w, err)
