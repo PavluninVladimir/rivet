@@ -572,7 +572,7 @@ func TestEpicBudgetPausesAssignments(t *testing.T) {
 	ctx := context.Background()
 	f := newPolicyFixture(t, "")
 	budget := int64(100)
-	if _, err := f.st.SetEpicBudget(ctx, f.epic.ID, &budget); err != nil {
+	if _, err := f.st.PatchEpic(ctx, f.epic.ID, store.EpicPatch{SetBudget: true, Budget: &budget}, "owner"); err != nil {
 		t.Fatal(err)
 	}
 	in := int64(150)
@@ -594,7 +594,7 @@ func TestEpicBudgetPausesAssignments(t *testing.T) {
 	}
 	// Человек поднял бюджет — назначение возобновляется, событий больше нет.
 	bigger := int64(10000)
-	if _, err := f.st.SetEpicBudget(ctx, f.epic.ID, &bigger); err != nil {
+	if _, err := f.st.PatchEpic(ctx, f.epic.ID, store.EpicPatch{SetBudget: true, Budget: &bigger}, "owner"); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.e.Tick(ctx); err != nil {

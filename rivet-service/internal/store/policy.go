@@ -159,6 +159,11 @@ func (s *Store) SaveInstallationPolicy(ctx context.Context, p policy.Presets, lo
 		return PolicyVersion{}, &policy.ProcessError{Field: "role_models",
 			Msg: "переопределение моделей ролей задаётся в политике проекта; у установки модели живут в шаблонах ролей"}
 	}
+	// Плановый бюджет месяца — свойство проекта (add-project-lead-view).
+	if p.MonthlyBudgetUSD != nil {
+		return PolicyVersion{}, &policy.ProcessError{Field: "monthly_budget_usd",
+			Msg: "плановый бюджет месяца задаётся в политике проекта"}
+	}
 	return s.savePolicyVersion(ctx, PolicyScopeInstallation, "", p, login)
 }
 

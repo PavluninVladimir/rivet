@@ -96,10 +96,10 @@ func TestEpicBudget(t *testing.T) {
 	epic, _ := s.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := s.CreateTask(ctx, epic.ID, NewTask{Title: "A"})
 
-	if _, err := s.SetEpicBudget(ctx, epic.ID, i64(0)); !errors.Is(err, ErrInvalid) {
+	if _, err := s.PatchEpic(ctx, epic.ID, EpicPatch{SetBudget: true, Budget: i64(0)}, "owner-eb"); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("бюджет 0 должен отклоняться: %v", err)
 	}
-	if _, err := s.SetEpicBudget(ctx, epic.ID, i64(1000)); err != nil {
+	if _, err := s.PatchEpic(ctx, epic.ID, EpicPatch{SetBudget: true, Budget: i64(1000)}, "owner-eb"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.GetEpic(ctx, epic.ID)
@@ -135,14 +135,14 @@ func TestEpicBudget(t *testing.T) {
 		t.Fatalf("used: %d", used)
 	}
 	// Человек поднял бюджет — исключение снимается.
-	if _, err := s.SetEpicBudget(ctx, epic.ID, i64(5000)); err != nil {
+	if _, err := s.PatchEpic(ctx, epic.ID, EpicPatch{SetBudget: true, Budget: i64(5000)}, "owner-eb"); err != nil {
 		t.Fatal(err)
 	}
 	if ex, _ = s.ExceededEpicBudgets(ctx); len(ex) != 0 {
 		t.Fatalf("после поднятия бюджета: %+v", ex)
 	}
 	// Снятие бюджета.
-	if _, err := s.SetEpicBudget(ctx, epic.ID, nil); err != nil {
+	if _, err := s.PatchEpic(ctx, epic.ID, EpicPatch{SetBudget: true, Budget: nil}, "owner-eb"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := s.GetEpic(ctx, epic.ID); got.TokenBudget != nil {

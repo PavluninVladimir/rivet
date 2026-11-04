@@ -370,23 +370,6 @@ func (s *Store) EpicCostEstimate(ctx context.Context, epicID string) (CostEstima
 	return est, nil
 }
 
-// SetEpicBudget — бюджет Epic в токенах (nil снимает); меняет владелец
-// проекта (проверяет API), возобновление назначений — следующим проходом
-// планировщика.
-func (s *Store) SetEpicBudget(ctx context.Context, epicID string, budget *int64) (domain.Epic, error) {
-	if budget != nil && *budget < 1 {
-		return domain.Epic{}, fmt.Errorf("%w: бюджет должен быть не меньше 1 токена", ErrInvalid)
-	}
-	tag, err := s.Pool.Exec(ctx, `UPDATE epics SET token_budget=$2 WHERE id=$1`, epicID, budget)
-	if err != nil {
-		return domain.Epic{}, err
-	}
-	if tag.RowsAffected() == 0 {
-		return domain.Epic{}, ErrNotFound
-	}
-	return s.GetEpic(ctx, epicID)
-}
-
 // EpicTokensUsed — учтённые токены задач Epic (NULL не считается нулём).
 func (s *Store) EpicTokensUsed(ctx context.Context, epicID string) (int64, error) {
 	var used int64
