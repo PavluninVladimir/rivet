@@ -118,6 +118,20 @@ func recvAssign(t *testing.T, s pb.RunnerService_ChannelClient) *pb.Assignment {
 	}
 }
 
+// recvAck ждёт ack на сообщение msgID (назначения и прочее пропускаются).
+func recvAck(t *testing.T, s pb.RunnerService_ChannelClient, msgID string) {
+	t.Helper()
+	for {
+		msg, err := s.Recv()
+		if err != nil {
+			t.Fatalf("канал: %v", err)
+		}
+		if a := msg.GetAck(); a != nil && a.AckedMsgId == msgID {
+			return
+		}
+	}
+}
+
 // SIGTERM посреди CODING: прерванная стадия итога не шлёт, новый процесс
 // регистрируется без неё в pending_sessions, и стадия назначается заново
 // без расхода попытки (ревью add-agent-roles, круг 4, P2-1).
@@ -157,6 +171,14 @@ func TestStaleRunnerHeartbeatClosesChannel(t *testing.T) {
 	ctx := context.Background()
 	f.register(t, "boot-1", nil)
 	s1 := f.open(t)
+	// Registry видит канал раньше, чем RunnerAttached снимает отметку offline
+	// в базе. Ack на первый heartbeat гарантирует, что RunnerAttached уже
+	// прошёл: сервер обрабатывает сообщения канала по очереди. Иначе он мог
+	// вернуть runner в строй после MarkStaleRunnersOffline.
+	if err := s1.Send(&pb.RunnerMsg{MsgId: "hb-0", Kind: &pb.RunnerMsg_Heartbeat{Heartbeat: &pb.Heartbeat{}}}); err != nil {
+		t.Fatal(err)
+	}
+	recvAck(t, s1, "hb-0")
 	if _, _, err := f.st.MarkStaleRunnersOffline(ctx, -60); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +200,7 @@ func TestStaleRunnerHeartbeatClosesChannel(t *testing.T) {
 			t.Fatal("канал потерянного runner'а закрыт без ошибки")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("канал потерянного runner'а закрыт")
+		t.Fatal("канал потерянного runner'а не закрылся за 5 с")
 	}
 	if r, _ := f.st.GetRunner(ctx, "r1"); r.Status != domain.RunnerOffline {
 		t.Fatalf("heartbeat не снимает offline после таймаута: %s", r.Status)
