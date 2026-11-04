@@ -228,10 +228,17 @@ func (s *Server) hostingMerge(w http.ResponseWriter, r *http.Request,
 	project domain.Project, task domain.Task, ev hostingEvent) {
 
 	if task.Status == domain.TaskDone {
+		// Задача завершилась процессом без шага merge, а PR смержили позже:
+		// точка merge ставится сейчас, иначе изменение не войдёт ни в один
+		// релиз.
+		if err := s.St.MarkMerged(r.Context(), task.ID); err != nil {
+			writeErr(w, err)
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "already done"})
 		return
 	}
-	if err := s.St.CompleteTask(r.Context(), task.ID,
+	if err := s.St.CompleteMergedTask(r.Context(), task.ID,
 		store.EventInput{ActorKind: domain.ActorUser, ActorID: ev.Actor,
 			Type: "task.status", Text: "PR смержен вручную на хостинге",
 			Payload: map[string]any{"status": "done", "pr": ev.URL}}); err != nil {

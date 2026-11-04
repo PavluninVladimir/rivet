@@ -34,7 +34,7 @@ func TestRolesAndTeamAPI(t *testing.T) {
 			UpdatedAt    string `json:"updated_at"`
 		} `json:"roles"`
 	}
-	if err := json.Unmarshal(body, &roles); err != nil || len(roles.Roles) != 6 || roles.Roles[0].ID != "analyst" || !roles.Roles[0].ControlPlane {
+	if err := json.Unmarshal(body, &roles); err != nil || len(roles.Roles) != 8 || roles.Roles[0].ID != "analyst" || !roles.Roles[0].ControlPlane {
 		t.Fatalf("шаблоны: %s", body)
 	}
 	if roles.Roles[3].ID != "developer" || roles.Roles[3].Agents != 2 {

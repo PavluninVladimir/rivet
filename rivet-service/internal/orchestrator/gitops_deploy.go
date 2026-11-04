@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/scm"
@@ -137,12 +138,14 @@ func replaceValue(line, key, version string) string {
 // gitopsSynced — окружение отвечает публикуемой версией: факт, а не
 // таймер. Проверяется тем же адресом, что и остальные Verify без runner'а,
 // но 2xx недостаточно: старая версия отвечает не хуже новой.
-func gitopsSynced(ctx context.Context, rawURL, version string) (bool, error) {
+func (e *Engine) gitopsSynced(ctx context.Context, rawURL, version string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return false, err
 	}
-	resp, err := verifyClient.Do(req)
+	resp, err := e.urlHTTP().Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -236,7 +239,13 @@ func (e *Engine) pollGitOps(ctx context.Context, a store.DeployAssignment) error
 			}
 		}
 	}
-	synced, err := gitopsSynced(ctx, a.Env.Config.VerifyURL, version)
+	synced, err := e.gitopsSynced(ctx, a.Env.Config.VerifyURL, version)
+	if isPrivateAddress(err) {
+		// Адрес закрыт политикой установки: ждать watchdog'а бессмысленно.
+		// Провал инфраструктуры — эскалация с причиной, без отката и
+		// инцидента.
+		return e.failDeployInfra(ctx, a.Deployment.ID, "", "verify: "+err.Error())
+	}
 	if err != nil {
 		// Разовая ошибка опроса — не провал: окружение может ещё
 		// перезапускаться, а дедлайн держит watchdog.

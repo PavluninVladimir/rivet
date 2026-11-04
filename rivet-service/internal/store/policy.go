@@ -642,12 +642,35 @@ func (s *Store) AutoEnvironmentNames(ctx context.Context, projectID string) ([]s
 	return collectIDs(rows)
 }
 
-// CompleteTask — merge выполнен: done, runner свободен, открытые эскалации
-// задачи закрыты (POLICY_CHANGE после подтверждения человеком).
+// CompleteTask — задача выполнена без merge (процесс без шага merge):
+// done, runner свободен, открытые эскалации задачи закрыты.
 func (s *Store) CompleteTask(ctx context.Context, taskID string, ev EventInput) error {
+	return s.completeTask(ctx, taskID, ev, false)
+}
+
+// CompleteMergedTask — merge выполнен (кнопкой, авто-merge или на хостинге):
+// то же, что CompleteTask, и точка merge, по которой считается состав
+// релиза (add-sdlc-cycle).
+func (s *Store) CompleteMergedTask(ctx context.Context, taskID string, ev EventInput) error {
+	return s.completeTask(ctx, taskID, ev, true)
+}
+
+// MarkMerged — точка merge у задачи, завершённой без неё (PR смержен на
+// хостинге после завершения задачи процессом без шага merge).
+func (s *Store) MarkMerged(ctx context.Context, taskID string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE tasks SET merged_at=now() WHERE id=$1 AND status='done' AND merged_at IS NULL`, taskID)
+	return err
+}
+
+func (s *Store) completeTask(ctx context.Context, taskID string, ev EventInput, merged bool) error {
 	return s.TransitionTask(ctx, taskID, domain.TaskDone, ev, func(tx pgx.Tx) error {
 		if err := freeRunner(ctx, tx, taskID); err != nil {
 			return err
+		}
+		if merged {
+			if _, err := tx.Exec(ctx, `UPDATE tasks SET merged_at=now() WHERE id=$1`, taskID); err != nil {
+				return err
+			}
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE attention SET status='resolved', resolved_at=now()

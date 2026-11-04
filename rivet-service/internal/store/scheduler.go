@@ -67,11 +67,11 @@ func ValidateDAG(deps map[string][]string) error {
 //   - все задачи терминальны → Epic done.
 func (s *Store) RecomputeEpic(ctx context.Context, epicID string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		var projectID string
+		var projectID, epicKind string
 		var epicStatus domain.EpicStatus
 		if err := tx.QueryRow(ctx,
-			`SELECT project_id, status FROM epics WHERE id=$1 FOR UPDATE`, epicID).
-			Scan(&projectID, &epicStatus); err != nil {
+			`SELECT project_id, status, kind FROM epics WHERE id=$1 FOR UPDATE`, epicID).
+			Scan(&projectID, &epicStatus, &epicKind); err != nil {
 			return err
 		}
 		if epicStatus != domain.EpicRunning {
@@ -211,7 +211,8 @@ func (s *Store) RecomputeEpic(ctx context.Context, epicID string) error {
 			epicID).Scan(&remaining); err != nil {
 			return err
 		}
-		if remaining == 0 {
+		// Epic «Сопровождение» постоянный: новые баги приходят в тот же Epic.
+		if remaining == 0 && epicKind != domain.EpicMaintenance {
 			if _, err := tx.Exec(ctx, `UPDATE epics SET status='done' WHERE id=$1`, epicID); err != nil {
 				return err
 			}
@@ -514,6 +515,22 @@ func endOpenSessions(ctx context.Context, tx pgx.Tx, taskID string) error {
 // задача возвращается в планирование, эскалация закрывается.
 func (s *Store) ResolveTask(ctx context.Context, taskID, answer, userID string, cancel bool) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		// Отмена задачи-бага меняет её инцидент: блокировки идут в том же
+		// порядке, что у решений сопровождения (advisory lock проекта →
+		// инцидент → задача), иначе возможен взаимный дедлок.
+		if cancel {
+			var pid string
+			if err := tx.QueryRow(ctx, `SELECT e.project_id::text FROM tasks t JOIN epics e ON e.id=t.epic_id WHERE t.id=$1`,
+				taskID).Scan(&pid); err != nil {
+				return err
+			}
+			if err := lockProjectOps(ctx, tx, pid); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `SELECT 1 FROM incidents WHERE bug_task_id=$1 FOR UPDATE`, taskID); err != nil {
+				return err
+			}
+		}
 		var from domain.TaskStatus
 		var epicID, projectID string
 		if err := tx.QueryRow(ctx, `
@@ -533,6 +550,11 @@ func (s *Store) ResolveTask(ctx context.Context, taskID, answer, userID string, 
 			return err
 		}
 		if cancel {
+			// Задача-баг, отменённая человеком, автоматически не
+			// пересоздаётся: инцидент ждёт решения (add-sdlc-cycle).
+			if err := bugCancelledByHumanTx(ctx, tx, taskID, userID); err != nil {
+				return err
+			}
 			// Отмена может прилететь и в выполняющуюся задачу: освобождаем
 			// её runner'ов (исполнителя и ревьюера), иначе они зависнут занятыми.
 			if err := freeRunner(ctx, tx, taskID); err != nil {

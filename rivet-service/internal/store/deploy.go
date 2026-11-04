@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/ops"
 )
 
 // Окружения публикации и деплой-конвейер (спека backend/deployment,
@@ -193,14 +195,15 @@ func (s *Store) ListDeployments(ctx context.Context, envID string, limit int) ([
 }
 
 // EnqueueDeployment ставит публикацию окружения в очередь. Уже стоящая
-// queued-публикация коалесцируется: обновляются только version и initiator
-// (спека deployment «Режимы запуска»). Возвращает актуальную queued-запись.
+// queued-публикация коалесцируется: обновляются version, initiator и момент
+// версии version_at, по которому считается состав релиза (спека deployment
+// «Режимы запуска»). Возвращает актуальную queued-запись.
 func (s *Store) EnqueueDeployment(ctx context.Context, envID, version, initiator string) (domain.Deployment, error) {
 	d, err := scanDeployment(s.Pool.QueryRow(ctx, `
 		INSERT INTO deployments (env_id, version, initiator)
 		VALUES ($1,$2,$3)
 		ON CONFLICT (env_id) WHERE status='queued'
-		DO UPDATE SET version=EXCLUDED.version, initiator=EXCLUDED.initiator
+		DO UPDATE SET version=EXCLUDED.version, initiator=EXCLUDED.initiator, version_at=now()
 		RETURNING `+depCols, envID, version, initiator))
 	return d, err
 }
@@ -463,7 +466,12 @@ func (s *Store) CompleteDeployment(ctx context.Context, depID, runnerID string) 
 			Payload: map[string]any{"environment_id": envID, "deployment_id": depID,
 				"status": "done", "version": version},
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		// Релиз окружения с составом по времени merge и переходы его
+		// инцидентов — в той же транзакции (add-sdlc-cycle).
+		return createReleaseTx(ctx, tx, depID)
 	})
 	return claimed, err
 }
@@ -472,7 +480,33 @@ func (s *Store) CompleteDeployment(ctx context.Context, depID, runnerID string) 
 // пауза автопубликаций, эскалация DEPLOY_FAILED, событие, освобождение
 // runner'а. Частичный сбой откатывает всё (см. CompleteDeployment).
 func (s *Store) FailDeployment(ctx context.Context, depID, runnerID, status, detail string) (bool, error) {
+	claimed, _, err := s.FailDeploymentIncident(ctx, depID, runnerID, status, detail, nil)
+	return claimed, err
+}
+
+// ReleaseFailure — провал публикации для инцидента сопровождения: этап и
+// полный замаскированный лог (отпечаток считается по нему, доказательства
+// обрезаются в store).
+type ReleaseFailure struct {
+	Stage string
+	Log   string
+}
+
+// FailDeploymentIncident — FailDeployment и инцидент с источником release
+// одной транзакцией (rf nil — без инцидента: потеря runner'а, таймаут).
+// Сбой между провалом и инцидентом больше не теряет инцидент.
+func (s *Store) FailDeploymentIncident(ctx context.Context, depID, runnerID, status, detail string, rf *ReleaseFailure) (bool, *FailureResult, error) {
 	claimed := false
+	var res *FailureResult
+	// Лимит попыток бага читается до транзакции, но его сбой не прерывает
+	// провал: пауза и эскалация от сопровождения не зависят.
+	limit := 0
+	if rf != nil {
+		var envID string
+		if err := s.Pool.QueryRow(ctx, `SELECT env_id::text FROM deployments WHERE id=$1`, depID).Scan(&envID); err == nil {
+			limit = s.bugAttemptLimitOrDefault(ctx, envID)
+		}
+	}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var err error
 		if claimed, err = finishDeploymentTx(ctx, tx, depID, runnerID, status, detail); err != nil || !claimed {
@@ -505,9 +539,34 @@ func (s *Store) FailDeployment(ctx context.Context, depID, runnerID, status, det
 			Payload: map[string]any{"environment_id": envID, "deployment_id": depID,
 				"status": status, "version": version},
 		})
-		return err
+		if err != nil || rf == nil {
+			return err
+		}
+		// Сбой сопровождения (политика проекта, Epic «Сопровождение») не
+		// откатывает паузу и эскалацию: инцидент пишется в savepoint, а при
+		// ошибке публикация помечается, и тик повторит запись.
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		out, rerr := recordFailureTx(ctx, sp, FailureInput{EnvID: envID, Source: ops.SourceRelease, Output: rf.Log,
+			Stage: rf.Stage, DeploymentID: depID, ConsecutiveFail: 1}, limit)
+		if rerr != nil {
+			_ = sp.Rollback(ctx)
+			slog.Error("инцидент провала публикации не записан, повторит тик", "deployment", depID, "err", rerr)
+			_, err := tx.Exec(ctx, `UPDATE deployments SET incident_pending=true WHERE id=$1`, depID)
+			return err
+		}
+		if err := sp.Commit(ctx); err != nil {
+			return err
+		}
+		res = &out
+		return nil
 	})
-	return claimed, err
+	if err != nil {
+		return false, nil, err
+	}
+	return claimed, res, nil
 }
 
 // TimedOutDeployments — активные публикации старше дедлайна (watchdog):

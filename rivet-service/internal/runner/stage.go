@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
@@ -672,10 +673,17 @@ func tail(s string, n int) string {
 	if n <= 0 {
 		return ""
 	}
+	// Строковые поля protobuf обязаны быть UTF-8: невалидный байт рвёт
+	// поток runner'а целиком. Хвост режется по границе руны.
+	s = strings.ToValidUTF8(s, "\uFFFD")
 	if len(s) <= n {
 		return s
 	}
-	return "…" + s[len(s)-n:]
+	cut := len(s) - n
+	for cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut++
+	}
+	return "…" + s[cut:]
 }
 
 // guardResults — итог стадии (StageResult, Blocked), отменённой не control

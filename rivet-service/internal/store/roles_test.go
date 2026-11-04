@@ -28,7 +28,7 @@ func TestRolesCatalog(t *testing.T) {
 			t.Fatalf("встроенная роль %s: %+v", r.ID, r)
 		}
 	}
-	if strings.Join(ids, ",") != "analyst,architect,lead,developer,tester,reviewer" {
+	if strings.Join(ids, ",") != "analyst,architect,lead,developer,tester,reviewer,devops,sre" {
 		t.Fatalf("порядок встроенных ролей: %v", ids)
 	}
 
@@ -352,7 +352,7 @@ func TestTeamAgents(t *testing.T) {
 	for _, a := range team {
 		names = append(names, a.RoleID+":"+a.Name)
 	}
-	if strings.Join(names, ",") != "analyst:Вера,architect:Ада,lead:Тимур,developer:Макс,developer:Ева,tester:Лев,reviewer:Ирина" {
+	if strings.Join(names, ",") != "analyst:Вера,architect:Ада,lead:Тимур,developer:Макс,developer:Ева,tester:Лев,reviewer:Ирина,devops:Дина,sre:Глеб" {
 		t.Fatalf("команда по умолчанию: %v", names)
 	}
 	if _, err := s.Pool.Exec(ctx, `

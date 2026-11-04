@@ -518,7 +518,7 @@ func (s *Store) ReadyToEnter(ctx context.Context, excludedProjects, excludedEpic
 			AND e.project_id <> ALL($1::uuid[]) AND e.id <> ALL($2::uuid[])
 		WHERE t.status='ready'
 		  AND NOT EXISTS (SELECT 1 FROM task_step_runs r WHERE r.task_id=t.id AND r.verdict IS NULL)
-		ORDER BY t.num`, excludedProjects, excludedEpics)
+		ORDER BY (t.kind = 'bug') DESC, t.num`, excludedProjects, excludedEpics)
 	if err != nil {
 		return nil, err
 	}
@@ -653,7 +653,7 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 			  AND t.status IN ('ready','running','fixing','testing','review')
 			  AND r.id <> ALL($4::bigint[])
 			  AND (r.not_before IS NULL OR r.not_before <= now())
-			ORDER BY t.num, r.id
+			ORDER BY (t.kind = 'bug') DESC, t.num, r.id
 			FOR UPDATE OF t, r SKIP LOCKED
 			LIMIT 1`, excludedProjects, excludedEpics, excludedRunners, excludedRuns).
 			Scan(&runID, &taskID, &epicID, &projectID, &runnerID, &kind, &entry, &from, &num, &branch, &role, &roleTitle, &runnerName, &rolesFeature,
@@ -1092,7 +1092,8 @@ func (s *Store) MySteps(ctx context.Context, userID, login string) ([]StepItem, 
 			&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit, &t.ReviewRejections,
 			&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,
 			&t.StepID, &t.StepEntry, &proc, &t.ProcessHash, &rej, &t.WaitReason, &t.StepGen, &t.Created, &t.Updated,
-			&t.RoleID, &t.RunnerName, &t.AgentID, &t.AgentName, &t.StartedAt, &t.DoneAt,
+			&t.RoleID, &t.RunnerName, &t.AgentID, &t.AgentName,
+			&t.Kind, &t.IncidentID, &t.MergedAt, &t.StartedAt, &t.DoneAt,
 			&it.ProjectID, &it.Project, &it.EpicID, &it.Epic); err != nil {
 			return nil, err
 		}

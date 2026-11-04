@@ -4,6 +4,7 @@ package api
 import (
 	"log/slog"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strconv"
 	"time"
@@ -26,7 +27,13 @@ type environmentView struct {
 	Paused         bool             `json:"paused"`
 	RunnerCaps     []string         `json:"runner_caps"`
 	LastDeployment *deploymentView  `json:"last_deployment"`
-	CreatedAt      time.Time        `json:"created_at"`
+	// MonitorState — состояние наблюдения: ok, fail, unknown или disabled.
+	MonitorState string `json:"monitor_state"`
+	// MonitorReason и MonitorLastAt — причина состояния и время последней
+	// проверки: панелям хватает их без истории проверок.
+	MonitorReason string     `json:"monitor_reason"`
+	MonitorLastAt *time.Time `json:"monitor_last_at"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 // deploymentView — DTO Deployment контракта: created_at — очередь,
@@ -59,6 +66,16 @@ func deploymentDTO(d domain.Deployment) deploymentView {
 }
 
 func (s *Server) environmentDTO(r *http.Request, e domain.Environment) environmentView {
+	states, err := s.St.MonitorStates(r.Context(), e.ProjectID)
+	if err != nil {
+		states = nil
+	}
+	return s.environmentDTOWith(r, e, states)
+}
+
+// environmentDTOWith — DTO окружения с состояниями наблюдения проекта,
+// прочитанными один раз на список.
+func (s *Server) environmentDTOWith(r *http.Request, e domain.Environment, states map[string]store.MonitorBrief) environmentView {
 	v := environmentView{
 		ID: e.ID, ProjectID: e.ProjectID, Name: e.Name, ExecType: e.ExecType,
 		Trigger: e.Trigger, Config: e.Config, Paused: e.Paused,
@@ -67,6 +84,13 @@ func (s *Server) environmentDTO(r *http.Request, e domain.Environment) environme
 	if d, err := s.St.LastDeployment(r.Context(), e.ID); err == nil {
 		dto := deploymentDTO(d)
 		v.LastDeployment = &dto
+	}
+	v.MonitorState = store.MonitorDisabled
+	if e.Config.Monitor != nil && e.Config.Monitor.Enabled {
+		v.MonitorState = store.MonitorUnknown
+		if b, ok := states[e.ID]; ok && b.State != "" && b.State != store.MonitorDisabled {
+			v.MonitorState, v.MonitorReason, v.MonitorLastAt = b.State, b.Reason, b.LastAt
+		}
 	}
 	return v
 }
@@ -124,8 +148,13 @@ func (s *Server) listEnvironments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]environmentView, 0, len(envs)) // пустой список — []
+	states, err := s.St.MonitorStates(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	for _, e := range envs {
-		out = append(out, s.environmentDTO(r, e))
+		out = append(out, s.environmentDTOWith(r, e, states))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -146,6 +175,9 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 	}
 	if msg := in.validate(); msg != "" {
 		unprocessable(w, msg)
+		return
+	}
+	if writeMonitorErr(w, in.Config.ValidateMonitor(in.execType())) {
 		return
 	}
 	env, err := s.St.CreateEnvironment(r.Context(), domain.Environment{
@@ -188,6 +220,7 @@ func (s *Server) patchEnvironment(w http.ResponseWriter, r *http.Request) {
 	if in.Trigger != nil {
 		env.Trigger = *in.Trigger
 	}
+	prevMonitor := env.Config.Monitor
 	if in.Config != nil {
 		// Конфигурацию нельзя менять под идущей публикацией: она читает её
 		// на ходу, и правка адреса проверки или пайплайна относилась бы уже
@@ -204,10 +237,21 @@ func (s *Server) patchEnvironment(w http.ResponseWriter, r *http.Request) {
 		unprocessable(w, msg)
 		return
 	}
+	if writeMonitorErr(w, full.Config.ValidateMonitor(full.execType())) {
+		return
+	}
+	monitorChanged := in.Config != nil && !reflect.DeepEqual(prevMonitor, env.Config.Monitor)
 	env, err = s.St.UpdateEnvironment(r.Context(), env)
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	// Новые настройки наблюдения действуют сразу: идущая проверка
+	// отменяется, следующая — на ближайшем тике.
+	if monitorChanged {
+		if err := s.St.ResetMonitor(r.Context(), env.ID); err != nil {
+			slog.Warn("сброс наблюдения окружения", "env", env.ID, "err", err)
+		}
 	}
 	s.envEvent(r, env, "конфигурация окружения изменена")
 	writeJSON(w, http.StatusOK, s.environmentDTO(r, env))

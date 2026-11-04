@@ -486,7 +486,7 @@ func (a *agent) session(ctx context.Context) error {
 		Adapter: a.cfg.Adapter, Depth: a.cfg.depth(),
 		ContextChannel:  a.cfg.contextChannel(),
 		DisplayName:     a.cfg.Name,
-		Features:        []string{featureRoles},
+		Features:        a.cfg.features(),
 		BootId:          bootID,
 		PendingSessions: a.pendingSessions(),
 	})
@@ -585,6 +585,11 @@ func (a *agent) session(ctx context.Context) error {
 			dep := k.Deploy
 			a.goStage(stageInfo{Session: dep.DeploymentId, Stage: "DEPLOY"},
 				func() { a.executeDeploy(sctx, dep, emit) })
+		case *pb.PlaneMsg_Monitor:
+			// Проверка короткая и не занимает runner: идёт рядом с
+			// публикациями других окружений.
+			job := k.Monitor
+			go a.executeMonitor(sctx, job, emit)
 		case *pb.PlaneMsg_Cancel:
 			a.mu.Lock()
 			if c := a.cancel[k.Cancel.TaskId]; c != nil {

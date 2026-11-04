@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
@@ -22,6 +23,9 @@ const (
 	verifyURLAttempts    = 10
 	verifyURLInterval    = 3 * time.Second
 	verifyURLTimeout     = 10 * time.Second
+	// deployWaitDelay — сколько ждём закрытия вывода после выхода или
+	// убийства команды окружения.
+	deployWaitDelay = 3 * time.Second
 )
 
 func (a *agent) executeDeploy(ctx context.Context, job *pb.DeployJob, emit func(*pb.RunnerMsg)) {
@@ -116,6 +120,17 @@ func (a *agent) runDeployCmd(ctx context.Context, job *pb.DeployJob, dir, script
 		b.WriteString(script)
 		cmd = exec.CommandContext(ctx, "ssh", job.Host, b.String())
 	}
+	// Дедлайн убивает всю группу процессов: внук (curl, сервер, sleep),
+	// унаследовавший вывод, иначе держит pipe открытым, и команда не
+	// завершается по таймауту. WaitDelay страхует тот же случай.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = deployWaitDelay
 	// Вывод стримится чанками по мере появления (live-прогресс, никакого
 	// накопления всего вывода в памяти); для detail хранится только хвост.
 	pr, pw := io.Pipe()

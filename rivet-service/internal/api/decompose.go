@@ -72,6 +72,9 @@ func (s *Server) decompose(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if s.maintenanceLocked(w, r, epic) {
+		return
+	}
 	tasks, err := s.decomposeEpic(r.Context(), epic)
 	var unavailable *plannerUnavailable
 	var rejected *planRejected

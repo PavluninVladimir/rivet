@@ -405,6 +405,7 @@ type RunnerMsg struct {
 	//	*RunnerMsg_StageResult
 	//	*RunnerMsg_Blocked
 	//	*RunnerMsg_DeployResult
+	//	*RunnerMsg_MonitorResult
 	Kind          isRunnerMsg_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -526,6 +527,15 @@ func (x *RunnerMsg) GetDeployResult() *DeployResult {
 	return nil
 }
 
+func (x *RunnerMsg) GetMonitorResult() *MonitorResult {
+	if x != nil {
+		if x, ok := x.Kind.(*RunnerMsg_MonitorResult); ok {
+			return x.MonitorResult
+		}
+	}
+	return nil
+}
+
 type isRunnerMsg_Kind interface {
 	isRunnerMsg_Kind()
 }
@@ -562,6 +572,10 @@ type RunnerMsg_DeployResult struct {
 	DeployResult *DeployResult `protobuf:"bytes,9,opt,name=deploy_result,json=deployResult,proto3,oneof"`
 }
 
+type RunnerMsg_MonitorResult struct {
+	MonitorResult *MonitorResult `protobuf:"bytes,10,opt,name=monitor_result,json=monitorResult,proto3,oneof"`
+}
+
 func (*RunnerMsg_Hello) isRunnerMsg_Kind() {}
 
 func (*RunnerMsg_Heartbeat) isRunnerMsg_Kind() {}
@@ -577,6 +591,8 @@ func (*RunnerMsg_StageResult) isRunnerMsg_Kind() {}
 func (*RunnerMsg_Blocked) isRunnerMsg_Kind() {}
 
 func (*RunnerMsg_DeployResult) isRunnerMsg_Kind() {}
+
+func (*RunnerMsg_MonitorResult) isRunnerMsg_Kind() {}
 
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1141,6 +1157,7 @@ type PlaneMsg struct {
 	//	*PlaneMsg_Pause
 	//	*PlaneMsg_Deploy
 	//	*PlaneMsg_Context
+	//	*PlaneMsg_Monitor
 	Kind          isPlaneMsg_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1253,6 +1270,15 @@ func (x *PlaneMsg) GetContext() *Context {
 	return nil
 }
 
+func (x *PlaneMsg) GetMonitor() *MonitorJob {
+	if x != nil {
+		if x, ok := x.Kind.(*PlaneMsg_Monitor); ok {
+			return x.Monitor
+		}
+	}
+	return nil
+}
+
 type isPlaneMsg_Kind interface {
 	isPlaneMsg_Kind()
 }
@@ -1285,6 +1311,10 @@ type PlaneMsg_Context struct {
 	Context *Context `protobuf:"bytes,8,opt,name=context,proto3,oneof"`
 }
 
+type PlaneMsg_Monitor struct {
+	Monitor *MonitorJob `protobuf:"bytes,9,opt,name=monitor,proto3,oneof"`
+}
+
 func (*PlaneMsg_Ack) isPlaneMsg_Kind() {}
 
 func (*PlaneMsg_Assign) isPlaneMsg_Kind() {}
@@ -1298,6 +1328,8 @@ func (*PlaneMsg_Pause) isPlaneMsg_Kind() {}
 func (*PlaneMsg_Deploy) isPlaneMsg_Kind() {}
 
 func (*PlaneMsg_Context) isPlaneMsg_Kind() {}
+
+func (*PlaneMsg_Monitor) isPlaneMsg_Kind() {}
 
 // Context — контекст работающему агенту от control plane (обратный канал):
 // предупреждение о пересечении работ и т.п. Доставляется во время
@@ -2265,6 +2297,207 @@ func (x *DeployResult) GetRollback() bool {
 	return false
 }
 
+// MonitorJob — проверка наблюдения окружения (add-sdlc-cycle, спека
+// operations): runner исполняет check_cmd так же, как команды выкатки
+// (рабочий каталог, host), а при провале logs_cmd. Получают только
+// runner'ы, объявившие feature "monitor".
+type MonitorJob struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	CheckId  string                 `protobuf:"bytes,1,opt,name=check_id,json=checkId,proto3" json:"check_id,omitempty"`
+	EnvName  string                 `protobuf:"bytes,2,opt,name=env_name,json=envName,proto3" json:"env_name,omitempty"`
+	Host     string                 `protobuf:"bytes,3,opt,name=host,proto3" json:"host,omitempty"` // [user@]hostname[:port]; пусто — локальное исполнение
+	CheckCmd string                 `protobuf:"bytes,4,opt,name=check_cmd,json=checkCmd,proto3" json:"check_cmd,omitempty"`
+	LogsCmd  string                 `protobuf:"bytes,5,opt,name=logs_cmd,json=logsCmd,proto3" json:"logs_cmd,omitempty"`     // пусто — логи не читаются
+	TimeoutS int32                  `protobuf:"varint,6,opt,name=timeout_s,json=timeoutS,proto3" json:"timeout_s,omitempty"` // дедлайн команды проверки (и URL-проверки)
+	Repo     string                 `protobuf:"bytes,7,opt,name=repo,proto3" json:"repo,omitempty"`                          // owner/name, для RIVET_REPO
+	// URL проверки без команды (окружение с собственной доставкой): GET с
+	// сети runner'а, ответ 2xx. Только runner'ам с feature monitor_url.
+	CheckUrl     string `protobuf:"bytes,8,opt,name=check_url,json=checkUrl,proto3" json:"check_url,omitempty"`
+	LogsTimeoutS int32  `protobuf:"varint,9,opt,name=logs_timeout_s,json=logsTimeoutS,proto3" json:"logs_timeout_s,omitempty"` // дедлайн команды логов
+	// Общий бюджет проверки: команда, логи и их завершение. Control plane
+	// ждёт результат по тому же бюджету с запасом на доставку.
+	BudgetS       int32 `protobuf:"varint,10,opt,name=budget_s,json=budgetS,proto3" json:"budget_s,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MonitorJob) Reset() {
+	*x = MonitorJob{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MonitorJob) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MonitorJob) ProtoMessage() {}
+
+func (x *MonitorJob) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MonitorJob.ProtoReflect.Descriptor instead.
+func (*MonitorJob) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *MonitorJob) GetCheckId() string {
+	if x != nil {
+		return x.CheckId
+	}
+	return ""
+}
+
+func (x *MonitorJob) GetEnvName() string {
+	if x != nil {
+		return x.EnvName
+	}
+	return ""
+}
+
+func (x *MonitorJob) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *MonitorJob) GetCheckCmd() string {
+	if x != nil {
+		return x.CheckCmd
+	}
+	return ""
+}
+
+func (x *MonitorJob) GetLogsCmd() string {
+	if x != nil {
+		return x.LogsCmd
+	}
+	return ""
+}
+
+func (x *MonitorJob) GetTimeoutS() int32 {
+	if x != nil {
+		return x.TimeoutS
+	}
+	return 0
+}
+
+func (x *MonitorJob) GetRepo() string {
+	if x != nil {
+		return x.Repo
+	}
+	return ""
+}
+
+func (x *MonitorJob) GetCheckUrl() string {
+	if x != nil {
+		return x.CheckUrl
+	}
+	return ""
+}
+
+func (x *MonitorJob) GetLogsTimeoutS() int32 {
+	if x != nil {
+		return x.LogsTimeoutS
+	}
+	return 0
+}
+
+func (x *MonitorJob) GetBudgetS() int32 {
+	if x != nil {
+		return x.BudgetS
+	}
+	return 0
+}
+
+// MonitorResult — итог проверки; вывод уже замаскирован построчно.
+type MonitorResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CheckId       string                 `protobuf:"bytes,1,opt,name=check_id,json=checkId,proto3" json:"check_id,omitempty"`
+	Ok            bool                   `protobuf:"varint,2,opt,name=ok,proto3" json:"ok,omitempty"`
+	Output        string                 `protobuf:"bytes,3,opt,name=output,proto3" json:"output,omitempty"` // хвост вывода check_cmd
+	Logs          string                 `protobuf:"bytes,4,opt,name=logs,proto3" json:"logs,omitempty"`     // хвост вывода logs_cmd (только при провале)
+	DurationMs    int64                  `protobuf:"varint,5,opt,name=duration_ms,json=durationMs,proto3" json:"duration_ms,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MonitorResult) Reset() {
+	*x = MonitorResult{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MonitorResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MonitorResult) ProtoMessage() {}
+
+func (x *MonitorResult) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MonitorResult.ProtoReflect.Descriptor instead.
+func (*MonitorResult) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *MonitorResult) GetCheckId() string {
+	if x != nil {
+		return x.CheckId
+	}
+	return ""
+}
+
+func (x *MonitorResult) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *MonitorResult) GetOutput() string {
+	if x != nil {
+		return x.Output
+	}
+	return ""
+}
+
+func (x *MonitorResult) GetLogs() string {
+	if x != nil {
+		return x.Logs
+	}
+	return ""
+}
+
+func (x *MonitorResult) GetDurationMs() int64 {
+	if x != nil {
+		return x.DurationMs
+	}
+	return 0
+}
+
 var File_pkg_protocol_rivet_proto protoreflect.FileDescriptor
 
 const file_pkg_protocol_rivet_proto_rawDesc = "" +
@@ -2292,7 +2525,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x120\n" +
 	"\x14heartbeat_interval_s\x18\x03 \x01(\x05R\x12heartbeatIntervalS\x12\x18\n" +
 	"\acatalog\x18\x04 \x01(\bR\acatalog\x12\x16\n" +
-	"\x06secure\x18\x05 \x01(\bR\x06secure\"\xce\x03\n" +
+	"\x06secure\x18\x05 \x01(\bR\x06secure\"\x90\x04\n" +
 	"\tRunnerMsg\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12'\n" +
 	"\x05hello\x18\x02 \x01(\v2\x0f.rivet.v1.HelloH\x00R\x05hello\x123\n" +
@@ -2304,7 +2537,9 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x05usage\x18\x06 \x01(\v2\x0f.rivet.v1.UsageH\x00R\x05usage\x12:\n" +
 	"\fstage_result\x18\a \x01(\v2\x15.rivet.v1.StageResultH\x00R\vstageResult\x125\n" +
 	"\ablocked\x18\b \x01(\v2\x19.rivet.v1.BlockedQuestionH\x00R\ablocked\x12=\n" +
-	"\rdeploy_result\x18\t \x01(\v2\x16.rivet.v1.DeployResultH\x00R\fdeployResultB\x06\n" +
+	"\rdeploy_result\x18\t \x01(\v2\x16.rivet.v1.DeployResultH\x00R\fdeployResult\x12@\n" +
+	"\x0emonitor_result\x18\n" +
+	" \x01(\v2\x17.rivet.v1.MonitorResultH\x00R\rmonitorResultB\x06\n" +
 	"\x04kind\"$\n" +
 	"\x05Hello\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\"5\n" +
@@ -2377,7 +2612,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1a\n" +
 	"\bquestion\x18\x02 \x01(\tR\bquestion\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\tR\tsessionId\"\xe5\x02\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"\x97\x03\n" +
 	"\bPlaneMsg\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12!\n" +
 	"\x03ack\x18\x02 \x01(\v2\r.rivet.v1.AckH\x00R\x03ack\x12.\n" +
@@ -2386,7 +2621,8 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x06cancel\x18\x05 \x01(\v2\x14.rivet.v1.CancelTaskH\x00R\x06cancel\x12-\n" +
 	"\x05pause\x18\x06 \x01(\v2\x15.rivet.v1.PauseRunnerH\x00R\x05pause\x12-\n" +
 	"\x06deploy\x18\a \x01(\v2\x13.rivet.v1.DeployJobH\x00R\x06deploy\x12-\n" +
-	"\acontext\x18\b \x01(\v2\x11.rivet.v1.ContextH\x00R\acontextB\x06\n" +
+	"\acontext\x18\b \x01(\v2\x11.rivet.v1.ContextH\x00R\acontext\x120\n" +
+	"\amonitor\x18\t \x01(\v2\x14.rivet.v1.MonitorJobH\x00R\amonitorB\x06\n" +
 	"\x04kind\"i\n" +
 	"\aContext\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
@@ -2488,7 +2724,27 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\n" +
 	"\x06DEPLOY\x10\x01\x12\n" +
 	"\n" +
-	"\x06VERIFY\x10\x022\x8a\x01\n" +
+	"\x06VERIFY\x10\x02\"\x9d\x02\n" +
+	"\n" +
+	"MonitorJob\x12\x19\n" +
+	"\bcheck_id\x18\x01 \x01(\tR\acheckId\x12\x19\n" +
+	"\benv_name\x18\x02 \x01(\tR\aenvName\x12\x12\n" +
+	"\x04host\x18\x03 \x01(\tR\x04host\x12\x1b\n" +
+	"\tcheck_cmd\x18\x04 \x01(\tR\bcheckCmd\x12\x19\n" +
+	"\blogs_cmd\x18\x05 \x01(\tR\alogsCmd\x12\x1b\n" +
+	"\ttimeout_s\x18\x06 \x01(\x05R\btimeoutS\x12\x12\n" +
+	"\x04repo\x18\a \x01(\tR\x04repo\x12\x1b\n" +
+	"\tcheck_url\x18\b \x01(\tR\bcheckUrl\x12$\n" +
+	"\x0elogs_timeout_s\x18\t \x01(\x05R\flogsTimeoutS\x12\x19\n" +
+	"\bbudget_s\x18\n" +
+	" \x01(\x05R\abudgetS\"\x87\x01\n" +
+	"\rMonitorResult\x12\x19\n" +
+	"\bcheck_id\x18\x01 \x01(\tR\acheckId\x12\x0e\n" +
+	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x16\n" +
+	"\x06output\x18\x03 \x01(\tR\x06output\x12\x12\n" +
+	"\x04logs\x18\x04 \x01(\tR\x04logs\x12\x1f\n" +
+	"\vduration_ms\x18\x05 \x01(\x03R\n" +
+	"durationMs2\x8a\x01\n" +
 	"\rRunnerService\x12A\n" +
 	"\bRegister\x12\x19.rivet.v1.RegisterRequest\x1a\x1a.rivet.v1.RegisterResponse\x126\n" +
 	"\aChannel\x12\x13.rivet.v1.RunnerMsg\x1a\x12.rivet.v1.PlaneMsg(\x010\x01B0Z.github.com/PavluninVladimir/rivet/pkg/protocolb\x06proto3"
@@ -2506,7 +2762,7 @@ func file_pkg_protocol_rivet_proto_rawDescGZIP() []byte {
 }
 
 var file_pkg_protocol_rivet_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(StageResult_Stage)(0),   // 0: rivet.v1.StageResult.Stage
 	(DeployResult_Stage)(0),  // 1: rivet.v1.DeployResult.Stage
@@ -2532,7 +2788,9 @@ var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(*PauseRunner)(nil),      // 21: rivet.v1.PauseRunner
 	(*DeployJob)(nil),        // 22: rivet.v1.DeployJob
 	(*DeployResult)(nil),     // 23: rivet.v1.DeployResult
-	nil,                      // 24: rivet.v1.Assignment.AgentEnvEntry
+	(*MonitorJob)(nil),       // 24: rivet.v1.MonitorJob
+	(*MonitorResult)(nil),    // 25: rivet.v1.MonitorResult
+	nil,                      // 26: rivet.v1.Assignment.AgentEnvEntry
 }
 var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	5,  // 0: rivet.v1.RunnerMsg.hello:type_name -> rivet.v1.Hello
@@ -2543,29 +2801,31 @@ var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	10, // 5: rivet.v1.RunnerMsg.stage_result:type_name -> rivet.v1.StageResult
 	11, // 6: rivet.v1.RunnerMsg.blocked:type_name -> rivet.v1.BlockedQuestion
 	23, // 7: rivet.v1.RunnerMsg.deploy_result:type_name -> rivet.v1.DeployResult
-	0,  // 8: rivet.v1.StageResult.stage:type_name -> rivet.v1.StageResult.Stage
-	14, // 9: rivet.v1.PlaneMsg.ack:type_name -> rivet.v1.Ack
-	15, // 10: rivet.v1.PlaneMsg.assign:type_name -> rivet.v1.Assignment
-	19, // 11: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
-	20, // 12: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
-	21, // 13: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
-	22, // 14: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
-	13, // 15: rivet.v1.PlaneMsg.context:type_name -> rivet.v1.Context
-	0,  // 16: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
-	18, // 17: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
-	17, // 18: rivet.v1.Assignment.policy:type_name -> rivet.v1.Policy
-	24, // 19: rivet.v1.Assignment.agent_env:type_name -> rivet.v1.Assignment.AgentEnvEntry
-	16, // 20: rivet.v1.Assignment.role:type_name -> rivet.v1.AgentRole
-	1,  // 21: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
-	2,  // 22: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
-	4,  // 23: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
-	3,  // 24: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
-	12, // 25: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
-	24, // [24:26] is the sub-list for method output_type
-	22, // [22:24] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	25, // 8: rivet.v1.RunnerMsg.monitor_result:type_name -> rivet.v1.MonitorResult
+	0,  // 9: rivet.v1.StageResult.stage:type_name -> rivet.v1.StageResult.Stage
+	14, // 10: rivet.v1.PlaneMsg.ack:type_name -> rivet.v1.Ack
+	15, // 11: rivet.v1.PlaneMsg.assign:type_name -> rivet.v1.Assignment
+	19, // 12: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
+	20, // 13: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
+	21, // 14: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
+	22, // 15: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
+	13, // 16: rivet.v1.PlaneMsg.context:type_name -> rivet.v1.Context
+	24, // 17: rivet.v1.PlaneMsg.monitor:type_name -> rivet.v1.MonitorJob
+	0,  // 18: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
+	18, // 19: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
+	17, // 20: rivet.v1.Assignment.policy:type_name -> rivet.v1.Policy
+	26, // 21: rivet.v1.Assignment.agent_env:type_name -> rivet.v1.Assignment.AgentEnvEntry
+	16, // 22: rivet.v1.Assignment.role:type_name -> rivet.v1.AgentRole
+	1,  // 23: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
+	2,  // 24: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
+	4,  // 25: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
+	3,  // 26: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
+	12, // 27: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
+	26, // [26:28] is the sub-list for method output_type
+	24, // [24:26] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_pkg_protocol_rivet_proto_init() }
@@ -2582,6 +2842,7 @@ func file_pkg_protocol_rivet_proto_init() {
 		(*RunnerMsg_StageResult)(nil),
 		(*RunnerMsg_Blocked)(nil),
 		(*RunnerMsg_DeployResult)(nil),
+		(*RunnerMsg_MonitorResult)(nil),
 	}
 	file_pkg_protocol_rivet_proto_msgTypes[4].OneofWrappers = []any{}
 	file_pkg_protocol_rivet_proto_msgTypes[7].OneofWrappers = []any{}
@@ -2593,6 +2854,7 @@ func file_pkg_protocol_rivet_proto_init() {
 		(*PlaneMsg_Pause)(nil),
 		(*PlaneMsg_Deploy)(nil),
 		(*PlaneMsg_Context)(nil),
+		(*PlaneMsg_Monitor)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -2600,7 +2862,7 @@ func file_pkg_protocol_rivet_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_protocol_rivet_proto_rawDesc), len(file_pkg_protocol_rivet_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   23,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

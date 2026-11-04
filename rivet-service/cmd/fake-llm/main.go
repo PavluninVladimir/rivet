@@ -1,6 +1,9 @@
 // fake-llm — OpenAI-совместимый провайдер для e2e-стенда: список моделей
 // и chat completions с готовым планом декомпозиции. Ключ «fake-key»
 // принимается, любой другой отклоняется 401 (сценарий «неверный ключ»).
+// Задания агентов control plane (Аналитик add-product-discovery, Релиз-инженер
+// и Инженер сопровождения add-sdlc-cycle) узнаются по маркеру в первой
+// строке промпта и получают фиксированные корректные ответы.
 package main
 
 import (
@@ -10,6 +13,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -40,18 +44,22 @@ func main() {
 			} `json:"messages"`
 		}
 		_ = json.Unmarshal(raw, &in)
-		reply := func(content string) {
-			out := map[string]any{"object": "chat.completion", "model": in.Model,
-				"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": content}}}}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(out)
-		}
-		// Задания Аналитика (add-product-discovery) узнаются по маркеру.
+		// Задания Аналитика (add-product-discovery) узнаются по маркеру в
+		// первой строке сообщения.
 		for _, msg := range in.Messages {
 			if content, ok := analystReply(msg.Content); ok {
-				reply(content)
+				writeCompletion(w, in.Model, content)
 				return
 			}
+		}
+		// Задания Релиз-инженера и Инженера сопровождения (add-sdlc-cycle).
+		prompt := ""
+		for _, msg := range in.Messages {
+			prompt += msg.Content + "\n"
+		}
+		if answer, ok := opsAnswer(prompt); ok {
+			writeCompletion(w, in.Model, answer)
+			return
 		}
 		// Epic виден в промпте строкой «# Epic: <название>».
 		title := "Epic"
@@ -69,7 +77,7 @@ func main() {
 				"criteria": []string{"result.txt содержит итог"}, "deps": []int{0}, "capabilities": []string{"coding"}, "estimate": 2},
 		}
 		content, _ := json.Marshal(plan)
-		reply(string(content))
+		writeCompletion(w, in.Model, string(content))
 	})
 	for _, p := range []string{"/models", "/v1/models"} {
 		mux.HandleFunc("GET "+p, models)
@@ -79,4 +87,63 @@ func main() {
 	}
 	fmt.Println("fake-llm:", *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))
+}
+
+func writeCompletion(w http.ResponseWriter, model, content string) {
+	out := map[string]any{"object": "chat.completion", "model": model,
+		"choices": []map[string]any{{"index": 0, "finish_reason": "stop", "message": map[string]any{"role": "assistant", "content": content}}}}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// reTask — задача состава в задании: «## task-7 · Название (баг)» или
+// «- task-7 · Название (работа)».
+var reTask = regexp.MustCompile(`(?m)^(?:## |- )task-(\d+) · (.+) \((работа|баг|архитектура)\)$`)
+
+// opsAnswer — ответ на задание Релиз-инженера или Инженера сопровождения.
+// В release notes один пункт ссылается на задачу не из состава: проверка
+// ответа должна его отбросить.
+func opsAnswer(prompt string) (string, bool) {
+	first := strings.TrimSpace(strings.SplitN(prompt, "\n", 2)[0])
+	switch first {
+	case "[rivet:release_notes]":
+		type item struct {
+			Task int    `json:"task"`
+			Text string `json:"text"`
+		}
+		resp := map[string][]item{"new": {}, "fixes": {}, "other": {}}
+		for _, m := range reTask.FindAllStringSubmatch(prompt, -1) {
+			var n int
+			_, _ = fmt.Sscan(m[1], &n)
+			sec := "new"
+			if m[3] == "баг" {
+				sec = "fixes"
+			}
+			resp[sec] = append(resp[sec], item{Task: n, Text: m[2] + " (fake-llm)"})
+		}
+		resp["other"] = append(resp["other"], item{Task: 99999, Text: "пункт не из состава"})
+		b, _ := json.Marshal(resp)
+		return string(b), true
+	case "[rivet:deploy_analysis]":
+		tasks := []int{}
+		if m := reTask.FindStringSubmatch(prompt); m != nil {
+			var n int
+			_, _ = fmt.Sscan(m[1], &n)
+			tasks = append(tasks, n)
+		}
+		b, _ := json.Marshal(map[string]any{"cause": "проверка окружения не прошла после выкатки (fake-llm)",
+			"tasks": tasks, "recommendation": "воспроизвести проверку локально и исправить причину (fake-llm)"})
+		return string(b), true
+	case "[rivet:incident_description]":
+		b, _ := json.Marshal(map[string]any{
+			"summary":      "Проверка наблюдения не проходит (fake-llm)",
+			"cause":        "последнее изменение сломало проверку (fake-llm)",
+			"reproduction": []string{"выполнить проверку наблюдения окружения"},
+			"bug": map[string]any{"title": "Исправить сбой проверки наблюдения",
+				"description": "Проверка наблюдения окружения завершилась ошибкой (fake-llm).",
+				"criteria":    []string{"Проверка наблюдения проходит"}},
+		})
+		return string(b), true
+	}
+	return "", false
 }
