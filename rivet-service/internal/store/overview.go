@@ -249,7 +249,8 @@ func overviewSessions(ctx context.Context, tx pgx.Tx, in *overview.Input, q Over
 // Epic'ов, которые могут попасть в отчёт: не завершённых до начала периода
 // (расход Epic'ов и задач пересчитывается из записей до среза). Роль
 // записи — из запуска шага её сессии, у запросов control plane без сессии
-// (Аналитик, add-product-discovery) — из самой записи, иначе «без роли».
+// (Аналитик, add-product-discovery, Релиз-инженер и Инженер сопровождения,
+// add-sdlc-cycle) — из самой записи, иначе «без роли».
 func overviewUsage(ctx context.Context, tx pgx.Tx, in *overview.Input, q OverviewQuery, since time.Time) error {
 	rows, err := tx.Query(ctx, `
 		SELECT u.ts, COALESCE(u.epic_id::text, ''), COALESCE(u.task_id::text, ''), COALESCE(r.role, u.role, ''),

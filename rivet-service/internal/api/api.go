@@ -161,6 +161,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/epics/{id}/pause", s.epicAction(domain.EpicPaused, "Epic приостановлен"))
 	mux.HandleFunc("POST /api/v1/epics/{id}/resume", s.epicAction(domain.EpicRunning, "Epic возобновлён"))
 	mux.HandleFunc("POST /api/v1/epics/{id}/archive", s.epicAction(domain.EpicArchived, "Epic архивирован"))
+	s.routesSDLC(mux)
 	mux.HandleFunc("GET /api/v1/projects/{id}/environments", s.listEnvironments)
 	mux.HandleFunc("POST /api/v1/projects/{id}/environments", s.createEnvironment)
 	mux.HandleFunc("PATCH /api/v1/environments/{id}", s.patchEnvironment)
@@ -239,6 +240,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		status, code = http.StatusConflict, "bad_transition"
 	case errors.Is(err, store.ErrNoRunner):
 		status, code = http.StatusConflict, "no_runner"
+	case errors.Is(err, store.ErrMaintenanceLocked):
+		status, code = http.StatusConflict, "maintenance_locked"
 	case errors.Is(err, store.ErrConflict),
 		errors.Is(err, store.ErrLastAdmin),
 		errors.Is(err, store.ErrLastMember),
@@ -783,6 +786,9 @@ func (s *Server) epicAction(to domain.EpicStatus, text string) http.HandlerFunc 
 			return
 		}
 		if s.policyBlocks(w, r, actionEpicStatus, epic.ProjectID) {
+			return
+		}
+		if to == domain.EpicArchived && s.maintenanceLocked(w, r, epic) {
 			return
 		}
 		err = s.St.TransitionEpic(r.Context(), r.PathValue("id"), to, store.EventInput{

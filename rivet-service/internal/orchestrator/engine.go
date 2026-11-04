@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,6 +97,17 @@ type Engine struct {
 	mergeLocks taskLocks
 	// Now — источник времени для бюджета (подменяется в тестах).
 	Now func() time.Time
+
+	// Задания агентов control plane (add-sdlc-cycle): очередь по агенту.
+	ops     *opsQueue
+	opsOnce sync.Once
+	// OpsComplete подменяет вызов модели в тестах (connID, model, prompt).
+	OpsComplete func(ctx context.Context, connID, model, prompt string) (string, error)
+	// URLPolicy — какие адреса доступны проверкам URL control plane'ом
+	// (RIVET_ALLOW_PRIVATE_URLS). Задаётся до первой проверки.
+	URLPolicy URLPolicy
+	urlOnce   sync.Once
+	urlClient *http.Client
 }
 
 func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, heartbeat time.Duration) *Engine {
@@ -136,6 +148,8 @@ func (e *Engine) Run(ctx context.Context) {
 
 // Tick — один проход планировщика: протухшие runner'ы, пересчёт DAG, назначения.
 func (e *Engine) Tick(ctx context.Context) error {
+	// Наблюдение и задания control plane идут и при сбое тика конвейера.
+	defer e.tickOps(ctx)
 	lost, lostDeps, err := e.St.MarkStaleRunnersOffline(ctx, int(e.HeartbeatTimeout.Seconds()))
 	if err != nil {
 		return fmt.Errorf("stale runners: %w", err)
@@ -147,7 +161,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 	}
 	// Публикации потерянных runner'ов проваливаются полной цепочкой.
 	for _, depID := range lostDeps {
-		if err := e.failDeployNow(ctx, depID, "", "deploy-runner потерян (heartbeat)"); err != nil {
+		if err := e.failDeployInfra(ctx, depID, "", "deploy-runner потерян (heartbeat)"); err != nil {
 			slog.Error("deploy runner lost", "deployment", depID, "err", err)
 		}
 	}
@@ -1173,7 +1187,7 @@ func (e *Engine) mergeTask(ctx context.Context, task domain.Task, p domain.Proje
 			return fmt.Errorf("merge PR: %w", err)
 		}
 	}
-	if err := e.St.CompleteTask(ctx, taskID, ev); err != nil {
+	if err := e.St.CompleteMergedTask(ctx, taskID, ev); err != nil {
 		return err
 	}
 	if err := e.St.RecomputeEpic(ctx, task.EpicID); err != nil {

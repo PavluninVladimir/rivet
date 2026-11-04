@@ -80,6 +80,7 @@ message RunnerMsg {
     StageResult stage_result = 7;
     BlockedQuestion blocked = 8;
     DeployResult deploy_result = 9;
+    MonitorResult monitor_result = 10;
   }
 }
 
@@ -170,6 +171,7 @@ message PlaneMsg {
     PauseRunner pause = 6;
     DeployJob deploy = 7;
     Context context = 8;
+    MonitorJob monitor = 9;
   }
 }
 
@@ -325,4 +327,34 @@ message DeployResult {
     DEPLOY = 1;
     VERIFY = 2;
   }
+}
+
+// MonitorJob — проверка наблюдения окружения (add-sdlc-cycle, спека
+// operations): runner исполняет check_cmd так же, как команды выкатки
+// (рабочий каталог, host), а при провале logs_cmd. Получают только
+// runner'ы, объявившие feature "monitor".
+message MonitorJob {
+  string check_id = 1;
+  string env_name = 2;
+  string host = 3;      // [user@]hostname[:port]; пусто — локальное исполнение
+  string check_cmd = 4;
+  string logs_cmd = 5;  // пусто — логи не читаются
+  int32 timeout_s = 6;  // дедлайн команды проверки (и URL-проверки)
+  string repo = 7;      // owner/name, для RIVET_REPO
+  // URL проверки без команды (окружение с собственной доставкой): GET с
+  // сети runner'а, ответ 2xx. Только runner'ам с feature monitor_url.
+  string check_url = 8;
+  int32 logs_timeout_s = 9; // дедлайн команды логов
+  // Общий бюджет проверки: команда, логи и их завершение. Control plane
+  // ждёт результат по тому же бюджету с запасом на доставку.
+  int32 budget_s = 10;
+}
+
+// MonitorResult — итог проверки; вывод уже замаскирован построчно.
+message MonitorResult {
+  string check_id = 1;
+  bool ok = 2;
+  string output = 3;    // хвост вывода check_cmd
+  string logs = 4;      // хвост вывода logs_cmd (только при провале)
+  int64 duration_ms = 5;
 }

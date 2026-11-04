@@ -28,7 +28,8 @@ FUZZ_TARGETS = \
 	./internal/discovery:FuzzSplitInterview \
 	./internal/discovery:FuzzCheckSummary \
 	./internal/discovery:FuzzCheckSynthesis \
-	./internal/discovery:FuzzQuoteLeak
+	./internal/discovery:FuzzQuoteLeak \
+	./internal/ops:FuzzOpsParsers
 
 # go test -fuzz гоняет один таргет за прогон, поэтому цикл. Падение
 # «context deadline exceeded» без записанного входа — гонка Go на остановке

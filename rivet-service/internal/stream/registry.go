@@ -39,6 +39,15 @@ func (r *Registry) Detach(runnerID string, ch chan *pb.PlaneMsg) {
 	r.mu.Unlock()
 }
 
+// Current — канал ch всё ещё текущий канал runner'а (его не сменило
+// переподключение).
+func (r *Registry) Current(runnerID string, ch chan *pb.PlaneMsg) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	cur, ok := r.conns[runnerID]
+	return ok && cur == ch
+}
+
 // Connected — подключён ли runner (есть открытый канал).
 func (r *Registry) Connected(runnerID string) bool {
 	r.mu.RLock()

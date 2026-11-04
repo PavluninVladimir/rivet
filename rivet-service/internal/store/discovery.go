@@ -653,7 +653,8 @@ func existingEpics(ctx context.Context, q queryer, projectID string) ([]discover
 	rows, err := q.Query(ctx, `
 		SELECT e.id, e.title, e.goal, e.status,
 			COALESCE((SELECT array_agg(DISTINCT n.need->>'title') FROM epic_needs n WHERE n.epic_id = e.id), '{}')
-		FROM epics e WHERE e.project_id=$1 AND e.source_key IS NULL ORDER BY e.created_at`, projectID)
+		FROM epics e WHERE e.project_id=$1 AND e.source_key IS NULL AND e.kind <> 'maintenance'
+		ORDER BY e.created_at`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -988,7 +989,8 @@ func (s *Store) SetEpicDeps(ctx context.Context, epicID string, deps []string) (
 			return err
 		}
 		var status domain.EpicStatus
-		if err := tx.QueryRow(ctx, `SELECT status FROM epics WHERE id=$1 FOR NO KEY UPDATE`, epicID).Scan(&status); err != nil {
+		var kind string
+		if err := tx.QueryRow(ctx, `SELECT status, kind FROM epics WHERE id=$1 FOR NO KEY UPDATE`, epicID).Scan(&status, &kind); err != nil {
 			return nf(err)
 		}
 		if status == domain.EpicDone || status == domain.EpicArchived {
@@ -1005,8 +1007,8 @@ func (s *Store) SetEpicDeps(ctx context.Context, epicID string, deps []string) (
 			if d == epicID {
 				return &DiscoveryFieldError{Field: "depends_on", Msg: "Epic не может зависеть от самого себя"}
 			}
-			var p string
-			if err := tx.QueryRow(ctx, `SELECT project_id FROM epics WHERE id::text=$1`, d).Scan(&p); err != nil {
+			var p, dkind string
+			if err := tx.QueryRow(ctx, `SELECT project_id, kind FROM epics WHERE id::text=$1`, d).Scan(&p, &dkind); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
 					return &DiscoveryFieldError{Field: "depends_on", Msg: "Epic " + d + " не найден"}
 				}
@@ -1015,7 +1017,18 @@ func (s *Store) SetEpicDeps(ctx context.Context, epicID string, deps []string) (
 			if p != projectID {
 				return &DiscoveryFieldError{Field: "depends_on", Msg: "Epic другого проекта"}
 			}
+			// Epic «Сопровождение» (add-sdlc-cycle) постоянный и не
+			// завершается: зависимый от него Epic ждал бы вечно.
+			if dkind == domain.EpicMaintenance {
+				return &DiscoveryFieldError{Field: "depends_on", Msg: "от Epic’а «Сопровождение» зависеть нельзя: он не завершается"}
+			}
 			clean = append(clean, d)
+		}
+		// Сам Epic «Сопровождение» ни от чего не зависит: задачи-баги по
+		// инцидентам не ждут других Epic'ов. Пустой список разрешён, он
+		// снимает зависимости, оставшиеся от старых данных.
+		if kind == domain.EpicMaintenance && len(clean) > 0 {
+			return &DiscoveryFieldError{Field: "depends_on", Msg: "у Epic’а «Сопровождение» зависимостей нет: задачи-баги не ждут других Epic’ов"}
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM epic_deps WHERE epic_id=$1`, epicID); err != nil {
 			return err
@@ -1034,10 +1047,14 @@ func (s *Store) SetEpicDeps(ctx context.Context, epicID string, deps []string) (
 }
 
 // WaitingDeps — Epic'и с незавершёнными зависимостями: Epic → зависимости
-// не в done (архивированная незавершённая зависимость тоже держит).
+// не в done (архивированная незавершённая зависимость тоже держит). Пары с
+// Epic'ом «Сопровождение» с любой стороны не держат (старые данные до
+// запрета в SetEpicDeps): он не ждёт и не завершается.
 func (s *Store) WaitingDeps(ctx context.Context) (map[string][]domain.EpicRef, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT d.epic_id, e.id, e.title, e.status FROM epic_deps d
-		JOIN epics e ON e.id = d.depends_on WHERE e.status <> 'done' ORDER BY d.epic_id, e.created_at, e.id`)
+		JOIN epics e ON e.id = d.depends_on JOIN epics w ON w.id = d.epic_id
+		WHERE e.status <> 'done' AND e.kind <> 'maintenance' AND w.kind <> 'maintenance'
+		ORDER BY d.epic_id, e.created_at, e.id`)
 	if err != nil {
 		return nil, err
 	}

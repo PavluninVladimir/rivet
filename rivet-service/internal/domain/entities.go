@@ -83,7 +83,10 @@ type Epic struct {
 	// domain-model «Импорт истории проекта»); пусто у живых Epic'ов.
 	// История не назначается runner'ам и не входит в оценки и бюджеты.
 	SourceKey string
-	Created   time.Time
+	// Kind — вид Epic'а: work, architecture, explore или maintenance (Epic
+	// «Сопровождение» с задачами-багами, add-sdlc-cycle).
+	Kind    string `json:"Kind"`
+	Created time.Time
 	// StartedAt — первый переход в running, DueAt — целевая дата Epic'а
 	// (add-project-lead-view); nil — не было или не задана.
 	StartedAt *time.Time
@@ -112,6 +115,15 @@ type EpicDiscovery struct {
 	Version int               `json:"version"`
 	Needs   []json.RawMessage `json:"needs"`
 }
+
+// Виды Epic'а и задачи (общие с add-architecture-c4: work, architecture,
+// explore; add-sdlc-cycle добавляет maintenance и bug).
+const (
+	EpicWork        = "work"
+	EpicMaintenance = "maintenance"
+	TaskWork        = "work"
+	TaskBug         = "bug"
+)
 
 type Criterion struct {
 	Text string `json:"text"`
@@ -156,8 +168,14 @@ type Task struct {
 	// AgentID и AgentName — агент команды текущего исполнителя.
 	AgentID   string `json:"AgentID"`
 	AgentName string `json:"AgentName"`
-	Created   time.Time
-	Updated   time.Time
+	// Kind — вид задачи: work, architecture, explore или bug (задача-баг
+	// инцидента, add-sdlc-cycle); IncidentID — инцидент задачи-бага;
+	// MergedAt — момент merge (состав релиза считается по нему).
+	Kind       string     `json:"Kind"`
+	IncidentID string     `json:"IncidentID"`
+	MergedAt   *time.Time `json:"MergedAt"`
+	Created    time.Time
+	Updated    time.Time
 	// StartedAt — первое назначение в работу, DoneAt — переход в done
 	// (add-project-lead-view); nil — ещё не было.
 	StartedAt *time.Time
@@ -362,6 +380,90 @@ type EnvConfig struct {
 	Repo string `json:"repo,omitempty"`
 	File string `json:"file,omitempty"`
 	Key  string `json:"key,omitempty"`
+	// Monitor — наблюдение за работающим приложением (add-sdlc-cycle,
+	// спека operations «Настройки наблюдения окружения»). nil — не настроено.
+	Monitor *MonitorConfig `json:"monitor,omitempty"`
+}
+
+// MonitorConfig — настройки наблюдения окружения: периодическая
+// smoke-проверка командой deploy-runner'а или URL, который проверяет
+// control plane, и необязательная команда логов при провале.
+type MonitorConfig struct {
+	Enabled     bool   `json:"enabled"`
+	CheckCmd    string `json:"check_cmd,omitempty"`
+	CheckURL    string `json:"check_url,omitempty"`
+	LogsCmd     string `json:"logs_cmd,omitempty"`
+	IntervalMin int    `json:"interval_min"`
+}
+
+// Пределы интервала наблюдения, минуты.
+const (
+	MonitorIntervalMin     = 1
+	MonitorIntervalMax     = 1440
+	MonitorIntervalDefault = 10
+)
+
+// EnvFieldError — ошибка конфигурации окружения с полем формы.
+type EnvFieldError struct {
+	Field string
+	Msg   string
+}
+
+func (e *EnvFieldError) Error() string { return e.Field + ": " + e.Msg }
+
+// Interval — интервал проверок; 0 читается как значение по умолчанию.
+func (m MonitorConfig) Interval() time.Duration {
+	n := m.IntervalMin
+	if n <= 0 {
+		n = MonitorIntervalDefault
+	}
+	return time.Duration(n) * time.Minute
+}
+
+// ValidateMonitor — настройки наблюдения по правилам Verify: внешней
+// доставке и GitOps только URL (команду исполнять негде), команда в одну
+// строку, URL http(s) без userinfo, интервал 1–1440 минут. У выключенного
+// наблюдения поля проверки сохраняются как есть до повторного включения:
+// проверяются только интервал и userinfo в URL (секрет не хранится).
+func (c EnvConfig) ValidateMonitor(execType string) error {
+	m := c.Monitor
+	if m == nil {
+		return nil
+	}
+	if m.IntervalMin != 0 && (m.IntervalMin < MonitorIntervalMin || m.IntervalMin > MonitorIntervalMax) {
+		return &EnvFieldError{"config.monitor.interval_min", "интервал от 1 до 1440 минут"}
+	}
+	if !m.Enabled {
+		if u, err := url.Parse(m.CheckURL); err == nil && u.User != nil {
+			return &EnvFieldError{"config.monitor.check_url", "userinfo в URL запрещён"}
+		}
+		return nil
+	}
+	external := execType == ExecPipeline || execType == ExecGitOps
+	for _, f := range []struct{ name, v string }{{"check_cmd", m.CheckCmd}, {"logs_cmd", m.LogsCmd}} {
+		if f.v == "" {
+			continue
+		}
+		if external {
+			return &EnvFieldError{"config.monitor." + f.name, "у окружения с внешней доставкой проверка наблюдения — только URL"}
+		}
+		if strings.TrimSpace(f.v) == "" || strings.ContainsAny(f.v, "\n\r") {
+			return &EnvFieldError{"config.monitor." + f.name, "ожидается команда в одну строку"}
+		}
+	}
+	if m.CheckURL != "" {
+		u, err := url.Parse(m.CheckURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return &EnvFieldError{"config.monitor.check_url", "ожидается http(s)-URL"}
+		}
+		if u.User != nil {
+			return &EnvFieldError{"config.monitor.check_url", "userinfo в URL запрещён"}
+		}
+	}
+	if strings.TrimSpace(m.CheckCmd) == "" && m.CheckURL == "" {
+		return &EnvFieldError{"config.monitor", "для включённого наблюдения нужна команда или URL проверки"}
+	}
+	return nil
 }
 
 // yamlKeyRe — путь ключа YAML: точки между сегментами, сегмент — буквы,
@@ -680,6 +782,10 @@ const (
 	// человека на шаге merge (спека task-pipeline «Конфликт с базовой
 	// веткой при merge»).
 	AttMergeConflict AttentionReason = "MERGE_CONFLICT"
+	// AttOpsLimit — лимит сопровождения проекта исчерпан: новые инциденты
+	// записываются без задач-багов до решения человека (add-sdlc-cycle).
+	// Эскалация уровня проекта, одна открытая на проект.
+	AttOpsLimit AttentionReason = "OPS_LIMIT"
 )
 
 type Attention struct {
@@ -820,6 +926,10 @@ const (
 	RoleDeveloper = "developer"
 	RoleTester    = "tester"
 	RoleReviewer  = "reviewer"
+	// RoleDevops и RoleSRE — Релиз-инженер и Инженер сопровождения
+	// (add-sdlc-cycle): тексты релизов и инцидентов запросом control plane.
+	RoleDevops = "devops"
+	RoleSRE    = "sre"
 )
 
 // RoleColors — палитра ролей: имена токенов консоли.
@@ -831,7 +941,9 @@ var RoleCapabilities = []string{"coding", "review", "explore", ""}
 
 // ControlPlaneRole — встроенная роль, которую выполняет control plane
 // запросом к модели, а не runner: у неё нет capability и профиля.
-func ControlPlaneRole(id string) bool { return id == RoleLead || id == RoleAnalyst }
+func ControlPlaneRole(id string) bool {
+	return id == RoleLead || id == RoleAnalyst || id == RoleDevops || id == RoleSRE
+}
 
 // TeamAgent — агент команды (спека agent-roles «Команда агентов»):
 // именованный агент из шаблона роли. Пустые Agent, ConnectionID и Model —

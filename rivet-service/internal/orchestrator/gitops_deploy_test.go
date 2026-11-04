@@ -84,7 +84,7 @@ func TestGitOpsDeploySuccess(t *testing.T) {
 	// же тик, что и коммит.
 	srv, _ := versionServer(t, "sha-1", 2)
 	sc := &fakeSCM{}
-	e := New(st, sc, nil, &capture{}, 90*time.Second)
+	e := newLocal(st, sc, &capture{})
 	_, env := seedGitOps(t, st, srv.URL, "")
 
 	dep, err := st.EnqueueDeployment(ctx, env.ID, "sha-1", "vova")
@@ -140,7 +140,7 @@ func TestGitOpsIdempotentCommit(t *testing.T) {
 	st := testStore(t)
 	srv, _ := versionServer(t, "sha-1", 0)
 	sc := &fakeSCM{files: map[string]string{"o/r@main:envs/prod/values.yaml": "sha-1\n"}}
-	e := New(st, sc, nil, &capture{}, 90*time.Second)
+	e := newLocal(st, sc, &capture{})
 	_, env := seedGitOps(t, st, srv.URL, "")
 
 	dep, err := st.EnqueueDeployment(ctx, env.ID, "sha-1", "vova")
@@ -172,7 +172,7 @@ func TestGitOpsMissingKey(t *testing.T) {
 	st := testStore(t)
 	srv, _ := versionServer(t, "sha-1", 0)
 	sc := &fakeSCM{files: map[string]string{"o/r@main:envs/prod/values.yaml": "replicas: 2\n"}}
-	e := New(st, sc, nil, &capture{}, 90*time.Second)
+	e := newLocal(st, sc, &capture{})
 	_, env := seedGitOps(t, st, srv.URL, "image.tag")
 
 	dep, err := st.EnqueueDeployment(ctx, env.ID, "sha-1", "vova")
@@ -249,7 +249,7 @@ func TestGitOpsRecommitsAfterLostWrite(t *testing.T) {
 	st := testStore(t)
 	srv, _ := versionServer(t, "sha-1", 1)
 	sc := &fakeSCM{}
-	e := New(st, sc, nil, &capture{}, 90*time.Second)
+	e := newLocal(st, sc, &capture{})
 	_, env := seedGitOps(t, st, srv.URL, "")
 
 	dep, err := st.EnqueueDeployment(ctx, env.ID, "sha-1", "vova")

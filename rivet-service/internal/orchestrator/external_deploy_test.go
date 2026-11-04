@@ -16,6 +16,14 @@ import (
 // Публикация через внешний пайплайн (change add-external-delivery, спека
 // deployment «Дирижирование внешними системами доставки»).
 
+// newLocal — движок тестов доставки: проверки URL ходят на httptest
+// (loopback), как на стендах с RIVET_ALLOW_PRIVATE_URLS=true.
+func newLocal(st *store.Store, sc scm.Adapter, out Sender) *Engine {
+	e := New(st, sc, nil, out, 90*time.Second)
+	e.URLPolicy = URLPolicy{AllowAll: true}
+	return e
+}
+
 // seedExternal — проект с окружением внешней доставки; deploy-runner'ов в
 // установке нет намеренно: внешняя публикация их не ждёт.
 func seedExternal(t *testing.T, st *store.Store, verifyURL string) (domain.Project, domain.Environment) {
@@ -52,7 +60,7 @@ func TestExternalDeploySuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { verified++ }))
 	defer srv.Close()
 	sc := &fakeSCM{}
-	e := New(st, sc, nil, &capture{}, 90*time.Second)
+	e := newLocal(st, sc, &capture{})
 	_, env := seedExternal(t, st, srv.URL)
 
 	dep, err := st.EnqueueDeployment(ctx, env.ID, "sha-1", "vova")
@@ -134,7 +142,7 @@ func TestExternalDeployFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
 	sc := &fakeSCM{}
-	e := New(st, sc, nil, &capture{}, 90*time.Second)
+	e := newLocal(st, sc, &capture{})
 	_, env := seedExternal(t, st, srv.URL)
 
 	dep, err := st.EnqueueDeployment(ctx, env.ID, "sha-1", "vova")
@@ -180,7 +188,7 @@ func TestExternalDeployVerifyFails(t *testing.T) {
 	}))
 	defer srv.Close()
 	sc := &fakeSCM{runState: scm.PipelineSuccess}
-	e := New(st, sc, nil, &capture{}, 90*time.Second)
+	e := newLocal(st, sc, &capture{})
 	_, env := seedExternal(t, st, srv.URL)
 
 	dep, err := st.EnqueueDeployment(ctx, env.ID, "sha-1", "vova")
@@ -206,7 +214,7 @@ func TestExternalDeployTriggerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
 	sc := &fakeSCM{triggerErr: errTrigger}
-	e := New(st, sc, nil, &capture{}, 90*time.Second)
+	e := newLocal(st, sc, &capture{})
 	_, env := seedExternal(t, st, srv.URL)
 
 	dep, err := st.EnqueueDeployment(ctx, env.ID, "sha-1", "vova")
@@ -236,7 +244,7 @@ func TestExternalDeployPendingRunNotRetriggered(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
 	sc := &fakeSCM{noRunID: true}
-	e := New(st, sc, nil, &capture{}, 90*time.Second)
+	e := newLocal(st, sc, &capture{})
 	_, env := seedExternal(t, st, srv.URL)
 
 	dep, err := st.EnqueueDeployment(ctx, env.ID, "sha-1", "vova")
@@ -272,7 +280,7 @@ func TestEnvConfigLockedDuringDeployment(t *testing.T) {
 	st := testStore(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
-	e := New(st, &fakeSCM{}, nil, &capture{}, 90*time.Second)
+	e := newLocal(st, &fakeSCM{}, &capture{})
 	_, env := seedExternal(t, st, srv.URL)
 	if _, err := st.EnqueueDeployment(ctx, env.ID, "sha-1", "vova"); err != nil {
 		t.Fatal(err)

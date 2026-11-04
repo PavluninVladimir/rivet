@@ -101,6 +101,11 @@ func run(ctx context.Context, cfg config.Config) error {
 	engine := orchestrator.New(st, adapter, bl, reg, cfg.RunnerHeartbeatTimeout)
 	engine.Box = box
 	engine.Policy = polEngine
+	urlPolicy, err := orchestrator.ParseURLPolicy(cfg.AllowPrivateURLs)
+	if err != nil {
+		return err
+	}
+	engine.URLPolicy = urlPolicy
 	// RIVET_SCM=fake — установка без настоящих хостингов (e2e-стенд).
 	engine.Adapters.Force = cfg.SCM == "fake"
 

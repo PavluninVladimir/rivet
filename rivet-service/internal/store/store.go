@@ -46,6 +46,10 @@ type EventInput struct {
 }
 
 func appendEvent(ctx context.Context, tx pgx.Tx, e EventInput) (int64, error) {
+	// Смена фазы цикла разработки — в самом событии (add-sdlc-cycle).
+	if err := withPhase(ctx, tx, &e); err != nil {
+		return 0, err
+	}
 	payload := e.Payload
 	if payload == nil {
 		payload = map[string]any{}
@@ -268,6 +272,11 @@ func (s *Store) TransitionTask(ctx context.Context, taskID string, to domain.Tas
 func (s *Store) TransitionEpic(ctx context.Context, epicID string, to domain.EpicStatus, ev EventInput) error {
 	var denied *EventInput
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if to == domain.EpicArchived {
+			if err := maintenanceArchiveTx(ctx, tx, epicID); err != nil {
+				return err
+			}
+		}
 		var from domain.EpicStatus
 		var projectID string
 		if err := tx.QueryRow(ctx,

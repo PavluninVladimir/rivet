@@ -71,6 +71,10 @@ type Config struct {
 	RunnerHeartbeatTimeout time.Duration
 	// DefaultAttemptLimit — лимит попыток задачи по умолчанию (спека orchestration).
 	DefaultAttemptLimit int
+	// AllowPrivateURLs — RIVET_ALLOW_PRIVATE_URLS: `true` или список CIDR,
+	// которые проверки URL control plane'ом (Verify внешней доставки,
+	// наблюдение) могут открывать во внутренней сети.
+	AllowPrivateURLs string
 }
 
 func FromEnv() (Config, error) {
@@ -97,6 +101,7 @@ func FromEnv() (Config, error) {
 		AdminLogin:             os.Getenv("RIVET_ADMIN_LOGIN"),
 		AdminPassword:          os.Getenv("RIVET_ADMIN_PASSWORD"),
 		TrustProxy:             os.Getenv("RIVET_TRUST_PROXY") == "1",
+		AllowPrivateURLs:       os.Getenv("RIVET_ALLOW_PRIVATE_URLS"),
 		PolicyMode:             os.Getenv("RIVET_POLICY_MODE"),
 		PolicyURL:              strings.TrimSuffix(os.Getenv("RIVET_POLICY_URL"), "/"),
 		PolicyTimeout:          3 * time.Second,

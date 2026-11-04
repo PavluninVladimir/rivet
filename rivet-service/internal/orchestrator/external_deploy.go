@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
@@ -35,7 +34,7 @@ func (e *Engine) tickExternalDeployments(ctx context.Context) error {
 		return err
 	}
 	for _, depID := range timedOut {
-		if err := e.failDeployNow(ctx, depID, "", "таймаут внешней публикации: пайплайн хостинга не завершился"); err != nil {
+		if err := e.failDeployInfra(ctx, depID, "", "таймаут внешней публикации: пайплайн хостинга не завершился"); err != nil {
 			slog.Error("внешняя публикация: watchdog", "deployment", depID, "err", err)
 		}
 	}
@@ -233,7 +232,12 @@ func (e *Engine) verifyExternal(ctx context.Context, a store.DeployAssignment) e
 		"пайплайн выполнен — проверка окружения", a.Deployment.ExternalURL); err != nil {
 		return err
 	}
-	if err := verifyDeployURL(ctx, a.Env.Config.VerifyURL); err != nil {
+	if err := e.verifyDeployURL(ctx, a.Env.Config.VerifyURL); err != nil {
+		if isPrivateAddress(err) {
+			// Ошибка настройки, а не версии: откат тем же пайплайном упал бы
+			// так же, а инцидент поставил бы Разработчику бессмысленный баг.
+			return e.failDeployInfra(ctx, a.Deployment.ID, "", "verify: "+err.Error())
+		}
 		e.failExternal(ctx, a, "verify: "+err.Error())
 		return nil
 	}
@@ -351,39 +355,4 @@ func urlSuffix(u string) string {
 		return ""
 	}
 	return ": " + u
-}
-
-// verifyClient — клиент health-check'а: редиректы не выполняются (адрес
-// проверки задаёт администратор, и уводить запрос плоскости в другое место
-// он не должен), дедлайн короткий.
-var verifyClient = &http.Client{
-	Timeout: 15 * time.Second,
-	CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
-}
-
-// verifyDeployURL — health-check окружения силами control plane: 2xx на
-// GET считается успехом, как и у проверки runner'ом. Адрес приходит из
-// конфигурации окружения, а её меняет только администратор установки — тот
-// же уровень доверия, что у команд деплоя.
-func verifyDeployURL(ctx context.Context, rawURL string) error {
-	if rawURL == "" {
-		return fmt.Errorf("у окружения не настроен verify_url")
-	}
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := verifyClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%s ответил %d", rawURL, resp.StatusCode)
-	}
-	return nil
 }

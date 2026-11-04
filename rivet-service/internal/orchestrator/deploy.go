@@ -26,8 +26,9 @@ const (
 
 // FailDeploymentNow — внешняя точка провала публикации без отката
 // (reconnect runner'а: его деплой-goroutine мертва, результата не будет).
+// Это сбой инфраструктуры, а не приложения: инцидент не открывается.
 func (e *Engine) FailDeploymentNow(ctx context.Context, depID, detail string) error {
-	return e.failDeployNow(ctx, depID, "", detail)
+	return e.failDeployInfra(ctx, depID, "", detail)
 }
 
 // tickDeployments — планирование публикаций и watchdog (вызывается из Tick).
@@ -37,7 +38,7 @@ func (e *Engine) tickDeployments(ctx context.Context) error {
 		return err
 	}
 	for _, depID := range timedOut {
-		if err := e.failDeployNow(ctx, depID, "", "таймаут публикации: runner не вернул результат"); err != nil {
+		if err := e.failDeployInfra(ctx, depID, "", "таймаут публикации: runner не вернул результат"); err != nil {
 			slog.Error("deploy watchdog", "deployment", depID, "err", err)
 		}
 	}
@@ -197,15 +198,23 @@ func (e *Engine) OnDeployResult(ctx context.Context, runnerID string, dr *pb.Dep
 // (+ пауза и эскалация для rolled_back)). Ошибка уходит без Ack — повтор
 // результата восстановит цепочку целиком.
 func (e *Engine) finishDeploy(ctx context.Context, depID, runnerID, status, detail string) error {
-	e.flushDeployLog(ctx, depID)
+	logBuf := e.flushDeployLog(ctx, depID)
 	var done bool
+	var res *store.FailureResult
 	var err error
 	if status == "done" {
 		done, err = e.St.CompleteDeployment(ctx, depID, runnerID)
 	} else {
 		// rolled_back — это провал с успешным откатом: полная цепочка
-		// провала (пауза, эскалация), статус rolled_back.
-		done, err = e.St.FailDeployment(ctx, depID, runnerID, status, detail)
+		// провала (пауза, эскалация), статус rolled_back и инцидент с
+		// источником release в той же транзакции. Причина исходного
+		// провала записана в detail при переходе в откат.
+		cause := detail
+		if dep, gerr := e.St.GetDeployment(ctx, depID); gerr == nil && dep.Detail != "" {
+			cause = dep.Detail
+		}
+		done, res, err = e.St.FailDeploymentIncident(ctx, depID, runnerID, status, detail,
+			e.releaseFailure(ctx, depID, logBuf, cause))
 	}
 	if err != nil {
 		return err
@@ -213,6 +222,13 @@ func (e *Engine) finishDeploy(ctx context.Context, depID, runnerID, status, deta
 	e.dropDeploy(depID)
 	if !done {
 		slog.Warn("финал публикации уже выполнен другим путём", "deployment", depID, "status", status)
+		return nil
+	}
+	// Цикл разработки: release notes у релиза, разбор провала у отката.
+	if status == "done" {
+		e.afterRelease(ctx, depID)
+	} else if res != nil {
+		e.afterFailure(ctx, *res, JobDeployAnalysis)
 	}
 	return nil
 }
@@ -274,42 +290,68 @@ func (e *Engine) failDeploy(ctx context.Context, depID, runnerID, detail string,
 // уходит вызывающему: недоставленная fail-цепочка результата runner'а не
 // должна получить Ack (runner повторит сообщение).
 func (e *Engine) failDeployNow(ctx context.Context, depID, runnerID, detail string) error {
-	e.flushDeployLog(ctx, depID)
-	done, err := e.St.FailDeployment(ctx, depID, runnerID, "failed", detail)
+	return e.failDeployWith(ctx, depID, runnerID, detail, true)
+}
+
+// failDeployInfra — провал публикации из-за инфраструктуры (потеря
+// runner'а, таймаут watchdog'а): пауза и эскалация как обычно, но инцидент
+// сопровождения и задача-баг Разработчику не создаются — исправлять код
+// тут нечего.
+func (e *Engine) failDeployInfra(ctx context.Context, depID, runnerID, detail string) error {
+	return e.failDeployWith(ctx, depID, runnerID, detail, false)
+}
+
+func (e *Engine) failDeployWith(ctx context.Context, depID, runnerID, detail string, incident bool) error {
+	logBuf := e.flushDeployLog(ctx, depID)
+	var rf *store.ReleaseFailure
+	if incident {
+		rf = e.releaseFailure(ctx, depID, logBuf, detail)
+	}
+	done, res, err := e.St.FailDeploymentIncident(ctx, depID, runnerID, "failed", detail, rf)
 	if err != nil {
 		return fmt.Errorf("fail deployment %s: %w", depID, err)
 	}
+	e.dropDeploy(depID)
 	if !done {
 		slog.Warn("публикация уже финализирована", "deployment", depID)
+		return nil
 	}
-	e.dropDeploy(depID)
+	if res != nil {
+		e.afterFailure(ctx, *res, JobDeployAnalysis)
+	}
 	return nil
 }
 
 // flushDeployLog уводит накопленный лог публикации в blob (лог уже
-// замаскирован построчным редактором на входе потока).
-func (e *Engine) flushDeployLog(ctx context.Context, depID string) {
+// замаскирован построчным редактором на входе потока) и возвращает его
+// для инцидента провала.
+func (e *Engine) flushDeployLog(ctx context.Context, depID string) []byte {
 	e.mu.Lock()
 	buf := e.deployLogs[depID]
 	delete(e.deployLogs, depID)
 	e.mu.Unlock()
-	if len(buf) == 0 || e.Blob == nil {
-		return
+	if len(buf) == 0 {
+		return nil
+	}
+	buf = redact.Bytes(buf)
+	if e.Blob == nil {
+		return buf
 	}
 	_, _, envName, _, err := e.St.DeploymentRefs(ctx, depID)
 	if err != nil {
 		slog.Error("deploy log refs", "deployment", depID, "err", err)
-		return
+		return buf
 	}
 	key := fmt.Sprintf("deploys/%s/%s.log", envName, depID)
-	ref, err := e.Blob.Put(ctx, key, redact.Bytes(buf))
+	ref, err := e.Blob.Put(ctx, key, buf)
 	if err != nil {
 		slog.Error("deploy log flush", "deployment", depID, "err", err)
-		return
+		return buf
 	}
 	if err := e.St.SetDeploymentLog(ctx, depID, ref); err != nil {
 		slog.Error("deploy log ref", "deployment", depID, "err", err)
 	}
+	return buf
 }
 
 // dropDeploy чистит память публикации.

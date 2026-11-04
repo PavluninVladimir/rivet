@@ -198,6 +198,11 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 			return nil, err
 		}
 	}
+	// Проверки наблюдения прежней сессии прерваны: ожидание снимается, а
+	// проверка повторяется сразу, без ложного провала по таймауту.
+	if err := s.St.ReleaseMonitorChecks(ctx, req.RunnerId); err != nil {
+		slog.Warn("проверки наблюдения runner'а", "runner", req.RunnerId, "err", err)
+	}
 	// Глубина данных — часть контракта v6: неизвестное значение — это
 	// несовместимый runner, а не повод молча записать minimal.
 	switch domain.SessionDepth(req.Depth) {
@@ -303,6 +308,13 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 		msg, err := streamSrv.Recv()
 		if err != nil {
 			slog.Info("runner disconnected", "runner", runnerID, "err", err)
+			// Снимаются проверки только этой сессии: если runner уже
+			// переподключился, его новые проверки не трогаются.
+			if s.Reg.Current(runnerID, sendCh) {
+				if rerr := s.St.ReleaseMonitorChecks(context.WithoutCancel(ctx), runnerID); rerr != nil {
+					slog.Warn("проверки наблюдения runner'а", "runner", runnerID, "err", rerr)
+				}
+			}
 			return nil
 		}
 		if _, dup := seen[msg.MsgId]; dup {
@@ -685,6 +697,9 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 			s.flushDeployRedactor(ctx, dr.DeploymentId)
 		}
 		return s.Engine.OnDeployResult(ctx, runnerID, dr)
+
+	case *pb.RunnerMsg_MonitorResult:
+		return s.Engine.OnMonitorResult(ctx, runnerID, k.MonitorResult)
 	}
 	return nil
 }
