@@ -1,0 +1,1 @@
+const t=r=>String(r).replace(/[&<>"]/g,e=>"&#"+e.charCodeAt(0)+";"),n=r=>t(r),o=()=>{throw new Error("формулы не поддерживаются консолью")},c={renderToString:n,render:o};export{c as default,o as render,n as renderToString};
