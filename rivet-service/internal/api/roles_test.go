@@ -140,7 +140,7 @@ func TestRolesAndTeamAPI(t *testing.T) {
 
 // domainRunner — runner-исполнитель с capability coding.
 func domainRunner(id string) domain.Runner {
-	return domain.Runner{ID: id, Agent: "claude-code", Capabilities: []string{"coding"}}
+	return domain.Runner{ID: id, Agent: store.AgentRivet, Capabilities: []string{"coding"}}
 }
 
 // completerFunc — провайдер планировщика из функции.

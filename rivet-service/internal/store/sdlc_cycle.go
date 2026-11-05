@@ -310,7 +310,7 @@ func loadCycleAgents(ctx context.Context, tx pgx.Tx, projectID string, busy Cycl
 			COALESCE(w.project_id::text, ''), COALESCE(w.runner_id, ''),
 			-- подходящий online-runner по тем же правилам, что подбор при
 			-- назначении (WaitingTeamRuns): capability роли, профиль, модель
-			ro.capability <> '' AND EXISTS (SELECT 1 FROM runners x WHERE x.status <> 'offline' AND NOT x.draining
+			ro.capability <> '' AND EXISTS (SELECT 1 FROM runners x WHERE x.status <> 'offline' AND NOT x.draining AND `+agentRunner("x")+`
 			        AND x.capabilities @> ARRAY[ro.capability]
 			        AND x.agent = COALESCE(NULLIF(a.agent, ''), NULLIF(ro.agent, ''), x.agent)
 			        AND (COALESCE(NULLIF(a.model, ''), ro.default_model->>'model', '') = ''

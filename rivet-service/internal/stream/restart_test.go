@@ -43,8 +43,8 @@ func TestRunnerRestartReleasesRuns(t *testing.T) {
 	authed := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+secret)
 	register := func(boot string) {
 		t.Helper()
-		resp, err := client.Register(authed, &pb.RegisterRequest{RunnerId: "r1", Agent: "claude-code", Host: "h",
-			Capabilities: []string{"coding"}, ProtocolVersion: protocolVersion, Adapter: "wrap", Depth: "minimal", BootId: boot})
+		resp, err := client.Register(authed, &pb.RegisterRequest{RunnerId: "r1", Agent: "rivet", Host: "h",
+			Capabilities: []string{"coding"}, ProtocolVersion: protocolVersion, Adapter: "wrap", Depth: "minimal", BootId: boot, Features: []string{"native"}})
 		if err != nil || !resp.Accepted {
 			t.Fatalf("регистрация: %v %+v", err, resp)
 		}

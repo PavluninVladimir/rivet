@@ -130,7 +130,7 @@ func (x DeployResult_Stage) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DeployResult_Stage.Descriptor instead.
 func (DeployResult_Stage) EnumDescriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{21, 0}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{23, 0}
 }
 
 type RegisterRequest struct {
@@ -141,13 +141,15 @@ type RegisterRequest struct {
 	Host            string                 `protobuf:"bytes,4,opt,name=host,proto3" json:"host,omitempty"`
 	Capabilities    []string               `protobuf:"bytes,5,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
 	ProtocolVersion string                 `protobuf:"bytes,6,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`
-	// Адаптер подключения агента (claude-code, wrap) и глубина данных,
-	// которую он даёт: full | partial | minimal (спека agent-integration
-	// «Уровни глубины данных»). Сессии runner'а создаются с этой глубиной.
+	// Адаптер подключения агента (native у агента Rivet, пусто у runner'а
+	// выкатки; claude-code и wrap только у старых runner'ов) и глубина
+	// данных, которую он даёт: full | partial | minimal (спека
+	// agent-integration «Уровни глубины данных»). Сессии runner'а создаются
+	// с этой глубиной.
 	Adapter string `protobuf:"bytes,7,opt,name=adapter,proto3" json:"adapter,omitempty"`
 	Depth   string `protobuf:"bytes,8,opt,name=depth,proto3" json:"depth,omitempty"`
 	// Поддерживает ли адаптер обратный канал контекста (PlaneMsg.Context):
-	// нативный адаптер доводит контекст до агента, обёртка — нет, и таким
+	// агент Rivet доводит контекст до модели, старая обёртка — нет, и таким
 	// runner'ам control plane контекст не шлёт (спека agent-integration
 	// «Обратный канал контекста»).
 	ContextChannel bool `protobuf:"varint,9,opt,name=context_channel,json=contextChannel,proto3" json:"context_channel,omitempty"`
@@ -174,6 +176,10 @@ type RegisterRequest struct {
 	// доставлены: перезапущенный runner проиграет их, такие запуски control
 	// plane не снимает.
 	PendingSessions []string `protobuf:"bytes,15,rep,name=pending_sessions,json=pendingSessions,proto3" json:"pending_sessions,omitempty"`
+	// Команды агента идут в песочнице без сети (add-native-agent): runner
+	// объявляет, поднялась ли песочница; консоль показывает runner'ы, чьи
+	// команды идут с доступом в сеть. Номер с запасом под соседние change'ы.
+	NetworkIsolated bool `protobuf:"varint,40,opt,name=network_isolated,json=networkIsolated,proto3" json:"network_isolated,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -311,6 +317,13 @@ func (x *RegisterRequest) GetPendingSessions() []string {
 		return x.PendingSessions
 	}
 	return nil
+}
+
+func (x *RegisterRequest) GetNetworkIsolated() bool {
+	if x != nil {
+		return x.NetworkIsolated
+	}
+	return false
 }
 
 type RegisterResponse struct {
@@ -866,17 +879,22 @@ func (x *TranscriptChunk) GetDeployId() string {
 // Usage — отчёт о расходе за стадию. Отсутствие optional-поля означает
 // «данных нет» (агент не отчитался маркером USAGE:), а не ноль.
 type Usage struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
-	SessionId     string                 `protobuf:"bytes,8,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // сессия стадии из Assignment
-	Model         string                 `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
-	TokensIn      *int64                 `protobuf:"varint,3,opt,name=tokens_in,json=tokensIn,proto3,oneof" json:"tokens_in,omitempty"`
-	TokensOut     *int64                 `protobuf:"varint,4,opt,name=tokens_out,json=tokensOut,proto3,oneof" json:"tokens_out,omitempty"`
-	CostUsd       *float64               `protobuf:"fixed64,5,opt,name=cost_usd,json=costUsd,proto3,oneof" json:"cost_usd,omitempty"`
-	DurationS     int32                  `protobuf:"varint,6,opt,name=duration_s,json=durationS,proto3" json:"duration_s,omitempty"`
-	CtxPct        *int32                 `protobuf:"varint,7,opt,name=ctx_pct,json=ctxPct,proto3,oneof" json:"ctx_pct,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	TaskId    string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	SessionId string                 `protobuf:"bytes,8,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // сессия стадии из Assignment
+	Model     string                 `protobuf:"bytes,2,opt,name=model,proto3" json:"model,omitempty"`
+	TokensIn  *int64                 `protobuf:"varint,3,opt,name=tokens_in,json=tokensIn,proto3,oneof" json:"tokens_in,omitempty"`
+	TokensOut *int64                 `protobuf:"varint,4,opt,name=tokens_out,json=tokensOut,proto3,oneof" json:"tokens_out,omitempty"`
+	CostUsd   *float64               `protobuf:"fixed64,5,opt,name=cost_usd,json=costUsd,proto3,oneof" json:"cost_usd,omitempty"`
+	DurationS int32                  `protobuf:"varint,6,opt,name=duration_s,json=durationS,proto3" json:"duration_s,omitempty"`
+	CtxPct    *int32                 `protobuf:"varint,7,opt,name=ctx_pct,json=ctxPct,proto3,oneof" json:"ctx_pct,omitempty"`
+	// Кешированный вход (чтение из кеша провайдера) и запись в кеш, входят в
+	// tokens_in (add-native-agent, спека native-agent «Наблюдаемость»).
+	// Номера с запасом под соседние change'ы.
+	TokensCached     *int64 `protobuf:"varint,40,opt,name=tokens_cached,json=tokensCached,proto3,oneof" json:"tokens_cached,omitempty"`
+	TokensCacheWrite *int64 `protobuf:"varint,41,opt,name=tokens_cache_write,json=tokensCacheWrite,proto3,oneof" json:"tokens_cache_write,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *Usage) Reset() {
@@ -961,6 +979,20 @@ func (x *Usage) GetDurationS() int32 {
 func (x *Usage) GetCtxPct() int32 {
 	if x != nil && x.CtxPct != nil {
 		return *x.CtxPct
+	}
+	return 0
+}
+
+func (x *Usage) GetTokensCached() int64 {
+	if x != nil && x.TokensCached != nil {
+		return *x.TokensCached
+	}
+	return 0
+}
+
+func (x *Usage) GetTokensCacheWrite() int64 {
+	if x != nil && x.TokensCacheWrite != nil {
+		return *x.TokensCacheWrite
 	}
 	return 0
 }
@@ -1492,12 +1524,21 @@ type Assignment struct {
 	// окружения и аргументы по шаблону профиля, команда обёртки, подключение
 	// модели. Секреты включены только по режиму профиля и каналу runner'а;
 	// runner накладывает окружение поверх своего и маскирует секреты.
-	AgentEnv        map[string]string `protobuf:"bytes,21,rep,name=agent_env,json=agentEnv,proto3" json:"agent_env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	AgentArgs       []string          `protobuf:"bytes,22,rep,name=agent_args,json=agentArgs,proto3" json:"agent_args,omitempty"`
-	AgentCommand    string            `protobuf:"bytes,23,opt,name=agent_command,json=agentCommand,proto3" json:"agent_command,omitempty"`
-	ConnectionId    string            `protobuf:"bytes,24,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
-	SecretsIncluded bool              `protobuf:"varint,25,opt,name=secrets_included,json=secretsIncluded,proto3" json:"secrets_included,omitempty"`
+	// Поля 21–23 и 26 устарели (add-native-agent): у агента Rivet нет команды,
+	// аргументов и окружения CLI, модель приходит в endpoint. Номера не
+	// переиспользуются.
+	//
+	// Deprecated: Marked as deprecated in pkg/protocol/rivet.proto.
+	AgentEnv map[string]string `protobuf:"bytes,21,rep,name=agent_env,json=agentEnv,proto3" json:"agent_env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Deprecated: Marked as deprecated in pkg/protocol/rivet.proto.
+	AgentArgs []string `protobuf:"bytes,22,rep,name=agent_args,json=agentArgs,proto3" json:"agent_args,omitempty"`
+	// Deprecated: Marked as deprecated in pkg/protocol/rivet.proto.
+	AgentCommand    string `protobuf:"bytes,23,opt,name=agent_command,json=agentCommand,proto3" json:"agent_command,omitempty"`
+	ConnectionId    string `protobuf:"bytes,24,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
+	SecretsIncluded bool   `protobuf:"varint,25,opt,name=secrets_included,json=secretsIncluded,proto3" json:"secrets_included,omitempty"`
 	// Имена переменных с секретами: runner маскирует их значения в транскрипте.
+	//
+	// Deprecated: Marked as deprecated in pkg/protocol/rivet.proto.
 	AgentSecretNames []string `protobuf:"bytes,26,rep,name=agent_secret_names,json=agentSecretNames,proto3" json:"agent_secret_names,omitempty"`
 	// Роль участника (add-agent-roles, спека agent-roles «Инструкция роли в
 	// назначении»): runner ставит блок роли перед заданием стадии. На стадии
@@ -1506,7 +1547,12 @@ type Assignment struct {
 	// Шаблоны тестовых файлов проекта: сессия тестировщика может менять только
 	// их, остальные правки откатываются (спека process «Шаг test с
 	// тестировщиком»).
-	TestPaths     []string `protobuf:"bytes,28,rep,name=test_paths,json=testPaths,proto3" json:"test_paths,omitempty"`
+	TestPaths []string `protobuf:"bytes,28,rep,name=test_paths,json=testPaths,proto3" json:"test_paths,omitempty"`
+	// Модель агента Rivet (add-native-agent, design решение 2): тип API,
+	// адрес, модель, окно и цены из каталога, лимиты сессии из профиля rivet,
+	// ключ — только по режиму секретов. Номер с запасом: соседние change'ы
+	// добавляют поля в те же сообщения.
+	Endpoint      *ModelEndpoint `protobuf:"bytes,40,opt,name=endpoint,proto3" json:"endpoint,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1681,6 +1727,7 @@ func (x *Assignment) GetStepPrompt() string {
 	return ""
 }
 
+// Deprecated: Marked as deprecated in pkg/protocol/rivet.proto.
 func (x *Assignment) GetAgentEnv() map[string]string {
 	if x != nil {
 		return x.AgentEnv
@@ -1688,6 +1735,7 @@ func (x *Assignment) GetAgentEnv() map[string]string {
 	return nil
 }
 
+// Deprecated: Marked as deprecated in pkg/protocol/rivet.proto.
 func (x *Assignment) GetAgentArgs() []string {
 	if x != nil {
 		return x.AgentArgs
@@ -1695,6 +1743,7 @@ func (x *Assignment) GetAgentArgs() []string {
 	return nil
 }
 
+// Deprecated: Marked as deprecated in pkg/protocol/rivet.proto.
 func (x *Assignment) GetAgentCommand() string {
 	if x != nil {
 		return x.AgentCommand
@@ -1716,6 +1765,7 @@ func (x *Assignment) GetSecretsIncluded() bool {
 	return false
 }
 
+// Deprecated: Marked as deprecated in pkg/protocol/rivet.proto.
 func (x *Assignment) GetAgentSecretNames() []string {
 	if x != nil {
 		return x.AgentSecretNames
@@ -1737,6 +1787,228 @@ func (x *Assignment) GetTestPaths() []string {
 	return nil
 }
 
+func (x *Assignment) GetEndpoint() *ModelEndpoint {
+	if x != nil {
+		return x.Endpoint
+	}
+	return nil
+}
+
+// ModelEndpoint — подключение модели для агентского цикла Rivet.
+type ModelEndpoint struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// openai (Chat Completions) | anthropic (Messages).
+	Api           string `protobuf:"bytes,1,opt,name=api,proto3" json:"api,omitempty"`
+	BaseUrl       string `protobuf:"bytes,2,opt,name=base_url,json=baseUrl,proto3" json:"base_url,omitempty"`
+	Model         string `protobuf:"bytes,3,opt,name=model,proto3" json:"model,omitempty"`
+	ContextWindow int32  `protobuf:"varint,4,opt,name=context_window,json=contextWindow,proto3" json:"context_window,omitempty"`
+	// Предел ответа на ход и предельный выход модели (потолок повтора хода
+	// с обрезанным вызовом); 0 — по умолчанию цикла.
+	MaxOutputTokens int32 `protobuf:"varint,5,opt,name=max_output_tokens,json=maxOutputTokens,proto3" json:"max_output_tokens,omitempty"`
+	ModelMaxOutput  int32 `protobuf:"varint,6,opt,name=model_max_output,json=modelMaxOutput,proto3" json:"model_max_output,omitempty"`
+	// Цены за миллион токенов, USD; has_prices = false — цен нет.
+	HasPrices        bool           `protobuf:"varint,7,opt,name=has_prices,json=hasPrices,proto3" json:"has_prices,omitempty"`
+	InputPrice       float64        `protobuf:"fixed64,8,opt,name=input_price,json=inputPrice,proto3" json:"input_price,omitempty"`
+	OutputPrice      float64        `protobuf:"fixed64,9,opt,name=output_price,json=outputPrice,proto3" json:"output_price,omitempty"`
+	CachedInputPrice float64        `protobuf:"fixed64,10,opt,name=cached_input_price,json=cachedInputPrice,proto3" json:"cached_input_price,omitempty"`
+	Limits           *SessionLimits `protobuf:"bytes,11,opt,name=limits,proto3" json:"limits,omitempty"`
+	ConnectionId     string         `protobuf:"bytes,12,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`
+	// Ключ и секретные заголовки — только при secrets_included назначения.
+	Key           string            `protobuf:"bytes,13,opt,name=key,proto3" json:"key,omitempty"`
+	Headers       map[string]string `protobuf:"bytes,14,rep,name=headers,proto3" json:"headers,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ModelEndpoint) Reset() {
+	*x = ModelEndpoint{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModelEndpoint) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModelEndpoint) ProtoMessage() {}
+
+func (x *ModelEndpoint) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModelEndpoint.ProtoReflect.Descriptor instead.
+func (*ModelEndpoint) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *ModelEndpoint) GetApi() string {
+	if x != nil {
+		return x.Api
+	}
+	return ""
+}
+
+func (x *ModelEndpoint) GetBaseUrl() string {
+	if x != nil {
+		return x.BaseUrl
+	}
+	return ""
+}
+
+func (x *ModelEndpoint) GetModel() string {
+	if x != nil {
+		return x.Model
+	}
+	return ""
+}
+
+func (x *ModelEndpoint) GetContextWindow() int32 {
+	if x != nil {
+		return x.ContextWindow
+	}
+	return 0
+}
+
+func (x *ModelEndpoint) GetMaxOutputTokens() int32 {
+	if x != nil {
+		return x.MaxOutputTokens
+	}
+	return 0
+}
+
+func (x *ModelEndpoint) GetModelMaxOutput() int32 {
+	if x != nil {
+		return x.ModelMaxOutput
+	}
+	return 0
+}
+
+func (x *ModelEndpoint) GetHasPrices() bool {
+	if x != nil {
+		return x.HasPrices
+	}
+	return false
+}
+
+func (x *ModelEndpoint) GetInputPrice() float64 {
+	if x != nil {
+		return x.InputPrice
+	}
+	return 0
+}
+
+func (x *ModelEndpoint) GetOutputPrice() float64 {
+	if x != nil {
+		return x.OutputPrice
+	}
+	return 0
+}
+
+func (x *ModelEndpoint) GetCachedInputPrice() float64 {
+	if x != nil {
+		return x.CachedInputPrice
+	}
+	return 0
+}
+
+func (x *ModelEndpoint) GetLimits() *SessionLimits {
+	if x != nil {
+		return x.Limits
+	}
+	return nil
+}
+
+func (x *ModelEndpoint) GetConnectionId() string {
+	if x != nil {
+		return x.ConnectionId
+	}
+	return ""
+}
+
+func (x *ModelEndpoint) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *ModelEndpoint) GetHeaders() map[string]string {
+	if x != nil {
+		return x.Headers
+	}
+	return nil
+}
+
+// SessionLimits — лимиты сессии агента; 0 — по умолчанию цикла.
+type SessionLimits struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MaxTurns      int32                  `protobuf:"varint,1,opt,name=max_turns,json=maxTurns,proto3" json:"max_turns,omitempty"`
+	MaxTokens     int64                  `protobuf:"varint,2,opt,name=max_tokens,json=maxTokens,proto3" json:"max_tokens,omitempty"`
+	MaxMinutes    int32                  `protobuf:"varint,3,opt,name=max_minutes,json=maxMinutes,proto3" json:"max_minutes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionLimits) Reset() {
+	*x = SessionLimits{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionLimits) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionLimits) ProtoMessage() {}
+
+func (x *SessionLimits) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionLimits.ProtoReflect.Descriptor instead.
+func (*SessionLimits) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *SessionLimits) GetMaxTurns() int32 {
+	if x != nil {
+		return x.MaxTurns
+	}
+	return 0
+}
+
+func (x *SessionLimits) GetMaxTokens() int64 {
+	if x != nil {
+		return x.MaxTokens
+	}
+	return 0
+}
+
+func (x *SessionLimits) GetMaxMinutes() int32 {
+	if x != nil {
+		return x.MaxMinutes
+	}
+	return 0
+}
+
 // AgentRole — роль исполнителя стадии: идентификатор и название из каталога,
 // имя runner'а и инструкция агенту на момент назначения.
 type AgentRole struct {
@@ -1751,7 +2023,7 @@ type AgentRole struct {
 
 func (x *AgentRole) Reset() {
 	*x = AgentRole{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1763,7 +2035,7 @@ func (x *AgentRole) String() string {
 func (*AgentRole) ProtoMessage() {}
 
 func (x *AgentRole) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1776,7 +2048,7 @@ func (x *AgentRole) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentRole.ProtoReflect.Descriptor instead.
 func (*AgentRole) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{14}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *AgentRole) GetId() string {
@@ -1821,7 +2093,7 @@ type Policy struct {
 
 func (x *Policy) Reset() {
 	*x = Policy{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1833,7 +2105,7 @@ func (x *Policy) String() string {
 func (*Policy) ProtoMessage() {}
 
 func (x *Policy) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1846,7 +2118,7 @@ func (x *Policy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Policy.ProtoReflect.Descriptor instead.
 func (*Policy) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{15}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Policy) GetHash() string {
@@ -1880,7 +2152,7 @@ type Check struct {
 
 func (x *Check) Reset() {
 	*x = Check{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1892,7 +2164,7 @@ func (x *Check) String() string {
 func (*Check) ProtoMessage() {}
 
 func (x *Check) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1905,7 +2177,7 @@ func (x *Check) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Check.ProtoReflect.Descriptor instead.
 func (*Check) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{16}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Check) GetName() string {
@@ -1932,7 +2204,7 @@ type Answer struct {
 
 func (x *Answer) Reset() {
 	*x = Answer{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1944,7 +2216,7 @@ func (x *Answer) String() string {
 func (*Answer) ProtoMessage() {}
 
 func (x *Answer) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1957,7 +2229,7 @@ func (x *Answer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Answer.ProtoReflect.Descriptor instead.
 func (*Answer) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{17}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Answer) GetTaskId() string {
@@ -1983,7 +2255,7 @@ type CancelTask struct {
 
 func (x *CancelTask) Reset() {
 	*x = CancelTask{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1995,7 +2267,7 @@ func (x *CancelTask) String() string {
 func (*CancelTask) ProtoMessage() {}
 
 func (x *CancelTask) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2008,7 +2280,7 @@ func (x *CancelTask) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTask.ProtoReflect.Descriptor instead.
 func (*CancelTask) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{18}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *CancelTask) GetTaskId() string {
@@ -2027,7 +2299,7 @@ type PauseRunner struct {
 
 func (x *PauseRunner) Reset() {
 	*x = PauseRunner{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2039,7 +2311,7 @@ func (x *PauseRunner) String() string {
 func (*PauseRunner) ProtoMessage() {}
 
 func (x *PauseRunner) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2052,7 +2324,7 @@ func (x *PauseRunner) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PauseRunner.ProtoReflect.Descriptor instead.
 func (*PauseRunner) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{19}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *PauseRunner) GetDrain() bool {
@@ -2093,7 +2365,7 @@ type DeployJob struct {
 
 func (x *DeployJob) Reset() {
 	*x = DeployJob{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[20]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2105,7 +2377,7 @@ func (x *DeployJob) String() string {
 func (*DeployJob) ProtoMessage() {}
 
 func (x *DeployJob) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[20]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2118,7 +2390,7 @@ func (x *DeployJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeployJob.ProtoReflect.Descriptor instead.
 func (*DeployJob) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{20}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *DeployJob) GetDeploymentId() string {
@@ -2234,7 +2506,7 @@ type DeployResult struct {
 
 func (x *DeployResult) Reset() {
 	*x = DeployResult{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[21]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2246,7 +2518,7 @@ func (x *DeployResult) String() string {
 func (*DeployResult) ProtoMessage() {}
 
 func (x *DeployResult) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[21]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2259,7 +2531,7 @@ func (x *DeployResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeployResult.ProtoReflect.Descriptor instead.
 func (*DeployResult) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{21}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *DeployResult) GetDeploymentId() string {
@@ -2323,7 +2595,7 @@ type MonitorJob struct {
 
 func (x *MonitorJob) Reset() {
 	*x = MonitorJob{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[22]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2335,7 +2607,7 @@ func (x *MonitorJob) String() string {
 func (*MonitorJob) ProtoMessage() {}
 
 func (x *MonitorJob) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[22]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2348,7 +2620,7 @@ func (x *MonitorJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MonitorJob.ProtoReflect.Descriptor instead.
 func (*MonitorJob) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{22}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *MonitorJob) GetCheckId() string {
@@ -2435,7 +2707,7 @@ type MonitorResult struct {
 
 func (x *MonitorResult) Reset() {
 	*x = MonitorResult{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[23]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2447,7 +2719,7 @@ func (x *MonitorResult) String() string {
 func (*MonitorResult) ProtoMessage() {}
 
 func (x *MonitorResult) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[23]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2460,7 +2732,7 @@ func (x *MonitorResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MonitorResult.ProtoReflect.Descriptor instead.
 func (*MonitorResult) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{23}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *MonitorResult) GetCheckId() string {
@@ -2502,7 +2774,7 @@ var File_pkg_protocol_rivet_proto protoreflect.FileDescriptor
 
 const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\n" +
-	"\x18pkg/protocol/rivet.proto\x12\brivet.v1\"\xc9\x03\n" +
+	"\x18pkg/protocol/rivet.proto\x12\brivet.v1\"\xf4\x03\n" +
 	"\x0fRegisterRequest\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\x12\x14\n" +
 	"\x05agent\x18\x02 \x01(\tR\x05agent\x12\x14\n" +
@@ -2519,7 +2791,8 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\fdisplay_name\x18\f \x01(\tR\vdisplayName\x12\x1a\n" +
 	"\bfeatures\x18\r \x03(\tR\bfeatures\x12\x17\n" +
 	"\aboot_id\x18\x0e \x01(\tR\x06bootId\x12)\n" +
-	"\x10pending_sessions\x18\x0f \x03(\tR\x0fpendingSessions\"\xac\x01\n" +
+	"\x10pending_sessions\x18\x0f \x03(\tR\x0fpendingSessions\x12)\n" +
+	"\x10network_isolated\x18( \x01(\bR\x0fnetworkIsolated\"\xac\x01\n" +
 	"\x10RegisterResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x120\n" +
@@ -2564,7 +2837,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x04data\x18\x03 \x01(\fR\x04data\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x04 \x01(\tR\tsessionId\x12\x1b\n" +
-	"\tdeploy_id\x18\x05 \x01(\tR\bdeployId\"\xae\x02\n" +
+	"\tdeploy_id\x18\x05 \x01(\tR\bdeployId\"\xb4\x03\n" +
 	"\x05Usage\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
 	"\n" +
@@ -2576,13 +2849,17 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\bcost_usd\x18\x05 \x01(\x01H\x02R\acostUsd\x88\x01\x01\x12\x1d\n" +
 	"\n" +
 	"duration_s\x18\x06 \x01(\x05R\tdurationS\x12\x1c\n" +
-	"\actx_pct\x18\a \x01(\x05H\x03R\x06ctxPct\x88\x01\x01B\f\n" +
+	"\actx_pct\x18\a \x01(\x05H\x03R\x06ctxPct\x88\x01\x01\x12(\n" +
+	"\rtokens_cached\x18( \x01(\x03H\x04R\ftokensCached\x88\x01\x01\x121\n" +
+	"\x12tokens_cache_write\x18) \x01(\x03H\x05R\x10tokensCacheWrite\x88\x01\x01B\f\n" +
 	"\n" +
 	"_tokens_inB\r\n" +
 	"\v_tokens_outB\v\n" +
 	"\t_cost_usdB\n" +
 	"\n" +
-	"\b_ctx_pct\"\x8a\x03\n" +
+	"\b_ctx_pctB\x10\n" +
+	"\x0e_tokens_cachedB\x15\n" +
+	"\x13_tokens_cache_write\"\x8a\x03\n" +
 	"\vStageResult\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x121\n" +
 	"\x05stage\x18\x02 \x01(\x0e2\x1b.rivet.v1.StageResult.StageR\x05stage\x12\x0e\n" +
@@ -2632,7 +2909,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x04text\x18\x04 \x01(\tR\x04text\"'\n" +
 	"\x03Ack\x12 \n" +
 	"\facked_msg_id\x18\x01 \x01(\tR\n" +
-	"ackedMsgId\"\xfe\a\n" +
+	"ackedMsgId\"\xc3\b\n" +
 	"\n" +
 	"Assignment\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x19\n" +
@@ -2659,20 +2936,48 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\astep_id\x18\x12 \x01(\tR\x06stepId\x12 \n" +
 	"\vparticipant\x18\x13 \x01(\tR\vparticipant\x12\x1f\n" +
 	"\vstep_prompt\x18\x14 \x01(\tR\n" +
-	"stepPrompt\x12?\n" +
-	"\tagent_env\x18\x15 \x03(\v2\".rivet.v1.Assignment.AgentEnvEntryR\bagentEnv\x12\x1d\n" +
+	"stepPrompt\x12C\n" +
+	"\tagent_env\x18\x15 \x03(\v2\".rivet.v1.Assignment.AgentEnvEntryB\x02\x18\x01R\bagentEnv\x12!\n" +
 	"\n" +
-	"agent_args\x18\x16 \x03(\tR\tagentArgs\x12#\n" +
-	"\ragent_command\x18\x17 \x01(\tR\fagentCommand\x12#\n" +
+	"agent_args\x18\x16 \x03(\tB\x02\x18\x01R\tagentArgs\x12'\n" +
+	"\ragent_command\x18\x17 \x01(\tB\x02\x18\x01R\fagentCommand\x12#\n" +
 	"\rconnection_id\x18\x18 \x01(\tR\fconnectionId\x12)\n" +
-	"\x10secrets_included\x18\x19 \x01(\bR\x0fsecretsIncluded\x12,\n" +
-	"\x12agent_secret_names\x18\x1a \x03(\tR\x10agentSecretNames\x12'\n" +
+	"\x10secrets_included\x18\x19 \x01(\bR\x0fsecretsIncluded\x120\n" +
+	"\x12agent_secret_names\x18\x1a \x03(\tB\x02\x18\x01R\x10agentSecretNames\x12'\n" +
 	"\x04role\x18\x1b \x01(\v2\x13.rivet.v1.AgentRoleR\x04role\x12\x1d\n" +
 	"\n" +
-	"test_paths\x18\x1c \x03(\tR\ttestPaths\x1a;\n" +
+	"test_paths\x18\x1c \x03(\tR\ttestPaths\x123\n" +
+	"\bendpoint\x18( \x01(\v2\x17.rivet.v1.ModelEndpointR\bendpoint\x1a;\n" +
 	"\rAgentEnvEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"g\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc4\x04\n" +
+	"\rModelEndpoint\x12\x10\n" +
+	"\x03api\x18\x01 \x01(\tR\x03api\x12\x19\n" +
+	"\bbase_url\x18\x02 \x01(\tR\abaseUrl\x12\x14\n" +
+	"\x05model\x18\x03 \x01(\tR\x05model\x12%\n" +
+	"\x0econtext_window\x18\x04 \x01(\x05R\rcontextWindow\x12*\n" +
+	"\x11max_output_tokens\x18\x05 \x01(\x05R\x0fmaxOutputTokens\x12(\n" +
+	"\x10model_max_output\x18\x06 \x01(\x05R\x0emodelMaxOutput\x12\x1d\n" +
+	"\n" +
+	"has_prices\x18\a \x01(\bR\thasPrices\x12\x1f\n" +
+	"\vinput_price\x18\b \x01(\x01R\n" +
+	"inputPrice\x12!\n" +
+	"\foutput_price\x18\t \x01(\x01R\voutputPrice\x12,\n" +
+	"\x12cached_input_price\x18\n" +
+	" \x01(\x01R\x10cachedInputPrice\x12/\n" +
+	"\x06limits\x18\v \x01(\v2\x17.rivet.v1.SessionLimitsR\x06limits\x12#\n" +
+	"\rconnection_id\x18\f \x01(\tR\fconnectionId\x12\x10\n" +
+	"\x03key\x18\r \x01(\tR\x03key\x12>\n" +
+	"\aheaders\x18\x0e \x03(\v2$.rivet.v1.ModelEndpoint.HeadersEntryR\aheaders\x1a:\n" +
+	"\fHeadersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"l\n" +
+	"\rSessionLimits\x12\x1b\n" +
+	"\tmax_turns\x18\x01 \x01(\x05R\bmaxTurns\x12\x1d\n" +
+	"\n" +
+	"max_tokens\x18\x02 \x01(\x03R\tmaxTokens\x12\x1f\n" +
+	"\vmax_minutes\x18\x03 \x01(\x05R\n" +
+	"maxMinutes\"g\n" +
 	"\tAgentRole\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x12\x12\n" +
@@ -2762,7 +3067,7 @@ func file_pkg_protocol_rivet_proto_rawDescGZIP() []byte {
 }
 
 var file_pkg_protocol_rivet_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
 var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(StageResult_Stage)(0),   // 0: rivet.v1.StageResult.Stage
 	(DeployResult_Stage)(0),  // 1: rivet.v1.DeployResult.Stage
@@ -2780,17 +3085,20 @@ var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(*Context)(nil),          // 13: rivet.v1.Context
 	(*Ack)(nil),              // 14: rivet.v1.Ack
 	(*Assignment)(nil),       // 15: rivet.v1.Assignment
-	(*AgentRole)(nil),        // 16: rivet.v1.AgentRole
-	(*Policy)(nil),           // 17: rivet.v1.Policy
-	(*Check)(nil),            // 18: rivet.v1.Check
-	(*Answer)(nil),           // 19: rivet.v1.Answer
-	(*CancelTask)(nil),       // 20: rivet.v1.CancelTask
-	(*PauseRunner)(nil),      // 21: rivet.v1.PauseRunner
-	(*DeployJob)(nil),        // 22: rivet.v1.DeployJob
-	(*DeployResult)(nil),     // 23: rivet.v1.DeployResult
-	(*MonitorJob)(nil),       // 24: rivet.v1.MonitorJob
-	(*MonitorResult)(nil),    // 25: rivet.v1.MonitorResult
-	nil,                      // 26: rivet.v1.Assignment.AgentEnvEntry
+	(*ModelEndpoint)(nil),    // 16: rivet.v1.ModelEndpoint
+	(*SessionLimits)(nil),    // 17: rivet.v1.SessionLimits
+	(*AgentRole)(nil),        // 18: rivet.v1.AgentRole
+	(*Policy)(nil),           // 19: rivet.v1.Policy
+	(*Check)(nil),            // 20: rivet.v1.Check
+	(*Answer)(nil),           // 21: rivet.v1.Answer
+	(*CancelTask)(nil),       // 22: rivet.v1.CancelTask
+	(*PauseRunner)(nil),      // 23: rivet.v1.PauseRunner
+	(*DeployJob)(nil),        // 24: rivet.v1.DeployJob
+	(*DeployResult)(nil),     // 25: rivet.v1.DeployResult
+	(*MonitorJob)(nil),       // 26: rivet.v1.MonitorJob
+	(*MonitorResult)(nil),    // 27: rivet.v1.MonitorResult
+	nil,                      // 28: rivet.v1.Assignment.AgentEnvEntry
+	nil,                      // 29: rivet.v1.ModelEndpoint.HeadersEntry
 }
 var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	5,  // 0: rivet.v1.RunnerMsg.hello:type_name -> rivet.v1.Hello
@@ -2800,32 +3108,35 @@ var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	9,  // 4: rivet.v1.RunnerMsg.usage:type_name -> rivet.v1.Usage
 	10, // 5: rivet.v1.RunnerMsg.stage_result:type_name -> rivet.v1.StageResult
 	11, // 6: rivet.v1.RunnerMsg.blocked:type_name -> rivet.v1.BlockedQuestion
-	23, // 7: rivet.v1.RunnerMsg.deploy_result:type_name -> rivet.v1.DeployResult
-	25, // 8: rivet.v1.RunnerMsg.monitor_result:type_name -> rivet.v1.MonitorResult
+	25, // 7: rivet.v1.RunnerMsg.deploy_result:type_name -> rivet.v1.DeployResult
+	27, // 8: rivet.v1.RunnerMsg.monitor_result:type_name -> rivet.v1.MonitorResult
 	0,  // 9: rivet.v1.StageResult.stage:type_name -> rivet.v1.StageResult.Stage
 	14, // 10: rivet.v1.PlaneMsg.ack:type_name -> rivet.v1.Ack
 	15, // 11: rivet.v1.PlaneMsg.assign:type_name -> rivet.v1.Assignment
-	19, // 12: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
-	20, // 13: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
-	21, // 14: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
-	22, // 15: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
+	21, // 12: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
+	22, // 13: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
+	23, // 14: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
+	24, // 15: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
 	13, // 16: rivet.v1.PlaneMsg.context:type_name -> rivet.v1.Context
-	24, // 17: rivet.v1.PlaneMsg.monitor:type_name -> rivet.v1.MonitorJob
+	26, // 17: rivet.v1.PlaneMsg.monitor:type_name -> rivet.v1.MonitorJob
 	0,  // 18: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
-	18, // 19: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
-	17, // 20: rivet.v1.Assignment.policy:type_name -> rivet.v1.Policy
-	26, // 21: rivet.v1.Assignment.agent_env:type_name -> rivet.v1.Assignment.AgentEnvEntry
-	16, // 22: rivet.v1.Assignment.role:type_name -> rivet.v1.AgentRole
-	1,  // 23: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
-	2,  // 24: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
-	4,  // 25: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
-	3,  // 26: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
-	12, // 27: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
-	26, // [26:28] is the sub-list for method output_type
-	24, // [24:26] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	20, // 19: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
+	19, // 20: rivet.v1.Assignment.policy:type_name -> rivet.v1.Policy
+	28, // 21: rivet.v1.Assignment.agent_env:type_name -> rivet.v1.Assignment.AgentEnvEntry
+	18, // 22: rivet.v1.Assignment.role:type_name -> rivet.v1.AgentRole
+	16, // 23: rivet.v1.Assignment.endpoint:type_name -> rivet.v1.ModelEndpoint
+	17, // 24: rivet.v1.ModelEndpoint.limits:type_name -> rivet.v1.SessionLimits
+	29, // 25: rivet.v1.ModelEndpoint.headers:type_name -> rivet.v1.ModelEndpoint.HeadersEntry
+	1,  // 26: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
+	2,  // 27: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
+	4,  // 28: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
+	3,  // 29: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
+	12, // 30: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
+	29, // [29:31] is the sub-list for method output_type
+	27, // [27:29] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_pkg_protocol_rivet_proto_init() }
@@ -2862,7 +3173,7 @@ func file_pkg_protocol_rivet_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_protocol_rivet_proto_rawDesc), len(file_pkg_protocol_rivet_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   25,
+			NumMessages:   28,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

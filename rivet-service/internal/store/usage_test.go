@@ -119,11 +119,12 @@ func TestUsageSummaryNullAggregation(t *testing.T) {
 func TestEpicUsageTotals(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	_, projectID, epicID, taskA, taskB := seedUsage(t, s)
+	owner, projectID, epicID, taskA, taskB := seedUsage(t, s)
 
 	if err := s.RecordUsage(ctx, UsageInput{
 		SourceMsgID: "m1", ProjectID: projectID, EpicID: epicID, TaskID: taskA.ID,
 		Model: "m", TokensIn: ptr(int64(70)), TokensOut: ptr(int64(30)), DurationS: 7,
+		TokensCached: ptr(int64(50)), TokensCacheWrite: ptr(int64(5)),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -152,6 +153,15 @@ func TestEpicUsageTotals(t *testing.T) {
 	}
 	if total.Duration != 10 {
 		t.Fatalf("итог: длительность 10, получено %d", total.Duration)
+	}
+	// Кешированный вход и запись в кеш агента Rivet (add-native-agent):
+	// сумма по записям, где они есть.
+	if total.TokensCached == nil || *total.TokensCached != 50 || total.TokensCacheWrite == nil || *total.TokensCacheWrite != 5 {
+		t.Fatalf("итог: кеш 50/5, получено %v/%v", total.TokensCached, total.TokensCacheWrite)
+	}
+	sum, err := s.UsageSummary(ctx, UsageScope{ViewerID: owner.ID}, "model", time.Time{}, time.Time{})
+	if err != nil || len(sum) != 1 || sum[0].TokensCached == nil || *sum[0].TokensCached != 50 {
+		t.Fatalf("сводка с кешем: %+v %v", sum, err)
 	}
 }
 
@@ -212,7 +222,7 @@ func TestEndSessionTokens(t *testing.T) {
 func TestTouchRunnerNullableCtx(t *testing.T) {
 	s := testStore(t)
 	ctx := context.Background()
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "fake", Model: "m", Host: "h", Capabilities: []string{}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Model: "m", Host: "h", Capabilities: []string{}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.TouchRunner(ctx, "r1", ptr(37)); err != nil {
@@ -337,7 +347,7 @@ func TestOpenSessionsClosedOnCancelAndRunnerLost(t *testing.T) {
 	if _, err := s.Pool.Exec(ctx, `UPDATE tasks SET status='running' WHERE id=$1`, other.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "lost", Agent: "fake", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "lost", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Pool.Exec(ctx,

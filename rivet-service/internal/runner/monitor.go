@@ -186,10 +186,14 @@ func (a *agent) executeMonitor(ctx context.Context, job *pb.MonitorJob, emit fun
 }
 
 // features — возможности runner'а сверх версии протокола: роли всегда,
-// наблюдение у runner'а с capability deploy (он исполняет команды
-// окружений).
+// агентский цикл Rivet у runner'а с агентом (native), наблюдение у
+// runner'а с capability deploy (он исполняет команды окружений). Одна
+// функция для всех feature, чтобы регистрация не теряла ни одну.
 func (c Config) features() []string {
 	out := []string{featureRoles}
+	if c.Adapter == AdapterNative {
+		out = append(out, featureNative)
+	}
 	for _, cp := range c.Capabilities {
 		if cp == "deploy" {
 			return append(out, featureMonitor, featureMonitorURL)

@@ -462,6 +462,9 @@ func (s *Server) hostingMerge(w http.ResponseWriter, r *http.Request,
 		writeErr(w, err)
 		return
 	}
+	// PR смержили, пока шли стадии задачи (review, проверки): они
+	// прерываются, как при merge кнопкой.
+	s.Engine.CancelRunsOfMerged(ctx, task)
 	if err := s.St.RecomputeEpic(ctx, task.EpicID); err != nil {
 		writeErr(w, err)
 		return

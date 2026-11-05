@@ -40,10 +40,10 @@ func TestTeamAgentsCarryTaskThroughPipeline(t *testing.T) {
 	ctx := context.Background()
 	f := newPolicyFixture(t, "diff --git a/x b/x\n")
 	withTeam(t, f, [4]string{"maks", "Макс", "developer", ""}, [4]string{"lev", "Лев", "tester", ""}, [4]string{"irina", "Ирина", "reviewer", ""})
-	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "worker2", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
+	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "worker2", Agent: store.AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: "wrap", Capabilities: []string{"review"}}); err != nil {
+	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: store.AgentRivet, Capabilities: []string{"review"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.e.Tick(ctx); err != nil {
@@ -116,7 +116,7 @@ func TestTeamAgentBusyWaits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "worker2", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
+	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "worker2", Agent: store.AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.e.Tick(ctx); err != nil {
@@ -217,10 +217,10 @@ func TestTeamAgentModelIsRequired(t *testing.T) {
 	ctx := context.Background()
 	f := newPolicyFixture(t, "")
 	withTeam(t, f, [4]string{"maks", "Макс", "developer", "opus"})
-	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Models: []string{"sonnet"}, Capabilities: []string{"coding"}}); err != nil {
+	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Models: []string{"sonnet"}, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: "wrap", Capabilities: []string{"review"}}); err != nil {
+	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: store.AgentRivet, Capabilities: []string{"review"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.e.Tick(ctx); err != nil {
@@ -230,7 +230,7 @@ func TestTeamAgentModelIsRequired(t *testing.T) {
 	if task, _ := f.st.GetTask(ctx, f.task.ID); task.AgentID != "" || !strings.Contains(task.WaitReason, "нет runner'а для свободных агентов роли") {
 		t.Fatalf("ожидание runner'а с моделью агента: %q %q", task.AgentID, task.WaitReason)
 	}
-	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "opus-box", Agent: "wrap", Models: []string{"sonnet", "opus"}, Capabilities: []string{"coding"}}); err != nil {
+	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "opus-box", Agent: store.AgentRivet, Models: []string{"sonnet", "opus"}, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.e.Tick(ctx); err != nil {

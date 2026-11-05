@@ -1,6 +1,7 @@
 // Package runner — агент на машине исполнителя: исходящее gRPC-соединение
-// к control plane, PTY-обёртка CLI-агента (глубина minimal), файловый
-// outbox-журнал для доставки at-least-once.
+// к control plane, стадии задач на агентском цикле Rivet (пакет native) с
+// проверками проекта в его песочнице, задания выкатки и наблюдения,
+// файловый outbox-журнал для доставки at-least-once.
 package runner
 
 import (
@@ -11,17 +12,19 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
+	"github.com/PavluninVladimir/rivet/internal/runner/native"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
@@ -43,6 +46,17 @@ const protocolVersion = "12"
 // тестировщика на TESTING (add-agent-roles). Аддитивно к версии протокола.
 const featureRoles = "roles"
 
+// featureNative — runner ведёт агентский цикл Rivet и принимает модель в
+// Assignment.endpoint (add-native-agent). Без него control plane агентских
+// стадий runner'у не назначает.
+const featureNative = "native"
+
+// networkIsolated — команды агента этого runner'а идут в песочнице без
+// сети (объявляется при регистрации, видно в списке runner'ов).
+func (c Config) networkIsolated() bool {
+	return c.Adapter == AdapterNative && native.NetworkIsolationAvailable()
+}
+
 type Config struct {
 	PlaneAddr string
 	// Token — токен регистрации, выданный администратором (спека runners);
@@ -61,30 +75,56 @@ type Config struct {
 	// v11): модель сессии приходит в Assignment.model и передаётся агенту.
 	Model        string
 	Models       []string
-	AgentCmd     string
 	Capabilities []string
 	Workdir      string
 	// GitBase — префикс URL клонирования; file://-префикс используют e2e-стенды.
 	GitBase string
-	// Adapter — способ подключения агента: claude-code (нативный, полная
-	// глубина) или wrap (универсальная PTY-обёртка, минимальная).
+	// Adapter — способ подключения агента: native (агент Rivet) или пусто у
+	// runner'а выкатки без агента.
 	Adapter string
-	// ClaudeBin — бинарник Claude Code для нативного адаптера (подмена в
-	// тестах и на стендах); пусто — «claude» из PATH.
-	ClaudeBin string
-	// AdapterCmd — команда внешнего адаптера (спека agent-integration
-	// «Открытый SDK адаптеров»); AdapterDepth — глубина данных, которую он
-	// даёт; AdapterContext — принимает ли он контекст от Rivet.
-	AdapterCmd     string
-	AdapterDepth   string
-	AdapterContext bool
-	// ExtraEnv и ExtraArgs — окружение и аргументы агента из назначения
-	// (профиль каталога, протокол v12): накладываются поверх окружения
-	// runner'а и аргументов адаптера. SecretValues — значения для
-	// маскирования в транскрипте.
+	// AgentCmd и ExtraArgs — только для скриптового агента в тестах пакета
+	// (script_adapter_test.go): в продукте не используются.
+	AgentCmd  string
+	ExtraArgs []string
+	// ExtraEnv — переменные профиля из назначения (устаревший agent_env):
+	// агент Rivet читает из них RIVET_NATIVE_* (e2e-стенд), команды агента
+	// их не получают. SecretValues — значения для маскирования в
+	// транскрипте.
 	ExtraEnv     []string
-	ExtraArgs    []string
 	SecretValues []string
+	// Secrets — секреты runner'а по именам переменных (RIVET_NATIVE_KEY,
+	// RIVET_PROVIDER_KEY_<ID>): команда rivet-runner забирает их из
+	// окружения при старте, в окружении процесса их нет (secrets.go).
+	Secrets map[string]string
+	// CommandEnv — переменные для команд агента Rivet сверх белого списка
+	// (запрет push тестировщику): без них стадия тестировщика не отличалась
+	// бы от разработчика.
+	CommandEnv []string
+	// Endpoint — модель стадии из Assignment.endpoint (агент Rivet): тип
+	// API, адрес, окно, цены, лимиты, ключ по режиму секретов.
+	Endpoint *pb.ModelEndpoint
+	// SecretFiles — файлы секретов runner'а на диске (файл токена): в
+	// песочнице команды агента они скрыты, чтобы команда под тем же uid их
+	// не прочитала.
+	SecretFiles []string
+	// Unsandboxed — runner запущен с -unsandboxed: команды агента и
+	// проверки проекта идут и без песочницы (с правами runner'а). Без
+	// флага они без песочницы не запускаются.
+	Unsandboxed bool
+	// ChecksNetwork — runner запущен с -checks-network: проверки проекта
+	// идут в песочнице с сетью хоста. $HOME runner'а и файл токена им
+	// по-прежнему не видны, команды агента остаются без сети.
+	ChecksNetwork bool
+	// SandboxReadOnly — каталоги из -sandbox-ro: в песочнице они видны
+	// только на чтение и проверкам, и командам агента (инструменты и кеши
+	// под $HOME runner'а вроде ~/.nvm или вне его). Пути проверены при
+	// старте (CheckSandboxReadOnly).
+	SandboxReadOnly []string
+	// RunnerBin — путь к бинарю этого runner'а (add-architecture-c4):
+	// проверки проекта и команды агента получают его в RIVET_RUNNER_BIN и
+	// зовут подкоманду architecture. В песочнице файл виден только на
+	// чтение, даже если лежит под скрытым $HOME. Пусто — переменной нет.
+	RunnerBin string
 }
 
 func Run(ctx context.Context, cfg Config) error {
@@ -99,7 +139,15 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 
 	if cfg.Token == "" {
-		return errors.New("не задан токен регистрации: укажите -token или RIVET_RUNNER_TOKEN (выпускается администратором в разделе «Управление приложением»)")
+		return errors.New("не задан токен регистрации: укажите файл токена в RIVET_RUNNER_TOKEN_FILE или RIVET_RUNNER_TOKEN (выпускается администратором в разделе «Управление приложением»)")
+	}
+	// Секреты runner'а маскируются в транскрипте так же, как секреты
+	// назначения.
+	cfg.SecretValues = append(append([]string{}, cfg.SecretValues...), cfg.Token)
+	for _, v := range cfg.Secrets {
+		if v != "" {
+			cfg.SecretValues = append(cfg.SecretValues, v)
+		}
 	}
 	creds := insecure.NewCredentials()
 	if cfg.TLS {
@@ -133,7 +181,9 @@ func Run(ctx context.Context, cfg Config) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			if errors.Is(err, errStagesStuck) {
+			// Отказ регистрации и зависшие стадии повтором не лечатся:
+			// runner завершается с причиной, а не долбит control plane.
+			if errors.Is(err, errStagesStuck) || errors.Is(err, ErrRegistrationRejected) {
 				return err
 			}
 			slog.Warn("сессия оборвалась — переподключение", "err", err)
@@ -260,6 +310,12 @@ const stuckLimit = 10 * time.Minute
 // errStagesStuck — стадии прошлого подключения не завершились за stuckLimit.
 var errStagesStuck = errors.New("стадии прошлого подключения не завершились")
 
+// ErrRegistrationRejected — control plane отклонил регистрацию runner'а
+// (FAILED_PRECONDITION: сторонний агент, runner без агента не только с
+// deploy, старый бинарник без feature native). Причина не уйдёт сама,
+// поэтому runner не переподключается, а завершается с текстом отказа.
+var ErrRegistrationRejected = errors.New("control plane отклонил регистрацию runner'а")
+
 func (a *agent) stuckLimit() time.Duration {
 	if a.stuck > 0 {
 		return a.stuck
@@ -376,28 +432,38 @@ func (c Config) forModel(model string) Config {
 // профиля. Секреты назначения маскируются в транскрипте.
 func (c Config) forAssignment(as *pb.Assignment) Config {
 	c = c.forModel(as.Model)
-	if len(as.AgentEnv) > 0 {
-		keys := make([]string, 0, len(as.AgentEnv))
-		for k := range as.AgentEnv {
-			keys = append(keys, k)
+	if e := as.GetEndpoint(); e != nil {
+		c.Endpoint = e
+		// Ключ из назначения не должен уйти в транскрипт.
+		if k := e.GetKey(); k != "" {
+			c.SecretValues = append(c.SecretValues, k)
 		}
-		sort.Strings(keys)
-		secret := map[string]bool{}
-		for _, n := range as.AgentSecretNames {
-			secret[n] = true
-		}
-		for _, k := range keys {
-			c.ExtraEnv = append(c.ExtraEnv, k+"="+as.AgentEnv[k])
-			if secret[k] && as.AgentEnv[k] != "" {
-				c.SecretValues = append(c.SecretValues, as.AgentEnv[k])
+		// Заголовки подключения могут нести ключ, но имена секретных в
+		// протоколе не передаются: маскируются все, кроме заведомо
+		// несекретных и коротких значений. Иначе «X-Org: acme» или «1»
+		// превращались бы в *** по всему транскрипту.
+		for name, v := range e.GetHeaders() {
+			if headerSecret(name, v) {
+				c.SecretValues = append(c.SecretValues, v)
 			}
 		}
 	}
-	c.ExtraArgs = append([]string{}, as.AgentArgs...)
-	if as.AgentCommand != "" && c.Adapter == AdapterWrap {
-		c.AgentCmd = as.AgentCommand
-	}
 	return c
+}
+
+// minHeaderSecret — короче этого значение заголовка секретом не считается.
+const minHeaderSecret = 8
+
+// publicHeaders — заголовки подключения без секретов (OpenRouter, версия
+// API Anthropic, служебные).
+var publicHeaders = map[string]bool{
+	"http-referer": true, "referer": true, "x-title": true, "user-agent": true,
+	"anthropic-version": true, "anthropic-beta": true, "content-type": true, "accept": true,
+}
+
+// headerSecret — значение заголовка подключения маскируется в транскрипте.
+func headerSecret(name, value string) bool {
+	return len(strings.TrimSpace(value)) >= minHeaderSecret && !publicHeaders[strings.ToLower(strings.TrimSpace(name))]
 }
 
 // secretMasker — подмена значений секретов в потоке транскрипта: вывод
@@ -487,10 +553,14 @@ func (a *agent) session(ctx context.Context) error {
 		ContextChannel:  a.cfg.contextChannel(),
 		DisplayName:     a.cfg.Name,
 		Features:        a.cfg.features(),
+		NetworkIsolated: a.cfg.networkIsolated(),
 		BootId:          bootID,
 		PendingSessions: a.pendingSessions(),
 	})
 	if err != nil {
+		if status.Code(err) == codes.FailedPrecondition {
+			return fmt.Errorf("%w: %s", ErrRegistrationRejected, status.Convert(err).Message())
+		}
 		return err
 	}
 	if !reg.Accepted {

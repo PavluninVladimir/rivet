@@ -91,8 +91,8 @@ func newPolicyFixture(t *testing.T, diff string) policyFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: "wrap", Capabilities: []string{"coding", "review"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: store.AgentRivet, Capabilities: []string{"coding", "review"}})
 	if err := st.TransitionEpic(ctx, epic.ID, domain.EpicRunning,
 		store.EventInput{ActorKind: domain.ActorUser, ActorID: "test", Type: "epic.status"}); err != nil {
 		t.Fatal(err)

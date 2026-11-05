@@ -22,7 +22,8 @@ type sessionView struct {
 	DriverKind string `json:"driver_kind"`
 	// Depth — глубина данных подключения; Files — затронутые файлы:
 	// null = недоступно для этого способа подключения, [] = полная
-	// глубина без файлов (api-contract add-claude-code-adapter).
+	// глубина без файлов (контракт введён в add-claude-code-adapter, у
+	// агента Rivet глубина full).
 	Depth         string     `json:"depth"`
 	Files         []string   `json:"files"`
 	DriverID      string     `json:"driver_id"`

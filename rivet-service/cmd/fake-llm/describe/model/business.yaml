@@ -1,0 +1,7 @@
+elements:
+  - id: biz.manager
+    type: actor
+    name: Менеджер по продажам
+  - id: biz.head
+    type: actor
+    name: Руководитель отдела продаж

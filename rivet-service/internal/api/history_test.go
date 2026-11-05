@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -58,6 +59,13 @@ func TestHistoryImportAPI(t *testing.T) {
 	mustStatus(t, resp, http.StatusOK, "первые события")
 	if jsonContains(body, `"Type":"history.imported"`) {
 		t.Fatalf("без latest порядок с начала ленты: %s", body)
+	}
+	// Пустой отбор ленты — пустой массив, а не null: клиент ищет в списке
+	// событие, которого ещё нет.
+	resp, body = call(t, "GET", srv.URL+"/api/v1/events?project="+project.ID+"&type=task.step&limit=200", alice, "", nil)
+	mustStatus(t, resp, http.StatusOK, "пустой отбор событий")
+	if got := string(bytes.TrimSpace(body)); got != "[]" {
+		t.Fatalf("пустая лента событий: %s, ожидался []", got)
 	}
 	// Невалидный манифест: без ключа.
 	bad := map[string]any{"source": "openspec", "epics": []map[string]any{{"title": "без ключа", "created_at": "2026-08-12T00:00:00Z", "done_at": "2026-08-12T00:00:00Z"}}}

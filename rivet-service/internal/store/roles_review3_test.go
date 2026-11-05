@@ -63,30 +63,33 @@ func TestMigrationMovesAssignedModel(t *testing.T) {
 	}
 }
 
-// Переопределение роли без профиля работает на профиле шаблона: отвязка
-// его модели от профиля шаблона видит ссылку (круг 3, P3-4).
+// Переопределение роли без профиля работает на профиле шаблона: его пара
+// проверяется по моделям профиля шаблона, а выключение профиля шаблона
+// видит ссылку (круг 3, P3-4).
 func TestRoleModelUsesTemplateProfile(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	admin := mustOwner(t, s)
-	setupConnAndProfiles(t, s, admin.ID)
-	if _, err := s.Pool.Exec(ctx, `UPDATE agents SET models='[{"connection_id":"anthropic","model":"opus"},{"connection_id":"anthropic","model":"sonnet"}]' WHERE id='claude-code'`); err != nil {
-		t.Fatal(err)
-	}
+	setupConnections(t, s, admin.ID)
 	dev, _ := s.GetRole(ctx, "developer")
 	if _, err := s.UpdateRole(ctx, RoleInput{ID: "developer", Title: dev.Title, Instruction: dev.Instruction, Color: dev.Color,
-		Capability: dev.Capability, Agent: "claude-code"}, admin.ID, admin.Login); err != nil {
+		Capability: dev.Capability, Agent: AgentRivet}, admin.ID, admin.Login); err != nil {
 		t.Fatal(err)
 	}
 	p, _ := s.CreateProject(ctx, "proj", "o/r", nil, admin.ID)
+	var pe *policy.ProcessError
+	if _, err := s.SaveProjectPolicy(ctx, p.ID, policy.Overrides{RoleModels: map[string]policy.RoleModel{
+		"developer": {ConnectionID: "anthropic", Model: "haiku"}}}, admin.Login); !errors.As(err, &pe) || pe.Field != "role_models.developer.model" {
+		t.Fatalf("переопределение роли вне моделей профиля шаблона: %v", err)
+	}
 	if _, err := s.SaveProjectPolicy(ctx, p.ID, policy.Overrides{RoleModels: map[string]policy.RoleModel{
 		"developer": {ConnectionID: "anthropic", Model: "sonnet"}}}, admin.Login); err != nil {
 		t.Fatal(err)
 	}
-	cc, _ := s.GetAgent(ctx, "claude-code")
-	_, _, err := s.UpsertAgent(ctx, AgentInput{ID: "claude-code", Name: cc.Name, Adapter: cc.Adapter, Command: cc.Command,
-		Capabilities: cc.Capabilities, Models: []domain.AgentModelRef{{ConnectionID: "anthropic", Model: "opus"}},
-		Env: cc.Env, Args: cc.Args, Secrets: cc.Secrets}, admin.ID, admin.Login)
+	rivet, _ := s.GetAgent(ctx, AgentRivet)
+	off := false
+	_, _, err := s.UpsertAgent(ctx, AgentInput{ID: AgentRivet, Name: rivet.Name, Adapter: AdapterNative,
+		Secrets: rivet.Secrets, Enabled: &off}, admin.ID, admin.Login)
 	var inUse *ErrInUse
 	if !errors.As(err, &inUse) || !hasRef(inUse.Refs, "role_model", p.ID+":developer") {
 		t.Fatalf("переопределение роли на профиле шаблона: %v", err)
@@ -98,7 +101,7 @@ func TestRoleModelUsesTemplateProfile(t *testing.T) {
 func TestOfflineReason(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "claude-code", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	r, _ := s.GetRunner(ctx, "r1")

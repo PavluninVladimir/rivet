@@ -216,7 +216,8 @@ type Runner struct {
 	CtxPct       *int // nil — заполненность контекста неизвестна
 	Draining     bool
 	LastSeen     time.Time
-	// Adapter — способ подключения агента (claude-code, wrap); Depth —
+	// Adapter — способ подключения агента (native у агента Rivet, пусто у
+	// runner'а выкатки); Depth —
 	// глубина данных адаптера, сессии runner'а создаются с ней
 	// (спека agent-integration «Уровни глубины данных»).
 	Adapter string
@@ -242,6 +243,12 @@ type Runner struct {
 	DisplayName       string
 	DisplayNameLocked bool
 	Features          []string
+	// NetworkIsolated — команды агента идут в песочнице без сети
+	// (add-native-agent): объявляет runner при регистрации. Retired — runner
+	// со сторонним агентом снят с работы обновлением: стадий не получает,
+	// снимается успешной регистрацией агента Rivet.
+	NetworkIsolated bool
+	Retired         bool
 	// BootID — идентификатор процесса runner'а (смена = перезапуск).
 	BootID string `json:"-"`
 	// RoleID — роль открытого запуска runner'а, AgentID и AgentName — агент
@@ -851,9 +858,17 @@ type ModelEntry struct {
 	InputPrice    *int64 `json:"input_price,omitempty"`
 	OutputPrice   *int64 `json:"output_price,omitempty"`
 	ContextWindow *int64 `json:"context_window,omitempty"`
-	Source        string `json:"source"` // discovered | manual
-	Hidden        bool   `json:"hidden"`
-	Missing       bool   `json:"missing"`
+	// CachedInputPrice — цена чтения входа из кеша провайдера, как цены
+	// входа и выхода: микродоллары за миллион токенов. MaxOutputTokens —
+	// предел ответа модели на ход агентского цикла, ModelMaxOutput —
+	// предельный выход модели (потолок повтора хода с обрезанным
+	// вызовом); пусто — значения цикла по умолчанию (add-native-agent).
+	CachedInputPrice *int64 `json:"cached_input_price,omitempty"`
+	MaxOutputTokens  *int64 `json:"max_output_tokens,omitempty"`
+	ModelMaxOutput   *int64 `json:"model_max_output,omitempty"`
+	Source           string `json:"source"` // discovered | manual | preset
+	Hidden           bool   `json:"hidden"`
+	Missing          bool   `json:"missing"`
 }
 
 // ConnHeader — дополнительный HTTP-заголовок подключения; у секретного
@@ -901,7 +916,7 @@ type EnvVar struct {
 type AgentProfile struct {
 	ID           string
 	Name         string
-	Adapter      string // claude-code | wrap
+	Adapter      string // native (агент Rivet)
 	Command      string
 	Capabilities []string
 	Models       []AgentModelRef
@@ -914,6 +929,16 @@ type AgentProfile struct {
 	Runners      int
 	UpdatedAt    time.Time
 	UpdatedBy    string
+	// Limits — лимиты сессии агента Rivet; нулевое поле — по умолчанию цикла.
+	Limits AgentLimits
+}
+
+// AgentLimits — лимиты сессии агентского цикла Rivet (design add-native-
+// agent, решение 5): ходы, токены (некешированный вход плюс выход), минуты.
+type AgentLimits struct {
+	MaxTurns   int   `json:"max_turns,omitempty"`
+	MaxTokens  int64 `json:"max_tokens,omitempty"`
+	MaxMinutes int   `json:"max_minutes,omitempty"`
 }
 
 // AgentRole — роль агента в команде (спека backend/agent-roles «Каталог

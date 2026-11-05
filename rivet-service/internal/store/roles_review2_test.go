@@ -15,23 +15,22 @@ import (
 // и исключения в рамках тика.
 
 // Модель прежнего агента не переживает отвязку запуска: после перезапуска
-// runner'а стадию берёт Ева со своей моделью (круг 2, P2).
+// runner'а стадию берёт Ева, а модель Макса не остаётся ни требованием, ни
+// моделью назначения (круг 2, P2). Пары агентов команды — модели каталога
+// агента Rivet.
 func TestAssignedModelNotStickyAfterRelease(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	admin := mustOwner(t, s)
-	setupConnAndProfiles(t, s, admin.ID)
-	if _, err := s.Pool.Exec(ctx, `UPDATE agents SET models='[{"connection_id":"anthropic","model":"opus"},{"connection_id":"anthropic","model":"sonnet"}]' WHERE id='claude-code'`); err != nil {
+	setupConnections(t, s, admin.ID)
+	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "maks", Name: "Макс", RoleID: "developer", Agent: AgentRivet, ConnectionID: "anthropic", Model: "opus"}, admin.ID, admin.Login); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "maks", Name: "Макс", RoleID: "developer", Agent: "claude-code", ConnectionID: "anthropic", Model: "opus"}, admin.ID, admin.Login); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "eva", Name: "Ева", RoleID: "developer", Agent: "claude-code", ConnectionID: "anthropic", Model: "sonnet"}, admin.ID, admin.Login); err != nil {
+	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "eva", Name: "Ева", RoleID: "developer", Agent: AgentRivet, ConnectionID: "anthropic", Model: "sonnet"}, admin.ID, admin.Login); err != nil {
 		t.Fatal(err)
 	}
 	tasks := runningEpic(t, s, 1)
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r-opus", Agent: "claude-code", Models: []string{"opus"}, Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, rivetRunner("r1", "coding")); err != nil {
 		t.Fatal(err)
 	}
 	enterCode(t, s, tasks, nil)
@@ -46,7 +45,7 @@ func TestAssignedModelNotStickyAfterRelease(t *testing.T) {
 	if runs[0].Model != "" || runs[0].AssignedModel != "opus" || runs[0].DisplayModel() != "opus" {
 		t.Fatalf("модель назначения отдельно от явной: %+v", runs[0])
 	}
-	if _, err := s.ReleaseRunnerRuns(ctx, "r-opus", nil); err != nil {
+	if _, err := s.ReleaseRunnerRuns(ctx, "r1", nil); err != nil {
 		t.Fatal(err)
 	}
 	runs = codeRuns(t, s, tasks[0].ID)
@@ -54,18 +53,21 @@ func TestAssignedModelNotStickyAfterRelease(t *testing.T) {
 		t.Fatalf("отвязка снимает агента и модель назначения: %+v", runs[0])
 	}
 	off := false
-	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "maks", Name: "Макс", RoleID: "developer", Agent: "claude-code", ConnectionID: "anthropic", Model: "opus", Enabled: &off}, admin.ID, admin.Login); err != nil {
+	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "maks", Name: "Макс", RoleID: "developer", Agent: AgentRivet, ConnectionID: "anthropic", Model: "opus", Enabled: &off}, admin.ID, admin.Login); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Pool.Exec(ctx, `UPDATE runners SET status='offline' WHERE id='r-opus'`); err != nil {
+	if _, err := s.Pool.Exec(ctx, `UPDATE runners SET status='offline' WHERE id='r1'`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r-sonnet", Agent: "claude-code", Models: []string{"sonnet"}, Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, rivetRunner("r2", "coding")); err != nil {
 		t.Fatal(err)
 	}
 	a2, ok, err := s.AssignRun(ctx, nil, nil)
-	if err != nil || !ok || a2.Run.AgentID != "eva" || a2.Runner.ID != "r-sonnet" {
-		t.Fatalf("стадию берёт Ева на r-sonnet: ok=%v err=%v agent=%q runner=%q", ok, err, a2.Run.AgentID, a2.Runner.ID)
+	if err != nil || !ok || a2.Run.AgentID != "eva" || a2.Runner.ID != "r2" {
+		t.Fatalf("стадию берёт Ева на r2: ok=%v err=%v agent=%q runner=%q", ok, err, a2.Run.AgentID, a2.Runner.ID)
+	}
+	if a2.Run.Model != "" || a2.Run.AssignedModel != "" {
+		t.Fatalf("модель Макса не прилипла к запуску Евы: %+v", a2.Run)
 	}
 }
 
@@ -98,45 +100,41 @@ func TestRoleRefsIgnoreTesterFlagUnderExplicitProcess(t *testing.T) {
 	}
 }
 
-// Агент команды без своего профиля работает на профиле шаблона: отвязка
-// его модели от профиля и смена профиля шаблона видят эту ссылку, а
-// сохранение агента проверяет модель по профилю шаблона (круг 2, P3-3).
+// Агент команды без своего профиля работает на профиле шаблона: сохранение
+// агента проверяет модель по моделям профиля шаблона (каталог агента
+// Rivet), выключение профиля шаблона видит эту ссылку (круг 2, P3-3).
 func TestTemplateProfileIsEffectiveForTeamAgent(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	admin := mustOwner(t, s)
-	setupConnAndProfiles(t, s, admin.ID)
-	if _, err := s.Pool.Exec(ctx, `UPDATE agents SET models='[{"connection_id":"anthropic","model":"opus"},{"connection_id":"anthropic","model":"sonnet"}]' WHERE id='claude-code'`); err != nil {
+	setupConnections(t, s, admin.ID)
+	if _, err := s.Pool.Exec(ctx, `UPDATE model_connections SET models='[{"id":"opus"},{"id":"sonnet"},{"id":"haiku","hidden":true}]' WHERE id='anthropic'`); err != nil {
 		t.Fatal(err)
 	}
 	dev, _ := s.GetRole(ctx, "developer")
-	devInput := func(agent string) RoleInput {
-		return RoleInput{ID: "developer", Title: dev.Title, Instruction: dev.Instruction, Color: dev.Color,
-			Capability: dev.Capability, Agent: agent}
-	}
-	if _, err := s.UpdateRole(ctx, devInput("claude-code"), admin.ID, admin.Login); err != nil {
+	if _, err := s.UpdateRole(ctx, RoleInput{ID: "developer", Title: dev.Title, Instruction: dev.Instruction, Color: dev.Color,
+		Capability: dev.Capability, Agent: AgentRivet}, admin.ID, admin.Login); err != nil {
 		t.Fatal(err)
 	}
-	// Модель, которой нет в профиле шаблона, не сохраняется.
-	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "maks", Name: "Макс", RoleID: "developer", ConnectionID: "openai", Model: "gpt-5"}, admin.ID, admin.Login); err == nil {
-		t.Fatal("модель вне профиля шаблона отклоняется")
+	// Скрытой модели нет среди моделей профиля шаблона: не сохраняется.
+	var fe *FieldError
+	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "maks", Name: "Макс", RoleID: "developer", ConnectionID: "anthropic", Model: "haiku"}, admin.ID, admin.Login); !errors.As(err, &fe) || fe.Field != "model" {
+		t.Fatalf("модель вне профиля шаблона отклоняется: %v", err)
 	}
 	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "maks", Name: "Макс", RoleID: "developer", ConnectionID: "anthropic", Model: "sonnet"}, admin.ID, admin.Login); err != nil {
 		t.Fatal(err)
 	}
-	cc, _ := s.GetAgent(ctx, "claude-code")
-	_, _, err := s.UpsertAgent(ctx, AgentInput{ID: "claude-code", Name: cc.Name, Adapter: cc.Adapter, Command: cc.Command,
-		Capabilities: cc.Capabilities, Models: []domain.AgentModelRef{{ConnectionID: "anthropic", Model: "opus"}},
-		Env: cc.Env, Args: cc.Args, Secrets: cc.Secrets}, admin.ID, admin.Login)
-	var inUse *ErrInUse
-	if !errors.As(err, &inUse) || !hasRef(inUse.Refs, "team_agent", "maks") {
-		t.Fatalf("отвязка модели агента шаблона: %v", err)
+	rivet, _ := s.GetAgent(ctx, AgentRivet)
+	in := AgentInput{ID: AgentRivet, Name: rivet.Name, Adapter: AdapterNative, Secrets: rivet.Secrets}
+	if _, _, err := s.UpsertAgent(ctx, in, admin.ID, admin.Login); err != nil {
+		t.Fatalf("сохранение включённого профиля шаблона: %v", err)
 	}
-	// Смена профиля шаблона на профиль без модели Макса отклоняется.
-	_, err = s.UpdateRole(ctx, devInput("codex"), admin.ID, admin.Login)
-	var roleInUse *ErrRoleInUse
-	if !errors.As(err, &roleInUse) || len(roleInUse.Refs) != 1 || roleInUse.Refs[0].AgentID != "maks" {
-		t.Fatalf("смена профиля шаблона: %v", err)
+	off := false
+	in.Enabled = &off
+	_, _, err := s.UpsertAgent(ctx, in, admin.ID, admin.Login)
+	var inUse *ErrInUse
+	if !errors.As(err, &inUse) || !hasRef(inUse.Refs, "team_agent", "maks") || !hasRef(inUse.Refs, "role", "developer") {
+		t.Fatalf("выключение профиля шаблона агента команды: %v", err)
 	}
 }
 
@@ -172,7 +170,7 @@ func TestDeferRunAndTickExclusions(t *testing.T) {
 	s := testStore(t)
 	tasks := runningEpic(t, s, 2)
 	for _, id := range []string{"r1", "r2"} {
-		if err := s.UpsertRunner(ctx, domain.Runner{ID: id, Agent: "claude-code", Capabilities: []string{"coding"}}); err != nil {
+		if err := s.UpsertRunner(ctx, domain.Runner{ID: id, Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -231,7 +229,7 @@ func TestDeferRunAndTickExclusions(t *testing.T) {
 	if _, err := s.Pool.Exec(ctx, `UPDATE task_step_runs SET not_before=now() - interval '1 second' WHERE id=$1`, a.Run.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r2", Agent: "claude-code", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r2", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	d, ok, err := s.AssignRun(ctx, nil, nil)
@@ -246,7 +244,7 @@ func TestReleaseKeepsPendingSessions(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	tasks := runningEpic(t, s, 1)
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "claude-code", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	enterCode(t, s, tasks, nil)
@@ -304,7 +302,7 @@ func codeRuns(t *testing.T, s *Store, taskID string) []StepRun {
 func TestRunnerOfflineMarkIsConditional(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "claude-code", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	snap, _ := s.GetRunner(ctx, "r1")

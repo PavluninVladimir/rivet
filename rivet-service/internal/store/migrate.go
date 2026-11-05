@@ -76,6 +76,13 @@ func migrateFiles(ctx context.Context, databaseURL string, files map[string][]by
 			_ = tx.Rollback(ctx)
 			return fmt.Errorf("миграция %s: %w", name, err)
 		}
+		// Шаг миграции на Go — в той же транзакции, сразу после SQL.
+		if hook := migrationHooks[name]; hook != nil {
+			if err := hook(ctx, tx); err != nil {
+				_ = tx.Rollback(ctx)
+				return fmt.Errorf("миграция %s: %w", name, err)
+			}
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations(name) VALUES($1)`, name); err != nil {
 			_ = tx.Rollback(ctx)
 			return err

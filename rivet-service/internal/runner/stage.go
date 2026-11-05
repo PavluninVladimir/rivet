@@ -2,7 +2,6 @@ package runner
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -58,6 +56,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	sink := runSink{
 		transcript: masker.feed,
 		session:    as.SessionId,
+		stage:      as.Stage,
 		contexts:   a.contexts,
 		step: func(ev *pb.AgentEvent) {
 			ev.TaskId, ev.SessionId = as.TaskId, as.SessionId
@@ -72,15 +71,24 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	// runner'а по умолчанию; адаптер стадии строится под неё.
 	model := stageCfg.Model
 	stageAdapter := a.adapter
-	if as.Model != "" && as.Model != a.cfg.Model || len(stageCfg.ExtraEnv) > 0 || len(stageCfg.ExtraArgs) > 0 || stageCfg.AgentCmd != a.cfg.AgentCmd {
+	if as.Model != "" && as.Model != a.cfg.Model || len(stageCfg.ExtraEnv) > 0 || stageCfg.Endpoint != nil {
 		stageAdapter = newAdapter(stageCfg)
 	}
 	// runAgent — запуск адаптера с дожимом маски: хвост транскрипта и
 	// итоговый текст (маркеры, вопрос BLOCKED) не уносят секрет назначения.
+	// Служебные файлы git снимаются до сессии и сверяются после неё: git
+	// runner'а не должен исполнить конфигурацию или хук, оставленные агентом.
 	runAgent := func(ws, prompt string) (agentRun, error) {
+		snap, err := snapshotGit(ws)
+		if err != nil {
+			return agentRun{}, err
+		}
 		run, err := stageAdapter.Run(sctx, ws, prompt, sink)
 		masker.flush()
 		run.FinalText = masker.maskString(run.FinalText)
+		if verr := snap.verify("агент"); verr != nil {
+			return run, verr
+		}
 		return run, err
 	}
 	noteUsage := func(run agentRun) {
@@ -97,6 +105,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			Usage: &pb.Usage{TaskId: as.TaskId, SessionId: as.SessionId, Model: model,
 				DurationS: int32(time.Since(started).Seconds()),
 				TokensIn:  report.TokensIn, TokensOut: report.TokensOut,
+				TokensCached: report.TokensCached, TokensCacheWrite: report.TokensCacheWrite,
 				CostUsd: report.CostUSD, CtxPct: report.CtxPct}}})
 	}
 	// Вердикт шага prompt (ok | changes | fail), пусто у остальных стадий.
@@ -106,10 +115,34 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_StageResult{
 			StageResult: &pb.StageResult{TaskId: as.TaskId, SessionId: as.SessionId,
 				StepId: as.StepId, Participant: as.Participant, Verdict: promptVerdict,
-				Stage: as.Stage, Ok: ok, Detail: tail(detail, 8000),
+				// Ошибка провайдера или агента в итоге может нести эхо
+				// ключа (прокси): итог маскируется, как транскрипт.
+				Stage: as.Stage, Ok: ok, Detail: tail(masker.maskString(detail), 8000),
 				// Эхо доставленной версии: итог стадии привязан к политике,
 				// по которой работал агент (спека access-policy).
 				PolicyHash: as.GetPolicy().GetHash()}}})
+	}
+
+	// gitTampered — сессия изменила служебные файлы git: стадия неуспешна
+	// с этой причиной, а не как обычная ошибка агента.
+	gitTampered := func(err error) bool {
+		var te *gitTamperError
+		if errors.As(err, &te) {
+			result(false, te.Error())
+			return true
+		}
+		return false
+	}
+
+	// Runner выкатки (без агента) стадий задач не исполняет: у него нет
+	// агента и песочницы, а проверки проекта на машине выкатки исполнили бы
+	// код из ветки задачи рядом с окружением.
+	if a.cfg.Adapter == "" {
+		if as.Stage == pb.StageResult_TESTING && as.GetRole() != nil {
+			promptVerdict = verdictInfraError
+		}
+		result(false, "runner выкатки без агента не исполняет стадии задач: назначьте стадию runner'у с агентом Rivet (-agent rivet)")
+		return
 	}
 
 	ws, err := a.workspace(sctx, as, step)
@@ -128,6 +161,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		step("агент приступил к реализации")
 		run, err := runAgent(ws, stagePrompt(as))
 		noteUsage(run)
+		if gitTampered(err) {
+			return
+		}
 		out := run.FinalText
 		// Блокировка распознаётся только у успешного запуска: агент,
 		// упавший с ошибкой, не эскалируется как «вопрос человеку».
@@ -167,14 +203,28 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			testerCfg := stageCfg
 			testerCfg.ExtraEnv = append(slices.Clone(stageCfg.ExtraEnv),
 				pushBlockEnv(append(os.Environ(), stageCfg.ExtraEnv...))...)
+			// У агента Rivet команды получают окружение заново из белого
+			// списка: запрет push передаётся им отдельно.
+			testerCfg.CommandEnv = pushBlockEnv(nil)
 			testerAdapter := newAdapter(testerCfg)
+			// Сессия тестировщика под той же защитой .git, что и остальные
+			// сессии агента: снимок до, сверка после.
 			testerRun := func(ws, prompt string) (agentRun, error) {
+				snap, err := snapshotGit(ws)
+				if err != nil {
+					return agentRun{}, err
+				}
 				run, err := testerAdapter.Run(sctx, ws, prompt, sink)
 				masker.flush()
 				run.FinalText = masker.maskString(run.FinalText)
+				if verr := snap.verify("тестировщик"); verr != nil {
+					return run, verr
+				}
 				return run, err
 			}
-			a.testerStage(sctx, as, ws, role, step, transcript, testerRun, noteUsage, emitUsage, emit,
+			// Вывод проверок после сессии — через тот же маскер.
+			checksOut := func(b []byte) { masker.feed(b) }
+			a.testerStage(sctx, as, ws, role, step, checksOut, masker.flush, testerRun, noteUsage, emitUsage, emit,
 				func(verdict string) { promptVerdict = verdict }, result)
 			return
 		}
@@ -183,13 +233,35 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			result(true, "нет настроенных проверок")
 			return
 		}
-		ok, report := runChecks(sctx, ws, as.Checks, step, transcript)
+		// Проверки исполняют код из ветки задачи: он идёт в песочнице агента
+		// и тоже не должен оставить конфигурацию или хук для git runner'а.
+		snap, err := snapshotGit(ws)
+		if err != nil {
+			result(false, err.Error())
+			return
+		}
+		ok, report, cerr := a.runChecks(sctx, ws, as.Checks, step, masker.feed)
+		masker.flush()
+		if gitTampered(snap.verify("код проверки")) {
+			return
+		}
+		if cerr != nil {
+			// Проверки не запускались, прерваны или упали из-за окружения
+			// песочницы: сбой инфраструктуры, а не замечания разработчику.
+			// Шаг повторяется без расхода попытки, повторный сбой эскалирует.
+			promptVerdict = verdictInfraError
+			result(false, strings.TrimSpace(report+"\n"+cerr.Error()))
+			return
+		}
 		result(ok, report)
 
 	case pb.StageResult_REVIEW:
 		step("независимое review изменений")
 		run, err := runAgent(ws, reviewPrompt(as))
 		noteUsage(run)
+		if gitTampered(err) {
+			return
+		}
 		if err != nil {
 			result(false, fmt.Sprintf("ревьюер завершился с ошибкой: %v", err))
 			return
@@ -204,6 +276,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		step("задание процесса: " + firstLine(as.StepPrompt))
 		run, err := runAgent(ws, promptStepPrompt(as))
 		noteUsage(run)
+		if gitTampered(err) {
+			return
+		}
 		out := run.FinalText
 		if q, blocked := parseBlocked(out); blocked && err == nil {
 			emitUsage()
@@ -245,17 +320,22 @@ func (a *agent) workspace(ctx context.Context, as *pb.Assignment, step func(stri
 		return "", err
 	}
 	defer cleanup()
-	if _, err := os.Stat(dir + "/.git"); err != nil {
+	origin := cloneURL(a.cfg.GitBase, as)
+	clone := func() error {
 		step("клонирование " + as.Repo)
 		// clone запускается напрямую, без /bin/sh: URL и путь приходят
 		// снаружи, а Go-кавычки shell не экранируют.
-		cmd := exec.CommandContext(ctx, "git", "clone", "--", cloneURL(a.cfg.GitBase, as), dir)
+		cmd := exec.CommandContext(ctx, "git", "clone", "--", origin, dir)
 		cmd.Dir = a.cfg.Workdir
-		if len(env) > 0 {
-			cmd.Env = append(os.Environ(), env...)
-		}
+		cmd.Env = gitEnv(env)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return "", fmt.Errorf("clone: %v: %s", err, out)
+			return fmt.Errorf("clone: %v: %s", err, out)
+		}
+		return nil
+	}
+	if _, err := os.Lstat(dir + "/.git"); err != nil {
+		if err := clone(); err != nil {
+			return "", err
 		}
 	}
 	base := as.BaseBranch
@@ -271,36 +351,31 @@ func (a *agent) workspace(ctx context.Context, as *pb.Assignment, step func(stri
 		return "", err
 	}
 	br, bs := shellQuote(as.Branch), shellQuote(base)
-	// Страховка: блок push тестировщика из конфига репозитория (так его
-	// ставили прежние версии runner'а) не должен пережить сессию.
-	_, _ = runShell(ctx, dir, "git config --unset-all remote.origin.pushurl '^rivet-tester-no-push:' || true", nil)
-	// Состояние .git, которое мог оставить агент прошлой стадии: подмены
-	// объектов (refs/replace, grafts) и refspec origin меняют историю и
-	// базу для следующих стадий и задач этого репозитория на runner'е, в
-	// том числе для проверки архитектуры (ревью Opus, круг 2).
-	// Адрес origin, его переписывание (url.*.insteadOf, в том числе через
-	// include) и pushurl тоже возвращаются к клону: один агент не ломает
-	// проверку следующих задач (ревью Opus, финальная проверка). Хуки
-	// рабочей копии при подготовке не запускаются. Сведётся с gitguard
-	// add-native-agent при слиянии: чистка идёт до снимка конфигурации.
-	if err := scrubGitConfig(ctx, dir, cloneURL(a.cfg.GitBase, as)); err != nil {
-		return "", fmt.Errorf("workspace: %w", err)
+	// Клон общий для стадий и задач репозитория: .git приводится к виду
+	// свежего клона до fetch и до снимка (gitguard.go). Клон в неизвестном
+	// состоянии удаляется и клонируется заново.
+	if err := prepareWorkspaceGit(ctx, dir, origin); err != nil {
+		step("рабочая копия клонируется заново: " + err.Error())
+		if err := os.RemoveAll(dir); err != nil {
+			return "", fmt.Errorf("подготовка рабочей копии: %w", err)
+		}
+		if err := clone(); err != nil {
+			return "", err
+		}
+		if err := prepareWorkspaceGit(ctx, dir, origin); err != nil {
+			return "", fmt.Errorf("подготовка рабочей копии: %w", err)
+		}
 	}
-	const hygiene = `git -c core.hooksPath=/dev/null for-each-ref --format='delete %(refname)' refs/replace/ | ` +
-		`git -c core.hooksPath=/dev/null update-ref --stdin && ` +
-		`git config --replace-all remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' && ` +
-		`rm -f "$(git rev-parse --git-dir)/info/grafts"`
-	if out, err := runShellEnv(ctx, dir, hygiene, env, nil); err != nil {
-		return "", fmt.Errorf("workspace: %v: %s", err, out)
+	// Токен назначения нужен только fetch: остальная подготовка идёт без
+	// учётных данных в окружении git. --prune: ветка, удалённая на
+	// хостинге, не продолжается по старой ссылке.
+	if out, err := runShellEnv(ctx, dir, "git fetch --prune origin", gitEnv(env), nil); err != nil {
+		return "", fmt.Errorf("fetch: %v: %s", err, out)
 	}
-	// Подготовка ветки без хуков рабочей копии: reference-transaction и
-	// post-checkout агента не должны срабатывать с учётными данными runner'а.
-	env = append(append([]string{}, env...), noHooksEnv(append(os.Environ(), env...))...)
 	// Незакоммиченные правки в каталоге — хвост прерванной стадии (остановка
 	// или падение runner'а): в работу новой стадии они не попадают.
 	// Игнорируемые файлы (зависимости, кэши) остаются: копия тёплая.
-	// --prune: ветка, удалённая на хостинге, не продолжается по старой ссылке.
-	const prep = "git fetch --prune origin && git reset -q --hard && git clean -qffd && "
+	const prep = "git reset -q --hard && git clean -qffd && "
 	var script string
 	switch as.Stage {
 	case pb.StageResult_CODING:
@@ -322,7 +397,7 @@ func (a *agent) workspace(ctx context.Context, as *pb.Assignment, step func(stri
 			"else (git checkout %s || git checkout -B %s origin/%s); fi",
 			br, br, br, br, br, bs)
 	}
-	if out, err := runShellEnv(ctx, dir, script, env, nil); err != nil {
+	if out, err := runShellEnv(ctx, dir, script, gitEnv(nil), nil); err != nil {
 		return "", fmt.Errorf("checkout: %v: %s", err, out)
 	}
 	return dir, nil
@@ -371,85 +446,6 @@ func workspaceKey(as *pb.Assignment) string {
 		}
 	}
 	return b.String()
-}
-
-// noHooksEnv — git без хуков рабочей копии (через GIT_CONFIG_*: действует
-// на каждую команду git в скрипте подготовки). base — окружение процесса и
-// стадии: уже заданные GIT_CONFIG_* (CA, прокси) сохраняются, ключ
-// добавляется следующим номером, как в pushBlockEnv.
-func noHooksEnv(base []string) []string {
-	n := 0
-	for _, kv := range base {
-		if v, ok := strings.CutPrefix(kv, "GIT_CONFIG_COUNT="); ok {
-			if c, err := strconv.Atoi(v); err == nil && c >= 0 {
-				n = c
-			}
-		}
-	}
-	i := strconv.Itoa(n)
-	return []string{
-		"GIT_CONFIG_KEY_" + i + "=core.hooksPath",
-		"GIT_CONFIG_VALUE_" + i + "=/dev/null",
-		"GIT_CONFIG_COUNT=" + strconv.Itoa(n+1),
-	}
-}
-
-// scrubGitConfig возвращает адрес origin к адресу клона и снимает из
-// локальной конфигурации то, чем агент мог подменить источник истории:
-// секции url.* (insteadOf и pushInsteadOf), include.* и includeIf.*,
-// remote.origin.pushurl. Команды без shell: ключи и адрес приходят из
-// конфигурации, которую мог писать агент.
-func scrubGitConfig(ctx context.Context, dir, origin string) error {
-	git := func(args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.hooksPath=/dev/null"}, args...)...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
-		return cmd.Output()
-	}
-	// scrub снимает подходящие ключи в одной области конфигурации.
-	// --get-regexp без совпадений выходит с кодом 1: снимать нечего.
-	scrub := func(scope, pattern string) error {
-		out, err := git("config", scope, "--name-only", "-z", "--get-regexp", pattern)
-		if err != nil && exitCodeOf(err) != 1 {
-			return fmt.Errorf("конфигурация рабочей копии (%s): %v", scope, err)
-		}
-		seen := map[string]bool{}
-		for _, key := range strings.Split(string(out), "\x00") {
-			key = strings.TrimSpace(key)
-			if key == "" || seen[key] {
-				continue
-			}
-			seen[key] = true
-			// Код 5 — ключа уже нет (одна секция могла держать несколько ключей).
-			if _, err := git("config", scope, "--unset-all", key); err != nil && exitCodeOf(err) != 5 {
-				return fmt.Errorf("снять %s (%s): %v", key, scope, err)
-			}
-		}
-		return nil
-	}
-	// Конфигурация рабочего дерева (.git/config.worktree) читается поверх
-	// локальной, если включена extensions.worktreeConfig: там адрес origin
-	// тоже можно подменить (ревью Opus, ограничитель).
-	if wt, _ := git("config", "--local", "--bool", "--get", "extensions.worktreeConfig"); strings.TrimSpace(string(wt)) == "true" {
-		if err := scrub("--worktree", `^(url|include|includeif)\.|^remote\.origin\.(url|pushurl)$`); err != nil {
-			return err
-		}
-	}
-	if err := scrub("--local", `^(url|include|includeif)\.|^remote\.origin\.pushurl$`); err != nil {
-		return err
-	}
-	if _, err := git("config", "--local", "remote.origin.url", origin); err != nil {
-		return fmt.Errorf("адрес origin: %v", err)
-	}
-	return nil
-}
-
-func exitCodeOf(err error) int {
-	var ee *exec.ExitError
-	if errors.As(err, &ee) {
-		return ee.ExitCode()
-	}
-	return -1
 }
 
 // cloneURL — адрес клонирования: из Assignment (репозиторий проекта) или
@@ -505,31 +501,33 @@ func gitCommitPush(ctx context.Context, dir, branch string, env []string, messag
 	if err := validBranch(branch); err != nil {
 		return err
 	}
-	// Identity задаём явно: на CI глобального git config нет. Коммит нужен и
-	// при пустом diff, если агент оставил незавершённый merge (MERGE_HEAD):
-	// разрешение конфликта с базовой веткой может дать дерево, равное HEAD,
-	// но без merge-коммита базовая ветка не станет предком ветки задачи.
+	// Identity задаём явно: глобальный git config runner'а не читается
+	// (gitEnv). Коммит нужен и при пустом diff, если агент оставил
+	// незавершённый merge (MERGE_HEAD): разрешение конфликта с базовой
+	// веткой может дать дерево, равное HEAD, но без merge-коммита базовая
+	// ветка не станет предком ветки задачи. Хуки клона не исполняются
+	// (gitEnv и --no-verify).
 	script := fmt.Sprintf(
 		`git add -A && { if git rev-parse -q --verify MERGE_HEAD >/dev/null || ! git diff --cached --quiet; then `+
-			`git -c user.name=rivet-runner -c user.email=runner@rivet.local commit -m %s; fi; } && git push -u origin %s`,
+			`git -c user.name=rivet-runner -c user.email=runner@rivet.local commit --no-verify -m %s; fi; } && git push --no-verify -u origin %s`,
 		shellQuote(message), shellQuote(branch))
-	if out, err := runShellEnv(ctx, dir, script, env, nil); err != nil {
+	if out, err := runShellEnv(ctx, dir, script, gitEnv(env), nil); err != nil {
 		return fmt.Errorf("%v: %s", err, out)
 	}
 	return nil
 }
 
-func runShell(ctx context.Context, dir, script string, transcript func([]byte)) (string, error) {
-	return runShellEnv(ctx, dir, script, nil, transcript)
-}
-
-// runShellEnv — runShell с дополнительными переменными окружения
-// (askpass-хелпер git: секрет не попадает в аргументы команды).
+// runShellEnv — команда runner'а с заданным окружением (git runner'а:
+// gitEnv с askpass, секрет не попадает в аргументы). Без env — окружение
+// runner'а без секретных переменных. Код из рабочей копии (проверки
+// проекта) так не запускается: он идёт в песочнице агента (checks.go).
 func runShellEnv(ctx context.Context, dir, script string, env []string, transcript func([]byte)) (string, error) {
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
 	cmd.Dir = dir
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
+	if env != nil {
+		cmd.Env = env
+	} else {
+		cmd.Env = scrubEnv(os.Environ())
 	}
 	out, err := cmd.CombinedOutput()
 	if transcript != nil && len(out) > 0 {
@@ -742,29 +740,15 @@ func parseVerdict(out string) (approved bool, detail string) {
 // usageReport — машиночитаемый отчёт агента о расходе (маркер USAGE:).
 // Все поля опциональны: nil = агент не сообщил значение, не ноль.
 type usageReport struct {
-	TokensIn  *int64   `json:"tokens_in"`
-	TokensOut *int64   `json:"tokens_out"`
-	CostUSD   *float64 `json:"cost_usd"`
-	CtxPct    *int32   `json:"ctx_pct"`
-}
-
-// parseUsage разбирает последнюю строку «USAGE: {json}» вывода агента.
-// Нет маркера или битый JSON — пустой отчёт (запись уйдёт без токенов).
-func parseUsage(out string) usageReport {
-	rest, found := lastSentinelLine(out, "USAGE:")
-	if !found {
-		return usageReport{}
-	}
-	var r usageReport
-	if err := json.Unmarshal([]byte(rest), &r); err != nil {
-		slog.Warn("битый USAGE:-отчёт агента — игнорируется", "err", err)
-		return usageReport{}
-	}
-	if r.CtxPct != nil && (*r.CtxPct < 0 || *r.CtxPct > 100) {
-		slog.Warn("ctx_pct вне диапазона 0–100 — игнорируется", "ctx_pct", *r.CtxPct)
-		r.CtxPct = nil
-	}
-	return r
+	TokensIn  *int64 `json:"tokens_in"`
+	TokensOut *int64 `json:"tokens_out"`
+	// TokensCached и TokensCacheWrite — чтение из кеша провайдера и запись
+	// в него, оба входят в TokensIn (pb.Usage tokens_cached и
+	// tokens_cache_write).
+	TokensCached     *int64   `json:"tokens_cached"`
+	TokensCacheWrite *int64   `json:"tokens_cache_write"`
+	CostUSD          *float64 `json:"cost_usd"`
+	CtxPct           *int32   `json:"ctx_pct"`
 }
 
 // parseBlocked ищет строку «BLOCKED: <вопрос>» в выводе агента.

@@ -57,7 +57,7 @@ func TestRolesCatalog(t *testing.T) {
 		{RoleInput{ID: "tester", Title: "QA", Instruction: "x", Color: "blue"}, "capability"},
 		{RoleInput{ID: "lead", Title: "Тимлид", Instruction: "x", Color: "amber", Capability: "coding"}, "capability"},
 		{RoleInput{ID: "analyst", Title: "Аналитик", Instruction: "x", Color: "indigo", Capability: "review"}, "capability"},
-		{RoleInput{ID: "qa", Title: "QA", Instruction: "x", Color: "blue", Agent: "claude-code"}, "agent"},
+		{RoleInput{ID: "qa", Title: "QA", Instruction: "x", Color: "blue", Agent: AgentRivet}, "agent"},
 		{RoleInput{ID: "qa", Title: "QA", Instruction: "x", Color: "blue", Capability: "coding", Agent: "nope"}, "agent"},
 	}
 	for _, c := range cases {
@@ -184,7 +184,7 @@ func TestRunnerDisplayName(t *testing.T) {
 	s := testStore(t)
 	reg := func(name string) {
 		t.Helper()
-		if err := s.UpsertRunner(ctx, domain.Runner{ID: "claude-sonnet-1", Agent: "claude-code", Capabilities: []string{"coding"},
+		if err := s.UpsertRunner(ctx, domain.Runner{ID: "claude-sonnet-1", Agent: AgentRivet, Capabilities: []string{"coding"},
 			DisplayName: name, Features: []string{domain.FeatureRoles}}); err != nil {
 			t.Fatal(err)
 		}
@@ -212,7 +212,7 @@ func TestRunnerDisplayName(t *testing.T) {
 		t.Fatalf("неизвестный runner: %v", err)
 	}
 	// Старый runner без имени показывает идентификатор.
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "old", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "old", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	if r, _ := s.GetRunner(ctx, "old"); r.Label() != "old" || r.HasFeature(domain.FeatureRoles) {
@@ -244,8 +244,8 @@ func TestRoleBindingAndAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range []domain.Runner{
-		{ID: "a-plain", Agent: "claude-code", Models: []string{"sonnet"}, Capabilities: []string{"coding"}, DisplayName: "Макс", Features: []string{domain.FeatureRoles}},
-		{ID: "b-opus", Agent: "claude-code", Models: []string{"sonnet", "opus"}, Capabilities: []string{"coding"}, DisplayName: "Ева"},
+		{ID: "a-plain", Agent: AgentRivet, Models: []string{"sonnet"}, Capabilities: []string{"coding"}, DisplayName: "Макс", Features: []string{domain.FeatureRoles}},
+		{ID: "b-opus", Agent: AgentRivet, Models: []string{"sonnet", "opus"}, Capabilities: []string{"coding"}, DisplayName: "Ева"},
 	} {
 		if err := s.UpsertRunner(ctx, r); err != nil {
 			t.Fatal(err)
@@ -355,18 +355,18 @@ func TestTeamAgents(t *testing.T) {
 	if strings.Join(names, ",") != "analyst:Вера,architect:Ада,lead:Тимур,developer:Макс,developer:Ева,tester:Лев,reviewer:Ирина,devops:Дина,sre:Глеб" {
 		t.Fatalf("команда по умолчанию: %v", names)
 	}
+	// Модели агента Rivet — каталог подключений: скрытая модель в него не
+	// входит.
 	if _, err := s.Pool.Exec(ctx, `
 		INSERT INTO model_connections (id, name, kind, api, base_url, models, updated_by)
-		VALUES ('anthropic', 'Anthropic', 'vendor', 'anthropic', 'https://api.anthropic.com', '[{"id":"claude-opus-5"},{"id":"claude-sonnet-5"}]', $1)`, admin.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Pool.Exec(ctx, `UPDATE agents SET models='[{"connection_id":"anthropic","model":"claude-opus-5"}]' WHERE id='claude-code'`); err != nil {
+		VALUES ('anthropic', 'Anthropic', 'vendor', 'anthropic', 'https://api.anthropic.com',
+		        '[{"id":"claude-opus-5"},{"id":"claude-sonnet-5"},{"id":"claude-haiku-5","hidden":true}]', $1)`, admin.ID); err != nil {
 		t.Fatal(err)
 	}
 	// Третий разработчик из шаблона с моделью-тройкой.
 	yan, err := s.CreateTeamAgent(ctx, TeamAgentInput{ID: "yan", Name: "Ян", RoleID: "developer",
-		Agent: "claude-code", ConnectionID: "anthropic", Model: "claude-opus-5"}, admin.ID, admin.Login)
-	if err != nil || yan.Model != "claude-opus-5" || !yan.Enabled || yan.Position <= 70 {
+		Agent: AgentRivet, ConnectionID: "anthropic", Model: "claude-opus-5"}, admin.ID, admin.Login)
+	if err != nil || yan.Model != "claude-opus-5" || yan.Agent != AgentRivet || !yan.Enabled || yan.Position <= 70 {
 		t.Fatalf("новый агент: %+v %v", yan, err)
 	}
 	if _, err := s.CreateTeamAgent(ctx, TeamAgentInput{ID: "yan", Name: "Ян", RoleID: "developer"}, admin.ID, admin.Login); !errors.Is(err, ErrExists) {
@@ -376,10 +376,11 @@ func TestTeamAgents(t *testing.T) {
 	for _, bad := range []TeamAgentInput{
 		{ID: "x1", Name: "", RoleID: "developer"},
 		{ID: "x1", Name: "X", RoleID: "ghost"},
-		{ID: "x1", Name: "X", RoleID: "developer", Agent: "claude-code", ConnectionID: "anthropic", Model: "claude-sonnet-5"},
-		{ID: "x1", Name: "X", RoleID: "developer", Agent: "nope", ConnectionID: "anthropic", Model: "claude-opus-5"},
+		{ID: "x1", Name: "X", RoleID: "developer", Agent: AgentRivet, ConnectionID: "anthropic", Model: "claude-haiku-5"},
+		{ID: "x1", Name: "X", RoleID: "developer", Agent: AgentRivet, ConnectionID: "anthropic", Model: "claude-nope"},
+		{ID: "x1", Name: "X", RoleID: "developer", Agent: "claude-code", ConnectionID: "anthropic", Model: "claude-opus-5"},
 		{ID: "x1", Name: "X", RoleID: "developer", ConnectionID: "anthropic"},
-		{ID: "x1", Name: "X", RoleID: "analyst", Agent: "claude-code", ConnectionID: "anthropic", Model: "claude-opus-5"},
+		{ID: "x1", Name: "X", RoleID: "analyst", Agent: AgentRivet, ConnectionID: "anthropic", Model: "claude-opus-5"},
 	} {
 		if _, err := s.CreateTeamAgent(ctx, bad, admin.ID, admin.Login); !errors.As(err, &fe) {
 			t.Fatalf("%+v: ожидали ошибку поля, got %v", bad, err)
@@ -396,7 +397,7 @@ func TestTeamAgents(t *testing.T) {
 	evs, _ := s.Events(ctx, EventFilter{Installation: true, Type: "team.agent_updated"})
 	last := evs[len(evs)-1]
 	before, _ := last.Payload["before"].(map[string]any)
-	if before["model"] != "claude-code / anthropic / claude-opus-5" || last.Payload["model"] != "" {
+	if before["model"] != "rivet / anthropic / claude-opus-5" || last.Payload["model"] != "" {
 		t.Fatalf("событие смены модели: %+v", last.Payload)
 	}
 	// Агент-тимлид: модель — настройка планировщика, только явная смена.
@@ -434,17 +435,18 @@ func TestTeamAgents(t *testing.T) {
 	if err := s.DeleteRole(ctx, "security", admin.Login); err != nil {
 		t.Fatalf("шаблон без агентов: %v", err)
 	}
-	// Выбор модели: тройки включённых профилей с признаком runner'а.
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "claude-code", Capabilities: []string{"coding"}}); err != nil {
+	// Выбор модели: тройки агента Rivet по видимым моделям каталога с
+	// признаком runner'а.
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	choices, err := s.ModelChoices(ctx)
-	if err != nil || len(choices) == 0 {
+	if err != nil || len(choices) != 2 {
 		t.Fatalf("выбор моделей: %v %v", choices, err)
 	}
-	for _, c := range choices {
-		if c.Agent == "claude-code" && (!c.RunnerOnline || c.Model != "claude-opus-5") {
-			t.Fatalf("тройка claude-code: %+v", c)
+	for i, model := range []string{"claude-opus-5", "claude-sonnet-5"} {
+		if c := choices[i]; c.Agent != AgentRivet || c.ConnectionID != "anthropic" || c.Model != model || !c.RunnerOnline {
+			t.Fatalf("тройка агента Rivet %d: %+v", i, c)
 		}
 	}
 }

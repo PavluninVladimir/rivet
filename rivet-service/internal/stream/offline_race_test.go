@@ -53,8 +53,8 @@ func TestOfflineAfterReconnectRace(t *testing.T) {
 	client := pb.NewRunnerServiceClient(conn)
 	authed := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+secret)
 
-	if resp, err := client.Register(authed, &pb.RegisterRequest{RunnerId: "r1", Agent: "claude-code", Host: "h",
-		Capabilities: []string{"coding"}, ProtocolVersion: protocolVersion, Adapter: "wrap", Depth: "minimal", BootId: "b1"}); err != nil || !resp.Accepted {
+	if resp, err := client.Register(authed, &pb.RegisterRequest{RunnerId: "r1", Agent: "rivet", Host: "h",
+		Capabilities: []string{"coding"}, ProtocolVersion: protocolVersion, Adapter: "wrap", Depth: "minimal", BootId: "b1", Features: []string{"native"}}); err != nil || !resp.Accepted {
 		t.Fatalf("register: %v %+v", err, resp)
 	}
 	p, _ := st.CreateProject(ctx, "p", "o/r", nil, admin.ID)

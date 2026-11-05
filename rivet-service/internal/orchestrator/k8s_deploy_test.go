@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/store"
 )
 
 // Публикация в Kubernetes (change add-k8s-delivery): команды собирает
@@ -117,7 +118,7 @@ func TestK8sDeployJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpsertRunner(ctx, domain.Runner{ID: "deployer", Agent: "wrap",
+	if err := st.UpsertRunner(ctx, domain.Runner{ID: "deployer",
 		Capabilities: []string{"deploy"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +165,7 @@ func TestDeployRunnerCaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Runner без нужной capability публикацию не получает.
-	if err := st.UpsertRunner(ctx, domain.Runner{ID: "plain", Agent: "wrap",
+	if err := st.UpsertRunner(ctx, domain.Runner{ID: "plain",
 		Capabilities: []string{"deploy"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -180,8 +181,10 @@ func TestDeployRunnerCaps(t *testing.T) {
 	if sent != 0 {
 		t.Fatalf("публикация не должна уходить runner'у без capability: %d сообщений", sent)
 	}
-	// Появился подходящий runner — публикация уходит ему.
-	if err := st.UpsertRunner(ctx, domain.Runner{ID: "cluster-runner", Agent: "wrap",
+	// Появился подходящий runner — публикация уходит ему. Runner без агента
+	// допускается только с единственной capability deploy, поэтому runner с
+	// capability кластера — агента Rivet.
+	if err := st.UpsertRunner(ctx, domain.Runner{ID: "cluster-runner", Agent: store.AgentRivet,
 		Capabilities: []string{"deploy", "k8s-prod"}}); err != nil {
 		t.Fatal(err)
 	}

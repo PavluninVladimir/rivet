@@ -1,0 +1,15 @@
+elements:
+  - id: tech.host
+    type: node
+    name: Сервер
+    props: {technology: "Node.js 22"}
+    relations:
+      - {type: serving, to: app.api}
+      - {type: assignment, to: tech.json-file}
+  - id: tech.json-file
+    type: system-software
+    name: JSON-файл
+    description: data/crm.json, путь задаёт CRM_DATA_FILE
+    props: {c4: database, technology: "JSON, атомарная запись через rename"}
+    relations:
+      - {type: access, to: data.contact, mode: readwrite}

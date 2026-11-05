@@ -122,7 +122,7 @@ func TestSchedulerFlow(t *testing.T) {
 	}
 
 	// Runner без нужной capability не получает задачу C; для A хватает coding.
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	asg, ok, err := s.AssignNext(ctx, nil, nil)
@@ -342,7 +342,7 @@ func TestCancelRunningTaskFreesRunner(t *testing.T) {
 	if err := s.RecomputeEpic(ctx, e.ID); err != nil {
 		t.Fatal(err)
 	}
-	_ = s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}})
 	if _, ok, err := s.AssignNext(ctx, nil, nil); !ok || err != nil {
 		t.Fatalf("назначение: ok=%v err=%v", ok, err)
 	}
@@ -436,7 +436,7 @@ func TestStaleRunnerConsumesAttempt(t *testing.T) {
 	if err := s.RecomputeEpic(ctx, e.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := s.AssignNext(ctx, nil, nil); !ok || err != nil {
@@ -462,7 +462,7 @@ func TestStaleRunnerConsumesAttempt(t *testing.T) {
 	}
 
 	// Вторая потеря исчерпывает лимит: failed + эскалация RUNNER_LOST.
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := s.AssignNext(ctx, nil, nil); !ok || err != nil {
