@@ -466,6 +466,12 @@ func descendantsOf(pid int) []int {
 // каталога под скрытым $HOME остаются скрытыми.
 func setupSandbox(hide, keep, readOnly []string, network bool) error {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
+		// Ubuntu 23.10+ (и раннеры GitHub): user namespace создаётся, но
+		// AppArmor отнимает в нём права на монтирования.
+		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+			return fmt.Errorf("приватные монтирования запрещены: AppArmor ограничивает user namespace без привилегий "+
+				"(kernel.apparmor_restrict_unprivileged_userns=1, нужен профиль AppArmor для rivet-runner): %w", err)
+		}
 		return fmt.Errorf("приватные монтирования: %w", err)
 	}
 	// Один и тот же каталог не монтируем дважды (рабочая копия и HOME

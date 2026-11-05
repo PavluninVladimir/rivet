@@ -49,9 +49,12 @@ func TestSandboxFromNonDumpableProcess(t *testing.T) {
 		t.Fatalf("проба должна быть недампируемой:\n%s", report)
 	}
 	if !NetworkIsolationAvailable() {
-		// Ядро не даёт user namespace (Docker с seccomp по умолчанию):
-		// откат без изоляции, причина — настоящая.
-		if !strings.Contains(report, "available false reason=ядро не даёт создать user namespace") ||
+		// Песочница недоступна: ядро не даёт user namespace (Docker с seccomp
+		// по умолчанию) или AppArmor отнимает в нём монтирования (Ubuntu
+		// 23.10+, раннеры GitHub). Проверяется честный откат: команда идёт
+		// без изоляции, без ошибки, а причина непустая.
+		if !strings.Contains(report, "available false reason=") ||
+			strings.Contains(report, "available false reason=\n") ||
 			!strings.Contains(report, "isolated false err=<nil>") {
 			t.Fatalf("ожидается откат с причиной:\n%s", report)
 		}
