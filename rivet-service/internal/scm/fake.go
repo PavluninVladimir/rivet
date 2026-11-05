@@ -2,7 +2,9 @@ package scm
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,13 @@ import (
 // Fake — SCM-провайдер для e2e и локальных стендов (RIVET_SCM=fake).
 // PR фиктивный, merge — no-op. Продуктовое поведение не меняет:
 // включается только явным флагом окружения.
+//
+// С каталогом bare-репозиториев стенда (FakeGitDirEnv) и списком
+// репозиториев (FakeGitReposEnv) fake работает поверх настоящего git для
+// репозиториев из списка: ReadFile читает файлы версии, HeadSHA отдаёт
+// настоящий SHA, Merge продвигает базовую ветку. Остальные репозитории
+// работают по-старому: e2e-проекты делят общий e2e/demo и ждут версию
+// «main», настоящий merge в нём ломал бы их сценарии.
 type Fake struct {
 	seq atomic.Int64
 	// files — файлы фиктивного репозитория для публикации GitOps.
@@ -20,49 +29,151 @@ type Fake struct {
 	// conflicts — PR с меткой FakeConflictMarker («repo#номер»), первый
 	// merge которых отклоняется как конфликт с базовой веткой.
 	conflicts map[string]bool
+	// gitDir — каталог bare-репозиториев стенда: <gitDir>/<owner>/<name>.git.
+	gitDir string
+	// gitRepos — репозитории («owner/name»), для которых действует git-режим.
+	gitRepos map[string]bool
+	// prs — ветка и база PR («repo#номер») для merge в git-режиме.
+	prs map[string]fakePR
+	// prFiles — заданный тестом список файлов PR («repo#номер»).
+	prFiles map[string][]string
+	// gitMu — merge в git-режиме по одному: проверка предка и сдвиг ветки
+	// должны видеть одно состояние.
+	gitMu sync.Mutex
 }
+
+type fakePR struct{ branch, base string }
 
 // FakeConflictMarker — метка в заголовке задачи, по которой fake-хостинг
 // имитирует конфликт PR с базовой веткой: первая попытка merge получает
 // ErrMergeConflict, следующая проходит (e2e конфликта при merge).
 const FakeConflictMarker = "[e2e-conflict]"
 
-func NewFake() *Fake { return &Fake{} }
+// FakeGitDirEnv — переменная окружения с каталогом bare-репозиториев
+// стенда для git-режима fake (e2e снимка архитектуры).
+const FakeGitDirEnv = "RIVET_FAKE_GIT_DIR"
+
+// FakeGitReposEnv — репозитории git-режима через запятую («owner/name,…»).
+// Без списка git-режим не действует ни для одного репозитория.
+const FakeGitReposEnv = "RIVET_FAKE_GIT_REPOS"
+
+// NewFake — fake-адаптер; git-режим включают переменные FakeGitDirEnv и
+// FakeGitReposEnv.
+func NewFake() *Fake {
+	return NewFakeGit(os.Getenv(FakeGitDirEnv), strings.Split(os.Getenv(FakeGitReposEnv), ",")...)
+}
+
+// NewFakeGit — fake-адаптер в git-режиме для репозиториев repos из
+// каталога bare-репозиториев dir.
+func NewFakeGit(dir string, repos ...string) *Fake {
+	f := &Fake{gitDir: dir, gitRepos: map[string]bool{}}
+	for _, r := range repos {
+		if r = strings.TrimSpace(r); r != "" {
+			f.gitRepos[r] = true
+		}
+	}
+	return f
+}
 
 func (f *Fake) CreatePR(ctx context.Context, repo, branch, base, title, body string) (PR, error) {
-	n := int(f.seq.Add(1))
+	dir, inGit := f.repoDir(repo)
+	var n int
+	if inGit {
+		var err error
+		if n, err = f.gitCreatePR(ctx, dir, fakePR{branch: branch, base: base}); err != nil {
+			return PR{}, err
+		}
+	} else {
+		n = int(f.seq.Add(1))
+	}
+	key := fmt.Sprintf("%s#%d", repo, n)
+	f.mu.Lock()
 	if strings.Contains(title, FakeConflictMarker) {
-		f.mu.Lock()
 		if f.conflicts == nil {
 			f.conflicts = map[string]bool{}
 		}
-		f.conflicts[fmt.Sprintf("%s#%d", repo, n)] = true
-		f.mu.Unlock()
+		f.conflicts[key] = true
 	}
+	if inGit {
+		if f.prs == nil {
+			f.prs = map[string]fakePR{}
+		}
+		f.prs[key] = fakePR{branch: branch, base: base}
+	}
+	f.mu.Unlock()
 	return PR{Number: n, URL: fmt.Sprintf("https://fake.local/%s/pull/%d", repo, n)}, nil
+}
+
+// gitCreatePR — номер больше и сохранённых в репозитории (прошлые запуски
+// rivetd), и выданных этим адаптером; запись PR в ref'ы репозитория.
+func (f *Fake) gitCreatePR(ctx context.Context, dir string, pr fakePR) (int, error) {
+	f.gitMu.Lock()
+	defer f.gitMu.Unlock()
+	stored, err := maxPR(ctx, dir)
+	if err != nil {
+		return 0, err
+	}
+	n, err := savePR(ctx, dir, int(max(f.seq.Load(), int64(stored)))+1, pr)
+	if err != nil {
+		return 0, err
+	}
+	f.raiseSeq(int64(n))
+	return n, nil
+}
+
+// raiseSeq — счётчик адаптера не отстаёт от занятого номера PR: его делят
+// PR, пайплайны и коммиты fake.
+func (f *Fake) raiseSeq(n int64) {
+	for {
+		cur := f.seq.Load()
+		if cur >= n || f.seq.CompareAndSwap(cur, n) {
+			return
+		}
+	}
 }
 
 func (f *Fake) Diff(ctx context.Context, repo string, number int) (string, error) {
 	return "diff --git a/e2e b/e2e\n+e2e", nil
 }
 
-// Merge — no-op: настоящего merge-коммита нет, поэтому версией служит
-// базовая ветка. Она существует в репозитории стенда, и доставка, которой
-// нужна рабочая копия версии (Kubernetes), на стенде работает.
+// Merge — без git-режима no-op: настоящего merge-коммита нет, поэтому
+// версией служит базовая ветка. Она существует в репозитории стенда, и
+// доставка, которой нужна рабочая копия версии (Kubernetes), на стенде
+// работает. В git-режиме базовая ветка продвигается по-настоящему (gitMerge).
 func (f *Fake) Merge(ctx context.Context, repo string, number int) (string, error) {
 	key := fmt.Sprintf("%s#%d", repo, number)
 	f.mu.Lock()
 	conflict := f.conflicts[key]
 	delete(f.conflicts, key)
+	pr, known := f.prs[key]
 	f.mu.Unlock()
 	if conflict {
 		return "", fmt.Errorf("fake merge: %w", ErrMergeConflict)
 	}
+	if dir, inGit := f.repoDir(repo); inGit {
+		// PR прошлого запуска rivetd в памяти нет: он читается из ref'ов
+		// репозитория. Неизвестный PR — ошибка, иначе задача ушла бы в done
+		// без merge, а публикация выкатила бы старый код.
+		if !known {
+			var err error
+			if pr, known, err = loadPR(ctx, dir, number); err != nil {
+				return "", err
+			}
+			if !known {
+				return "", fmt.Errorf("fake git: PR #%d в %s неизвестен", number, repo)
+			}
+		}
+		return f.gitMerge(ctx, dir, number, pr)
+	}
 	return "main", nil
 }
 
-// HeadSHA — «вершина» ветки: для стенда это сама ветка (см. Merge).
+// HeadSHA — без git-режима «вершина» ветки: для стенда это сама ветка
+// (см. Merge). В git-режиме настоящий SHA, пустая ветка — HEAD репозитория.
 func (f *Fake) HeadSHA(ctx context.Context, repo, branch string) (string, error) {
+	if dir, ok := f.repoDir(repo); ok {
+		return f.gitHead(ctx, dir, branch)
+	}
 	if branch == "" {
 		return "main", nil
 	}
@@ -119,28 +230,51 @@ func (f *Fake) PipelineRun(ctx context.Context, repo, pipeline, ref, runID strin
 // ─── файлы репозитория (e2e-стенд) ───────────────────────────────────────
 
 // ReadFile — файл фиктивного репозитория: содержимое живёт в памяти
-// адаптера, чего достаточно для сквозной проверки публикации GitOps.
+// адаптера, чего достаточно для сквозной проверки публикации GitOps. В
+// git-режиме файл, которого нет в памяти, читается из версии ref
+// bare-репозитория стенда.
 func (f *Fake) ReadFile(ctx context.Context, repo, ref, path string) (FileContent, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	content, ok := f.files[repo+"@"+ref+":"+path]
-	if !ok {
-		return FileContent{}, ErrFileNotFound
+	f.mu.Unlock()
+	if ok {
+		return FileContent{Content: content, FileID: "fake-file"}, nil
 	}
-	return FileContent{Content: content, FileID: "fake-file"}, nil
+	if dir, inGit := f.repoDir(repo); inGit {
+		return f.gitRead(ctx, dir, repo, ref, path)
+	}
+	return FileContent{}, ErrFileNotFound
 }
 
 // WriteFile — «коммит» в фиктивный репозиторий: как и настоящие хостинги,
-// проверяет идентификатор прочитанной версии файла.
+// проверяет идентификатор прочитанной версии файла. Записанное живёт в
+// памяти. В git-режиме файл, которого в памяти ещё нет, сверяется с
+// версией из git: prevID — sha его блоба (то, что отдал ReadFile). Ветки,
+// которой нет в git, запись не создаёт: хостинги так тоже не умеют.
 func (f *Fake) WriteFile(ctx context.Context, repo, ref, path, prevID, content, message string) (Commit, error) {
+	key := repo + "@" + ref + ":" + path
+	// Версия файла в git читается до замка памяти: git медленный, а
+	// ReadFile под тем же замком ждал бы его.
+	gitID := ""
+	if dir, inGit := f.repoDir(repo); inGit {
+		fc, err := f.gitRead(ctx, dir, repo, ref, path)
+		switch {
+		case err == nil:
+			gitID = fc.FileID
+		case errors.Is(err, ErrFileNotFound): // новый файл
+		default: // в том числе ErrRefNotFound
+			return Commit{}, err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.files == nil {
 		f.files = map[string]string{}
 	}
-	key := repo + "@" + ref + ":" + path
 	_, exists := f.files[key]
-	if exists != (prevID != "") {
+	switch {
+	case exists && prevID == "",
+		!exists && prevID != gitID:
 		return Commit{}, fmt.Errorf("fake: файл изменился с момента чтения")
 	}
 	f.files[key] = content

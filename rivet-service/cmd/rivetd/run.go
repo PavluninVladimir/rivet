@@ -170,6 +170,13 @@ func run(ctx context.Context, cfg config.Config) error {
 		return nil
 	})
 	g.Go(func() error { engine.Run(ctx); return nil })
+	// После старта в фоне: переподписка webhook'ов на push и сверка SHA уже
+	// построенных снимков архитектуры, чтобы не потерять обновление,
+	// отложенное до рестарта (add-architecture-c4). Старт хостинга не ждёт.
+	// Две независимые фоновые задачи: переподписка ходит на хостинг с
+	// паузами и не должна задерживать сверку снимков.
+	g.Go(func() error { apiSrv.ResubscribeWebhooks(ctx); return nil })
+	g.Go(func() error { engine.ResumeArchitecture(ctx); return nil })
 	g.Go(func() error {
 		<-ctx.Done()
 		grpcSrv.GracefulStop()

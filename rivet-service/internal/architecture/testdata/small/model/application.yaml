@@ -1,0 +1,16 @@
+elements:
+  - id: app.web
+    type: component
+    name: Веб-кабинет
+    description: Страницы для клиентов
+    props: {technology: "TypeScript, React"}
+    relations:
+      - {type: serving, to: biz.client}
+      - {type: flow, to: app.api}
+  - id: app.api
+    type: component
+    name: API заявок
+    props: {technology: Go}
+    relations:
+      - {type: realization, to: biz.request}
+      - {type: access, to: data.request, mode: readwrite}

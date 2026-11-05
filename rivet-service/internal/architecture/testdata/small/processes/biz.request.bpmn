@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:rivet="urn:rivet:architecture:1"
+                  id="defs-request" targetNamespace="urn:requests">
+  <bpmn:process id="request" name="Подача заявки" isExecutable="false">
+    <bpmn:laneSet id="request-lanes">
+      <bpmn:lane id="lane-client" name="Клиент" rivet:ref="biz.client">
+        <bpmn:flowNodeRef>start</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>fill</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>save</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>end</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="start" name="Нужна помощь"/>
+    <bpmn:userTask id="fill" name="Заполнить заявку"/>
+    <bpmn:serviceTask id="save" name="Сохранить заявку" rivet:ref="app.api"/>
+    <bpmn:endEvent id="end" name="Заявка принята"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="fill"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="fill" targetRef="save"/>
+    <bpmn:sequenceFlow id="f3" sourceRef="save" targetRef="end"/>
+  </bpmn:process>
+</bpmn:definitions>

@@ -25,7 +25,7 @@ func (s *Server) getInstallationPolicy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"version": v, "presets": p, "engine": s.engineView(r)})
+	writeJSON(w, http.StatusOK, map[string]any{"version": v, "presets": p.Explicit(), "engine": s.engineView(r)})
 }
 
 func (s *Server) putInstallationPolicy(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +61,7 @@ func (s *Server) putInstallationPolicy(w http.ResponseWriter, r *http.Request) {
 		slog.Error("нарушения ограничений процесса", "err", err)
 		violations = []store.LockViolation{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"version": v, "presets": p.Normalize(), "violations": violations})
+	writeJSON(w, http.StatusOK, map[string]any{"version": v, "presets": p.Normalize().Explicit(), "violations": violations})
 }
 
 func (s *Server) listInstallationPolicyVersions(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +128,7 @@ func (s *Server) writeProjectPolicy(w http.ResponseWriter, r *http.Request, eff 
 		processSource = "project"
 	}
 	view := projectPolicyView{
-		Effective: eff.Presets, EffectiveHash: eff.Hash, Overrides: eff.Overrides,
+		Effective: eff.Presets.Explicit(), EffectiveHash: eff.Hash, Overrides: eff.Overrides,
 		ProcessSource: processSource,
 		Version:       eff.Project, InstallationVersion: eff.Installation,
 		Engine: s.engineView(r),

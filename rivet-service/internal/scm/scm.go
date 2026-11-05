@@ -4,9 +4,11 @@ package scm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -64,6 +66,22 @@ var ErrDiffTruncated = errors.New("diff PR обрезан: превышен ли
 // ErrFileNotFound — файла нет в репозитории на этой ветке.
 var ErrFileNotFound = errors.New("файла нет в репозитории")
 
+// ErrSymlink — по пути лежит символическая ссылка: содержимое цели не
+// читается (снимок архитектуры пропускает такой файл с дефектом).
+var ErrSymlink = errors.New("символическая ссылка")
+
+// ErrRefNotFound — версии, из которой читается файл (ветки или коммита),
+// нет на хостинге, или недоступен сам проект (GitLab отвечает на оба
+// одинаково). Это не ErrFileNotFound: политика из репозитория при нём
+// сообщает о недоступной доверенной ветке, а снимок не принимает его за
+// отсутствие описания.
+var ErrRefNotFound = errors.New("версии (ветки или коммита) нет в репозитории")
+
+// ErrBranchNotFound — ветки нет в репозитории, в том числе в пустом
+// репозитории без коммитов. Отличается от сбоя хостинга: снимок
+// архитектуры по нему понимает, что описывать пока нечего.
+var ErrBranchNotFound = errors.New("ветки нет в репозитории")
+
 // ErrMergeConflict — хостинг отказал в merge из-за конфликта PR/MR с
 // базовой веткой (спека scm-integration «Распознавание конфликта при
 // merge»). Адаптер возвращает её, только когда причина установлена точно:
@@ -91,7 +109,8 @@ type Adapter interface {
 	// Merge выполняет merge PR и возвращает sha merge-коммита
 	// (версия для автопубликаций, спека backend/deployment).
 	Merge(ctx context.Context, repo string, number int) (string, error)
-	// HeadSHA — текущий HEAD ветки (версия для ручного запуска публикации).
+	// HeadSHA — текущий HEAD ветки (версия для ручного запуска публикации,
+	// снимок архитектуры проекта). ErrBranchNotFound — ветки нет.
 	HeadSHA(ctx context.Context, repo, branch string) (string, error)
 	// Probe проверяет доступ к репозиторию и права до создания проекта;
 	// пустой repo проверяет только сам токен (режим «создать новый»).
@@ -113,9 +132,11 @@ type Adapter interface {
 	// найден: адаптер ищет свежий прогон пайплайна на ветке, начавшийся
 	// не раньше since.
 	PipelineRun(ctx context.Context, repo, pipeline, ref, runID string, since time.Time) (PipelineRun, error)
-	// ReadFile читает файл репозитория на ветке (спека scm-integration
-	// «Запись файла поверх разных хостингов»): содержимое и идентификатор
-	// версии файла для атомарной записи. ErrFileNotFound — файла нет.
+	// ReadFile читает файл репозитория на ветке или коммите: ref — имя
+	// ветки или SHA (спека scm-integration «Запись файла поверх разных
+	// хостингов», снимок архитектуры по SHA). Возвращает содержимое и
+	// идентификатор версии файла для атомарной записи. ErrFileNotFound —
+	// файла нет, ErrRefNotFound — нет самой версии.
 	ReadFile(ctx context.Context, repo, ref, path string) (FileContent, error)
 	// WriteFile сохраняет файл коммитом на ветке; prevID — идентификатор
 	// прочитанной версии (пусто для нового файла).
@@ -215,6 +236,39 @@ func (f *Factory) For(provider Provider, baseURL, token string) (Adapter, error)
 
 // httpClient — общий клиент адаптеров с таймаутом.
 func httpClient() *http.Client { return &http.Client{Timeout: 30 * time.Second} }
+
+// branchMissing — 404 хостинга означает именно отсутствие ветки, а не
+// недоступный репозиторий: GitHub отвечает «Branch not found», GitLab
+// «404 Branch Not Found». Для репозитория оба пишут другое.
+func branchMissing(raw []byte) bool {
+	return strings.Contains(hostMessage(raw), "branch not found")
+}
+
+// refMissing — 404 на чтение файла означает отсутствие версии (ветки,
+// коммита) или проекта, а не файла: GitHub пишет «No commit found for the
+// ref …», GitLab «404 Commit Not Found» или «404 Project Not Found». Для
+// отсутствующего файла оба пишут другое. Недоступный репозиторий GitHub
+// отвечает так же, как на отсутствующий файл, и отличить его нельзя.
+func refMissing(raw []byte) bool {
+	msg := hostMessage(raw)
+	for _, s := range []string{"no commit found", "commit not found", "project not found", "branch not found", "ref not found"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostMessage — поле message ответа хостинга в нижнем регистре.
+func hostMessage(raw []byte) string {
+	var out struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &out) != nil {
+		return ""
+	}
+	return strings.ToLower(out.Message)
+}
 
 // probeFail — короткий конструктор отказа.
 func probeFail(reason, msg string) ProbeResult {

@@ -100,10 +100,12 @@ printf '%s\n' '{"type":"result","text":"агент не найден","error":tr
 
 // Контекст от Rivet доезжает до адаптера строками stdin.
 func TestExternalAdapterContext(t *testing.T) {
+	// read, а не head: head читает из pipe блоком и под нагрузкой забирал
+	// вместе с промптом и строку контекста, второй head ждал вечно.
 	cfg, ws := fakeAdapter(t, `
-head -n 1 > /dev/null
+read -r _
 # ждём строку контекста и подтверждаем её транскриптом
-line=$(head -n 1)
+read -r line
 case "$line" in
 *пересечении*) printf '%s\n' '{"type":"transcript","text":"контекст получен"}' ;;
 *) printf '%s\n' '{"type":"transcript","text":"контекста нет"}' ;;

@@ -75,6 +75,11 @@ func (e *Engine) syncProjectPolicy(ctx context.Context, p domain.Project) error 
 		if errors.Is(err, scm.ErrFileNotFound) {
 			return e.policySourceBroken(ctx, p, ref, "файла политики нет в доверенной ветке")
 		}
+		// Хостинг отличает «нет ветки» от «нет проекта» не всегда (GitLab
+		// отвечает 404 на оба), поэтому причина нейтральная.
+		if errors.Is(err, scm.ErrRefNotFound) {
+			return e.policySourceBroken(ctx, p, ref, "доверенная ветка или репозиторий недоступны на хостинге")
+		}
 		// Хостинг недоступен — это не поломка политики: пропускаем проход,
 		// действует последняя версия.
 		return err

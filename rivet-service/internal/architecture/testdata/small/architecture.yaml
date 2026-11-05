@@ -1,0 +1,9 @@
+format: rivet.architecture/v1
+system: Учёт заявок
+description: Принимает заявки клиентов и ведёт их до закрытия
+principles:
+  - id: p.single-source
+    title: У заявки один источник истины
+    rationale: Статус заявки меняет только API заявок
+  - id: p.web-first
+    title: Клиент работает через веб-кабинет

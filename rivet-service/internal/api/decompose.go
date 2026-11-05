@@ -72,6 +72,12 @@ func (s *Server) decompose(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Системный Epic «Архитектура проекта» не декомпозируется никогда,
+	// поэтому отказ раньше проверки модели (add-architecture-c4).
+	if epic.Kind == domain.KindArchitecture {
+		writeErr(w, domain.ErrBadTransition{Entity: "epic", From: "architecture", To: "decompose"})
+		return
+	}
 	if s.maintenanceLocked(w, r, epic) {
 		return
 	}

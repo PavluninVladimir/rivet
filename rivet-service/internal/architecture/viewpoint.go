@@ -77,6 +77,15 @@ func isBuiltin(id string) bool {
 	return slices.ContainsFunc(builtinLayers, func(l *layer) bool { return l.id == id })
 }
 
+// reservedViewNames — имена файлов views/<имя>.md, которые генерирует
+// Rivet. Сравнение без учёта регистра: на macOS и Windows readme.md и
+// README.md — один файл.
+var reservedViewNames = []string{"readme", "hld", "adr"}
+
+func isReservedViewName(id string) bool {
+	return slices.Contains(reservedViewNames, strings.ToLower(id))
+}
+
 func (l *layer) ID() string                 { return l.id }
 func (l *layer) Title() string              { return l.title }
 func (l *layer) Prompt() string             { return l.prompt }

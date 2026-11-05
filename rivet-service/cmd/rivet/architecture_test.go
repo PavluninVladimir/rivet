@@ -160,3 +160,21 @@ func TestArchitectureUsage(t *testing.T) {
 		t.Errorf("-dir без описания: %v", err)
 	}
 }
+
+// Изменение с суффиксом -c4 заняло бы файл C4 другого изменения: CLI
+// отказывает с той же причиной, что и проверка описания.
+func TestArchitectureChangeIDC4Suffix(t *testing.T) {
+	dir := t.TempDir()
+	for _, sub := range []string{"validate", "apply"} {
+		_, err := runArch(t, dir, sub, "-change", "refunds-c4")
+		var usage usageError
+		if !errors.As(err, &usage) || !strings.Contains(err.Error(), "не может оканчиваться на -c4") ||
+			!strings.Contains(err.Error(), "views/changes/<id>-c4.md") {
+			t.Errorf("%s: %v", sub, err)
+		}
+	}
+	_, err := runArch(t, dir, "validate", "-change", "../x")
+	if err == nil || !strings.Contains(err.Error(), "только строчные латинские буквы") {
+		t.Errorf("неверный id: %v", err)
+	}
+}

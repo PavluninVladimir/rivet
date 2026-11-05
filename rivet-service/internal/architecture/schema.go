@@ -30,6 +30,8 @@ var (
 	deltaSchema     = mustBuiltinSchema("delta.json")
 	gapSchema       = mustBuiltinSchema("gap.json")
 	changeSchema    = mustBuiltinSchema("change.json")
+	scenarioSchema  = mustBuiltinSchema("scenario.json")
+	adrSchema       = mustBuiltinSchema("adr.json")
 )
 
 // schemaBase — адрес, под которым схемы регистрируются в компиляторе.

@@ -5,6 +5,7 @@
 #     ([e2e-tester-changes] — CHANGES на первом проходе, [e2e-tester-code] —
 #     правка src/, которую runner откатит)
 #   - промпт ревьюера  -> VERDICT: APPROVED
+#   - маркер задания describe -> эталонное описание архитектуры (fake-describe.sh)
 #   - метка [e2e-block] без ответа человека -> BLOCKED: вопрос
 #   - иначе -> правит файл в рабочей копии (коммитит и пушит runner)
 set -eu
@@ -61,6 +62,19 @@ case "$PROMPT" in
   echo "Просмотрел изменения, замечаний нет."
   usage
   echo "VERDICT: APPROVED"
+  exit 0
+  ;;
+esac
+
+case "$PROMPT" in
+*"[rivet:architecture-describe]"*)
+  # Задача описания архитектуры (add-architecture-c4): эталонное описание
+  # демо-CRM. Маркер проверяется после ревьюера: его промпт тоже содержит
+  # текст задания.
+  echo "Описываю архитектуру проекта."
+  sh "$(dirname "$0")/fake-describe.sh"
+  usage
+  echo "Готово."
   exit 0
   ;;
 esac

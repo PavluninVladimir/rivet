@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,17 +28,42 @@ func NewGitHub(token string) *GitHub {
 }
 
 func (g *GitHub) do(ctx context.Context, method, path string, body any, accept string) ([]byte, int, error) {
+	raw, code, _, err := g.doH(ctx, method, path, body, accept)
+	return raw, code, err
+}
+
+// ErrRateLimited — хостинг отказал по лимиту запросов, а не по правам:
+// повторять позже, а не считать, что прав нет.
+var ErrRateLimited = errors.New("лимит запросов хостинга")
+
+// rateLimited — 403 или 429 GitHub из-за лимита: исчерпан основной лимит
+// (X-RateLimit-Remaining: 0) или вторичный (Retry-After).
+// Вторичный лимит GitHub приходит и без заголовков, с текстом «secondary
+// rate limit» («wait for at least one minute»).
+func rateLimited(code int, h http.Header, body []byte) bool {
+	if code != http.StatusForbidden && code != http.StatusTooManyRequests {
+		return false
+	}
+	if h.Get("Retry-After") != "" || h.Get("X-RateLimit-Remaining") == "0" {
+		return true
+	}
+	msg := strings.ToLower(string(body))
+	return strings.Contains(msg, "secondary rate limit") || strings.Contains(msg, "rate limit exceeded")
+}
+
+// doH — do с заголовками ответа (признаки лимита запросов).
+func (g *GitHub) doH(ctx context.Context, method, path string, body any, accept string) ([]byte, int, http.Header, error) {
 	var rd io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, nil, err
 		}
 		rd = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, g.Base+path, rd)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+g.Token)
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
@@ -47,11 +73,11 @@ func (g *GitHub) do(ctx context.Context, method, path string, body any, accept s
 	req.Header.Set("Accept", accept)
 	resp, err := g.Client.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, nil, err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
-	return raw, resp.StatusCode, err
+	return raw, resp.StatusCode, resp.Header, err
 }
 
 func (g *GitHub) CreatePR(ctx context.Context, repo, branch, base, title, body string) (PR, error) {
@@ -92,10 +118,22 @@ func (g *GitHub) Diff(ctx context.Context, repo string, number int) (string, err
 }
 
 func (g *GitHub) Merge(ctx context.Context, repo string, number int) (string, error) {
-	raw, code, err := g.do(ctx, "PUT", fmt.Sprintf("/repos/%s/pulls/%d/merge", repo, number),
-		map[string]any{"merge_method": "squash"}, "")
+	return g.MergeAt(ctx, repo, number, "")
+}
+
+// MergeAt — merge с проверкой вершины: GitHub отвечает 409, если ветка PR
+// ушла дальше headSHA. Пустой headSHA — merge текущей вершины.
+func (g *GitHub) MergeAt(ctx context.Context, repo string, number int, headSHA string) (string, error) {
+	body := map[string]any{"merge_method": "squash"}
+	if headSHA != "" {
+		body["sha"] = headSHA
+	}
+	raw, code, err := g.do(ctx, "PUT", fmt.Sprintf("/repos/%s/pulls/%d/merge", repo, number), body, "")
 	if err != nil {
 		return "", err
+	}
+	if code == http.StatusConflict && headSHA != "" {
+		return "", fmt.Errorf("github merge: %w: %s", ErrHeadMoved, tailMsg(raw))
 	}
 	if code != http.StatusOK {
 		if code == http.StatusMethodNotAllowed && g.conflicting(ctx, repo, number, raw) {
@@ -144,8 +182,11 @@ func (g *GitHub) HeadSHA(ctx context.Context, repo, branch string) (string, erro
 	if err != nil {
 		return "", err
 	}
+	if code == http.StatusNotFound && branchMissing(raw) {
+		return "", fmt.Errorf("github branch %s: %w", branch, ErrBranchNotFound)
+	}
 	if code != http.StatusOK {
-		return "", fmt.Errorf("github branch: %d: %s", code, raw)
+		return "", fmt.Errorf("github branch: %d: %s", code, clip(raw))
 	}
 	var out struct {
 		Commit struct {
@@ -308,8 +349,13 @@ func (g *GitHub) login(ctx context.Context) (string, error) {
 // hookEvents — события, на которые подписывается Rivet: merge и закрытие
 // PR, review человека и итоги проверок (спека scm-integration «События
 // хостинга в конвейере»). Список явный: без него хостинг просто не шлёт
-// то, что конвейер умеет обрабатывать.
-var hookEvents = []string{"pull_request", "pull_request_review", "workflow_run", "check_suite"}
+// то, что конвейер умеет обрабатывать. push обновляет снимок архитектуры
+// (add-architecture-c4): обработчик берёт только основную ветку.
+var hookEvents = []string{"pull_request", "pull_request_review", "workflow_run", "check_suite", "push"}
+
+// HookEventsVersion — версия набора событий подписки. Хуки, заведённые с
+// более старым набором, переподписываются при старте rivetd.
+const HookEventsVersion = 1
 
 // RegisterWebhook подписывает репозиторий на события задач и merge.
 // Если хук с таким URL уже есть, он обновляется: у старого хука остался
@@ -319,11 +365,20 @@ func (g *GitHub) RegisterWebhook(ctx context.Context, repo, url, secret string) 
 	config := map[string]any{
 		"url": url, "content_type": "json", "secret": secret, "insecure_ssl": "0",
 	}
-	raw, code, err := g.do(ctx, "POST", "/repos/"+repo+"/hooks", map[string]any{
+	// Сначала поиск своего хука: у существующего один мутирующий запрос
+	// (PATCH), а не POST с отказом 422 и PATCH. Мутирующие запросы GitHub
+	// ограничивает отдельным лимитом.
+	if ok, found, err := g.patchWebhook(ctx, repo, url, config); err != nil || found {
+		return ok, err
+	}
+	raw, code, h, err := g.doH(ctx, "POST", "/repos/"+repo+"/hooks", map[string]any{
 		"name": "web", "active": true, "events": hookEvents, "config": config,
 	}, "")
 	if err != nil {
 		return false, err
+	}
+	if rateLimited(code, h, raw) {
+		return false, fmt.Errorf("github webhook: %w: %s", ErrRateLimited, tailMsg(raw))
 	}
 	switch code {
 	case http.StatusCreated, http.StatusOK:
@@ -344,15 +399,28 @@ func (g *GitHub) RegisterWebhook(ctx context.Context, repo, url, secret string) 
 // updateWebhook находит хук с нашим URL и переписывает его конфигурацию
 // (в первую очередь секрет).
 func (g *GitHub) updateWebhook(ctx context.Context, repo, url string, config map[string]any) (bool, error) {
-	raw, code, err := g.do(ctx, "GET", "/repos/"+repo+"/hooks", nil, "")
+	// Хук с нашим URL не нашёлся: считать регистрацию выполненной нельзя.
+	ok, _, err := g.patchWebhook(ctx, repo, url, config)
+	return ok, err
+}
+
+// patchWebhook — поиск хука с нашим URL и PATCH его конфигурации. done —
+// исход решён (хук обновлён или прав на хуки нет), иначе хук не найден и
+// его надо создать.
+func (g *GitHub) patchWebhook(ctx context.Context, repo, url string, config map[string]any) (ok, done bool, err error) {
+	raw, code, hdr, err := g.doH(ctx, "GET", "/repos/"+repo+"/hooks", nil, "")
 	if err != nil {
-		return false, err
+		return false, true, err
+	}
+	if rateLimited(code, hdr, raw) {
+		return false, true, fmt.Errorf("github hooks: %w: %s", ErrRateLimited, tailMsg(raw))
 	}
 	if code == http.StatusForbidden || code == http.StatusNotFound {
-		return false, nil
+		// Список хуков и их создание требуют одних и тех же прав.
+		return false, true, nil
 	}
 	if code != http.StatusOK {
-		return false, fmt.Errorf("github hooks: %d: %s", code, tailMsg(raw))
+		return false, true, fmt.Errorf("github hooks: %d: %s", code, tailMsg(raw))
 	}
 	var hooks []struct {
 		ID     int64 `json:"id"`
@@ -361,27 +429,29 @@ func (g *GitHub) updateWebhook(ctx context.Context, repo, url string, config map
 		} `json:"config"`
 	}
 	if err := json.Unmarshal(raw, &hooks); err != nil {
-		return false, err
+		return false, true, err
 	}
 	for _, h := range hooks {
 		if h.Config.URL != url {
 			continue
 		}
-		raw, code, err := g.do(ctx, "PATCH", fmt.Sprintf("/repos/%s/hooks/%d", repo, h.ID),
+		raw, code, hdr, err := g.doH(ctx, "PATCH", fmt.Sprintf("/repos/%s/hooks/%d", repo, h.ID),
 			map[string]any{"active": true, "events": hookEvents, "config": config}, "")
 		if err != nil {
-			return false, err
+			return false, true, err
+		}
+		if rateLimited(code, hdr, raw) {
+			return false, true, fmt.Errorf("github webhook update: %w: %s", ErrRateLimited, tailMsg(raw))
 		}
 		if code == http.StatusOK {
-			return true, nil
+			return true, true, nil
 		}
 		if code == http.StatusForbidden || code == http.StatusNotFound {
-			return false, nil
+			return false, true, nil
 		}
-		return false, fmt.Errorf("github webhook update: %d: %s", code, tailMsg(raw))
+		return false, true, fmt.Errorf("github webhook update: %d: %s", code, tailMsg(raw))
 	}
-	// Хук с нашим URL не нашёлся: считать регистрацию выполненной нельзя.
-	return false, nil
+	return false, false, nil
 }
 
 // ─── пайплайны доставки (спека deployment) ───────────────────────────────
@@ -489,9 +559,14 @@ func (g *GitHub) ReadFile(ctx context.Context, repo, ref, path string) (FileCont
 	if ref != "" {
 		url += "?ref=" + neturl.QueryEscape(ref)
 	}
-	raw, code, err := g.do(ctx, "GET", url, nil, "")
+	// Media type object: для файлов 1–100 МБ GitHub поддерживает только
+	// его и raw, а метаданные (sha, размер) нужны в любом случае.
+	raw, code, err := g.do(ctx, "GET", url, nil, "application/vnd.github.object+json")
 	if err != nil {
 		return FileContent{}, err
+	}
+	if code == http.StatusNotFound && refMissing(raw) {
+		return FileContent{}, fmt.Errorf("github contents %s@%s: %w: %s", path, ref, ErrRefNotFound, clip(raw))
 	}
 	if code == http.StatusNotFound {
 		return FileContent{}, ErrFileNotFound
@@ -499,25 +574,65 @@ func (g *GitHub) ReadFile(ctx context.Context, repo, ref, path string) (FileCont
 	if code != http.StatusOK {
 		return FileContent{}, fmt.Errorf("github contents: %d: %s", code, clip(raw))
 	}
+	// Для каталога contents API отвечает массивом записей (или объектом
+	// type=dir в media type object).
+	if t := bytes.TrimLeft(raw, " \t\r\n"); len(t) > 0 && t[0] == '[' {
+		return FileContent{}, fmt.Errorf("github contents: %s: каталог, а не файл", path)
+	}
 	var out struct {
 		Content  string `json:"content"`
 		Encoding string `json:"encoding"`
 		SHA      string `json:"sha"`
 		Type     string `json:"type"`
+		Size     int64  `json:"size"`
+		Path     string `json:"path"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return FileContent{}, err
 	}
+	// Для симлинка на файл репозитория contents API отдаёт содержимое цели
+	// с её путём: файл вне запрошенного каталога попал бы в снимок
+	// (ревью Opus, круг 3).
+	if out.Path != "" && out.Path != strings.TrimPrefix(path, "/") {
+		return FileContent{}, fmt.Errorf("github contents %s → %s: %w", path, out.Path, ErrSymlink)
+	}
+	if out.Type == "symlink" {
+		return FileContent{}, fmt.Errorf("github contents %s: %w", path, ErrSymlink)
+	}
+	if out.Type == "dir" {
+		return FileContent{}, fmt.Errorf("github contents: %s: каталог, а не файл", path)
+	}
 	if out.Type != "file" {
-		return FileContent{}, fmt.Errorf("github contents: %s — не файл", path)
+		return FileContent{}, fmt.Errorf("github contents: %s: не файл (%s)", path, out.Type)
 	}
 	content := out.Content
-	if out.Encoding == "base64" {
+	switch {
+	case out.Encoding == "base64":
 		decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(content, "\n", ""))
 		if err != nil {
 			return FileContent{}, fmt.Errorf("github contents: %w", err)
 		}
 		content = string(decoded)
+	case out.Encoding == "none" || (content == "" && out.Size > 0):
+		// Файл больше 1 МБ contents API отдаёт без содержимого, иначе
+		// вызывающий молча получил бы пустой файл. Сырой блоб читается по
+		// его sha, а не по ref: ветку могли сдвинуть между запросами, и
+		// содержимое разошлось бы с FileID. Файл больше лимита чтения
+		// ответа не запрашивается вовсе: он всё равно был бы обрезан.
+		if out.Size > MaxResponseBytes {
+			return FileContent{}, fmt.Errorf("github contents: %s: %d байт, больше лимита чтения %d", path, out.Size, MaxResponseBytes)
+		}
+		blob, code, err := g.do(ctx, "GET", fmt.Sprintf("/repos/%s/git/blobs/%s", repo, neturl.PathEscape(out.SHA)), nil, "application/vnd.github.raw+json")
+		if err != nil {
+			return FileContent{}, err
+		}
+		if code != http.StatusOK {
+			return FileContent{}, fmt.Errorf("github blob: %d: %s", code, clip(blob))
+		}
+		if int64(len(blob)) != out.Size {
+			return FileContent{}, fmt.Errorf("github contents: %s: прочитано %d байт из %d, файл больше лимита чтения", path, len(blob), out.Size)
+		}
+		content = string(blob)
 	}
 	return FileContent{Content: content, FileID: out.SHA}, nil
 }

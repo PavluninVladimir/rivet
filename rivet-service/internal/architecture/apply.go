@@ -33,7 +33,7 @@ type ApplyResult struct {
 // ни один файл.
 func Apply(dir, id string, now time.Time) (ApplyResult, error) {
 	if !ValidChangeID(id) {
-		return ApplyResult{}, fmt.Errorf("идентификатор изменения %q не подходит под шаблон %s", id, changeIDPattern)
+		return ApplyResult{}, fmt.Errorf("%q: %s", id, ChangeIDProblem(id))
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -76,6 +76,13 @@ func Apply(dir, id string, now time.Time) (ApplyResult, error) {
 	}
 	for pid, p := range ch.Processes {
 		writes[processFile(pid)] = p.Raw
+	}
+	conflicts, err := docWrites(fsys, ch, writes)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if conflicts.HasErrors() {
+		return ApplyResult{Defects: conflicts}, nil
 	}
 	var deletes []string
 	for _, d := range ch.Deltas {
@@ -309,12 +316,15 @@ func nodeID(n *yaml.Node) string {
 // Init создаёт пустое описание в каталоге dir: манифест, пустые слои,
 // каталоги процессов и изменений и представления.
 func Init(dir, system string) error {
+	// Назначение системы пустое: его дописывает автор описания, оно попадёт
+	// в HLD и на схему контекста C4.
 	manifest, err := yaml.Marshal(struct {
-		Format     string   `yaml:"format"`
-		System     string   `yaml:"system"`
-		Principles []any    `yaml:"principles"`
-		Viewpoints []string `yaml:"viewpoints"`
-	}{Format, system, []any{}, []string{}})
+		Format      string   `yaml:"format"`
+		System      string   `yaml:"system"`
+		Description string   `yaml:"description"`
+		Principles  []any    `yaml:"principles"`
+		Viewpoints  []string `yaml:"viewpoints"`
+	}{Format, system, "", []any{}, []string{}})
 	if err != nil {
 		return err
 	}

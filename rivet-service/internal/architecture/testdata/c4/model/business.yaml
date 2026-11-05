@@ -1,0 +1,12 @@
+elements:
+  - id: biz.dev
+    type: actor
+    name: Разработчик
+  - id: biz.admin
+    type: actor
+    name: Администратор
+  - id: biz.auditor
+    type: actor
+    name: Аудитор
+    description: Проверяет историю сборок снаружи компании
+    props: {external: true}

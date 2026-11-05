@@ -2,9 +2,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -77,6 +79,9 @@ type Server struct {
 	TrustProxy bool
 
 	throttle *loginThrottle
+	// webhookLim — ограничитель чтения тел webhook'ов; nil — общий на
+	// процесс (тесты подставляют свой).
+	webhookLim *webhookLimiter
 }
 
 func (s *Server) Handler() http.Handler {
@@ -131,6 +136,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/system/policy", s.getInstallationPolicy)
 	mux.HandleFunc("PUT /api/v1/system/policy", s.putInstallationPolicy)
 	mux.HandleFunc("GET /api/v1/system/policy/versions", s.listInstallationPolicyVersions)
+	mux.HandleFunc("GET /api/v1/projects/{id}/architecture", s.getProjectArchitecture)
+	mux.HandleFunc("POST /api/v1/projects/{id}/architecture/describe", s.describeProjectArchitecture)
+	mux.HandleFunc("POST /api/v1/projects/{id}/architecture/refresh", s.refreshProjectArchitecture)
 	mux.HandleFunc("GET /api/v1/projects/{id}/policy", s.getProjectPolicy)
 	mux.HandleFunc("GET /api/v1/projects/{id}/overview", s.getProjectOverview)
 	mux.HandleFunc("GET /api/v1/projects/{id}/report", s.getProjectReport)
@@ -374,6 +382,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, err)
 			return
 		}
+		s.connectArchitecture(p.ID)
 		writeJSON(w, http.StatusCreated, projectDTO(p))
 		return
 	}
@@ -424,7 +433,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		s.finishProject(w, r, in.Name, in.Checks, store.NewRepoConnection{
 			Provider: string(provider), BaseURL: baseURL, RepoPath: info.Path,
 			DefaultBranch: info.DefaultBranch, Token: in.Token, TokenOwner: res.TokenOwner,
-		})
+		}, true)
 		return
 	}
 
@@ -441,12 +450,13 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	s.finishProject(w, r, in.Name, in.Checks, store.NewRepoConnection{
 		Provider: string(provider), BaseURL: baseURL, RepoPath: res.RepoPath,
 		DefaultBranch: res.DefaultBranch, Token: in.Token, TokenOwner: res.TokenOwner,
-	})
+	}, false)
 }
 
-// finishProject создаёт проект с подключением и подписывает хостинг на события.
+// finishProject создаёт проект с подключением и подписывает хостинг на
+// события. newRepo — репозиторий только что создан Rivet.
 func (s *Server) finishProject(w http.ResponseWriter, r *http.Request, name string,
-	checks []domain.Check, conn store.NewRepoConnection) {
+	checks []domain.Check, conn store.NewRepoConnection, newRepo bool) {
 
 	p, err := s.St.CreateProjectWithRepo(r.Context(), name, checks, currentUser(r).ID, conn, s.Secrets)
 	if err != nil {
@@ -455,6 +465,17 @@ func (s *Server) finishProject(w http.ResponseWriter, r *http.Request, name stri
 	}
 	s.registerWebhook(r, p, conn.Token)
 	s.repoEvent(r, p, "репозиторий подключён: "+p.RepoPath)
+	// Первый снимок архитектуры строится в фоне; повод «подключение»
+	// автоописания срабатывает после него (add-architecture-c4). В новом
+	// репозитории только стартовый коммит хостинга: повод пропускается,
+	// задачу поставит запуск первого Epic.
+	if s.Engine != nil {
+		if newRepo {
+			s.Engine.ConnectNewRepoArchitecture(p.ID)
+		} else {
+			s.Engine.ConnectArchitecture(p.ID)
+		}
+	}
 	writeJSON(w, http.StatusCreated, projectDTO(p))
 }
 
@@ -736,6 +757,9 @@ func (s *Server) addTask(w http.ResponseWriter, r *http.Request) {
 	} else if epic.Status == domain.EpicDone || epic.Status == domain.EpicArchived {
 		writeErr(w, fmt.Errorf("%w: Epic в статусе %s не редактируется", store.ErrConflict, epic.Status))
 		return
+	} else if epic.Kind == domain.KindArchitecture {
+		writeErr(w, fmt.Errorf("%w: в системный Epic «Архитектура проекта» задачи не добавляются", store.ErrConflict))
+		return
 	}
 	var in struct {
 		Title        string   `json:"title"`
@@ -791,6 +815,22 @@ func (s *Server) epicAction(to domain.EpicStatus, text string) http.HandlerFunc 
 		if to == domain.EpicArchived && s.maintenanceLocked(w, r, epic) {
 			return
 		}
+		// Архивация системного Epic с незавершённой задачей обошла бы
+		// правило «одна незавершённая задача описания на проект»: задачу
+		// сначала отменяют (add-architecture-c4).
+		if epic.Kind == domain.KindArchitecture && to == domain.EpicArchived {
+			tasks, err := s.St.ListEpicTasks(r.Context(), epic.ID)
+			if err != nil {
+				writeErr(w, err)
+				return
+			}
+			for _, t := range tasks {
+				if t.Status != domain.TaskDone && t.Status != domain.TaskCancelled {
+					writeErr(w, fmt.Errorf("%w: задача описания архитектуры не завершена, сначала отмените её", store.ErrConflict))
+					return
+				}
+			}
+		}
 		err = s.St.TransitionEpic(r.Context(), r.PathValue("id"), to, store.EventInput{
 			ActorKind: domain.ActorUser, ActorID: user(r), Type: "epic.status",
 			Text: text, Payload: map[string]any{"status": string(to)},
@@ -798,6 +838,15 @@ func (s *Server) epicAction(to domain.EpicStatus, text string) http.HandlerFunc 
 		if err != nil {
 			writeErr(w, err)
 			return
+		}
+		// Повод «запуск Epic» автоописания архитектуры: задачи плана не ждут
+		// описания (add-architecture-c4). Системный Epic повода не даёт.
+		if s.Engine != nil && to == domain.EpicRunning && epic.Status == domain.EpicPlanned && epic.Kind != domain.KindArchitecture {
+			// Epic уже запущен: обрыв запроса клиентом не должен оставить
+			// отметку автоописания без задачи.
+			if _, _, err := s.Engine.MaybeAutoDescribe(context.WithoutCancel(r.Context()), epic.ProjectID, "epic_start"); err != nil {
+				slog.Error("автоописание архитектуры при запуске Epic", "project", epic.ProjectID, "err", err)
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": string(to)})
 	}
@@ -813,6 +862,14 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	// Причина провала не ищется клиентом в ленте: у задачи с длинной
+	// сессией её нет среди первых событий (add-architecture-c4).
+	if t.Status == domain.TaskFailed {
+		if t.Failure, err = s.St.TaskFailure(r.Context(), t.ID); err != nil {
+			writeErr(w, err)
+			return
+		}
 	}
 	timeline, err := s.St.Events(r.Context(), store.EventFilter{TaskID: t.ID, Limit: 200})
 	if err != nil {
@@ -957,10 +1014,35 @@ func (s *Server) taskMerge(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusConflict, map[string]apiError{"error": {Code: "merge_conflict", Message: mc.Error()}})
 			return
 		}
+		if status, ae, ok := architectureMergeError(err); ok {
+			writeJSON(w, status, map[string]apiError{"error": ae})
+			return
+		}
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "done"})
+}
+
+// architectureMergeError — ответ API на отказ merge задачи описания
+// (add-architecture-c4). Лимит сдвигов проверяется раньше сдвига: он его
+// оборачивает.
+func architectureMergeError(err error) (int, apiError, bool) {
+	switch {
+	case errors.Is(err, orchestrator.ErrArchitecturePRRejected):
+		return http.StatusConflict, apiError{Code: "architecture_outside_docs",
+			Message: "PR задачи описания архитектуры меняет файлы вне docs/architecture или их список неполный: merge не выполнен, задача переведена в failed"}, true
+	case errors.Is(err, orchestrator.ErrArchitectureHeadMovedLimit):
+		return http.StatusConflict, apiError{Code: "architecture_head_moved_limit",
+			Message: "ветка PR задачи описания сдвигается после каждой проверки: merge не выполнен, задача осталась в review, смержите вручную"}, true
+	case errors.Is(err, orchestrator.ErrArchitectureHeadMoved):
+		return http.StatusConflict, apiError{Code: "architecture_head_moved",
+			Message: "ветка PR задачи описания сдвинулась после проверки: merge не выполнен, задача вернулась на проверку"}, true
+	case errors.Is(err, orchestrator.ErrArchitectureFilesUnavailable):
+		return http.StatusBadGateway, apiError{Code: "architecture_files_unavailable",
+			Message: "хостинг не отдал список файлов PR задачи описания: merge не выполнен, повторите позже"}, true
+	}
+	return 0, apiError{}, false
 }
 
 // ─── attention / runners / events / usage ────────────────────────────────
@@ -1171,6 +1253,9 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, e := range evs {
 			after = e.ID
+			if sseHidden[e.Type] {
+				continue
+			}
 			raw, _ := json.Marshal(e)
 			fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", e.ID, sseType(e.Type), raw)
 		}
@@ -1207,6 +1292,11 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+// sseHidden — события event log, которых нет в контракте SSE: пропуск
+// автоописания виден в ленте событий, но консоли в потоке не нужен
+// (add-architecture-c4).
+var sseHidden = map[string]bool{"architecture.describe_skipped": true}
 
 // sseType отображает типы event log в типы контракта SSE.
 func sseType(t string) string {

@@ -17,8 +17,16 @@ type Change struct {
 	Gaps   []Gap
 	// Processes — целевые процессы изменения по идентификатору.
 	Processes map[string]*Process
+	// Scenarios — целевые сценарии изменения по идентификатору.
+	Scenarios []*Scenario
+	// Decisions — новые решения изменения по номеру.
+	Decisions []*Decision
 	Current   *Model
 	Target    *Model
+
+	// gapProcs — в режиме без листинга целевые процессы читаются только
+	// по ссылкам разрывов; nil — по всем процессам целевой модели.
+	gapProcs map[string]bool
 }
 
 // Delta — дельта одного viewpoint'а.
@@ -74,7 +82,7 @@ func (ch *Change) removed() map[string]bool {
 // полной проверки целевой модели.
 func LoadChange(fsys fs.FS, id string) (*Change, Defects, error) {
 	if !ValidChangeID(id) {
-		return nil, nil, fmt.Errorf("идентификатор изменения %q не подходит под шаблон %s", id, changeIDPattern)
+		return nil, nil, fmt.Errorf("%q: %s", id, ChangeIDProblem(id))
 	}
 	r := newReporter()
 	cur, err := load(fsys, r)
@@ -98,6 +106,12 @@ func ValidateChange(fsys fs.FS, id string) (Defects, error) {
 }
 
 func loadChange(fsys fs.FS, cur *Model, id string, r *reporter) (*Change, error) {
+	return loadChangeOpt(fsys, cur, id, r, false)
+}
+
+// loadChangeOpt загружает изменение. noList: без листинга каталогов, целевые
+// процессы только по ссылкам разрывов.
+func loadChangeOpt(fsys fs.FS, cur *Model, id string, r *reporter, noList bool) (*Change, error) {
 	dir := ChangesDir + "/" + id
 	infoFile := dir + "/change.yaml"
 	raw, err := fs.ReadFile(fsys, infoFile)
@@ -133,13 +147,27 @@ func loadChange(fsys fs.FS, cur *Model, id string, r *reporter) (*Change, error)
 		return nil, err
 	}
 	ch.checkApplicable(r)
-	if err := ch.buildTarget(fsys, r); err != nil {
-		return nil, err
-	}
+	// Разрывы читаются до целевой модели: в режиме без листинга по ним
+	// известно, какие целевые процессы читать.
 	if err := ch.loadGaps(fsys, r); err != nil {
 		return nil, err
 	}
+	if err := ch.loadDocs(fsys, r, noList); err != nil {
+		return nil, err
+	}
+	if noList {
+		ch.gapProcs = map[string]bool{}
+		for _, g := range ch.Gaps {
+			for _, p := range g.Processes {
+				ch.gapProcs[p] = true
+			}
+		}
+	}
+	if err := ch.buildTarget(fsys, r); err != nil {
+		return nil, err
+	}
 	ch.checkCoverage(r)
+	ch.checkDocs(r)
 	ch.checkRemovedInUse(r)
 	ch.Target.check(r, checkOptions{removed: ch.removed()})
 	return ch, nil
@@ -310,6 +338,12 @@ func (ch *Change) buildTarget(fsys fs.FS, r *reporter) error {
 		if rec.Element == nil || rec.Element.Type != TypeProcess || !idPattern.MatchString(id) {
 			continue
 		}
+		if ch.gapProcs != nil && !ch.gapProcs[id] {
+			if p := cur.processes[id]; p != nil {
+				t.processes[id] = p
+			}
+			continue
+		}
 		file := ch.Dir + "/" + processFile(id)
 		raw, err := fs.ReadFile(fsys, file)
 		switch {
@@ -340,6 +374,7 @@ func (ch *Change) buildTarget(fsys fs.FS, r *reporter) error {
 				"целевой процесс не соответствует ни одному элементу process целевой модели")
 		}
 	}
+	ch.targetDocs(t)
 	ch.Target = t
 	return nil
 }
@@ -413,8 +448,8 @@ func (ch *Change) checkCoverage(r *reporter) {
 		if g.ID == "" {
 			continue
 		}
-		if len(g.Elements)+len(g.Processes) == 0 {
-			r.errorf("gap.no-refs", file, g.ID, "разрыв не ссылается ни на элементы, ни на процессы")
+		if len(g.Elements)+len(g.Processes)+len(g.Scenarios) == 0 {
+			r.errorf("gap.no-refs", file, g.ID, "разрыв не ссылается ни на элементы, ни на процессы, ни на сценарии")
 		}
 		for _, id := range g.Elements {
 			if _, ok := touched[id]; !ok {
@@ -442,8 +477,8 @@ func (ch *Change) checkCoverage(r *reporter) {
 			r.errorf("process.uncovered", ch.Processes[pid].File, "", "целевой процесс %s не покрыт разрывом", pid)
 		}
 	}
-	if len(touched) == 0 && len(ch.Processes) == 0 {
-		r.errorf("change.empty", ch.Dir+"/change.yaml", "", "изменение ничего не меняет: нет ни дельты, ни целевых процессов")
+	if len(touched) == 0 && len(ch.Processes) == 0 && len(ch.Scenarios) == 0 && len(ch.Decisions) == 0 {
+		r.errorf("change.empty", ch.Dir+"/change.yaml", "", "изменение ничего не меняет: нет ни дельты, ни целевых процессов, ни сценариев, ни решений")
 	}
 }
 

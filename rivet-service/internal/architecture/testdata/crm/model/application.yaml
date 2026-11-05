@@ -1,0 +1,39 @@
+elements:
+  - id: app.web
+    type: component
+    name: Веб-клиент
+    description: Список контактов с поиском и постраничной загрузкой, форма добавления (web/)
+    props: {technology: "HTML, ES-модули"}
+    relations:
+      - {type: serving, to: biz.manager}
+      - {type: serving, to: biz.head}
+      - {type: flow, to: app.api}
+  - id: app.api
+    type: component
+    name: API-сервер
+    description: JSON API и раздача статики веб-клиента на одном порту (server/)
+    props: {technology: "Node.js, node:http"}
+    relations:
+      - {type: composition, to: app.api-routes}
+      - {type: composition, to: app.api-domain}
+      - {type: composition, to: app.api-storage}
+  - id: app.api-routes
+    type: component
+    name: Маршруты
+    description: Обработчики /api/health и /api/contacts (server/routes)
+    props: {technology: node:http}
+    relations:
+      - {type: flow, to: app.api-domain}
+      - {type: flow, to: app.api-storage}
+  - id: app.api-domain
+    type: component
+    name: Домен контактов
+    description: Создание, правка и проверка полей контакта, чистые функции (server/domain)
+    props: {technology: JavaScript}
+  - id: app.api-storage
+    type: component
+    name: Хранилище контактов
+    description: Чтение и атомарная запись JSON-файла, очередь записей (server/storage/json-store.js)
+    props: {technology: node:fs}
+    relations:
+      - {type: access, to: data.contact, mode: readwrite}

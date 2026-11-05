@@ -148,7 +148,9 @@ func mergedCandidates(ctx context.Context, q dbtx, projectID string, prevCreated
 			return nil, err
 		}
 		m.Num = int(num)
-		if m.Kind != domain.TaskBug && m.Kind != "architecture" {
+		// В состав входят только задачи с точкой merge: работа и баги. У
+		// задачи описания архитектуры точки merge нет (add-architecture-c4).
+		if m.Kind != domain.TaskBug {
 			m.Kind = "work"
 		}
 		var cs []domain.Criterion
@@ -190,7 +192,9 @@ func (s *Store) ReleaseComposition(ctx context.Context, rel Release) ([]ops.Merg
 			return nil, err
 		}
 		m.Num = int(num)
-		if m.Kind != domain.TaskBug && m.Kind != "architecture" {
+		// В состав входят только задачи с точкой merge: работа и баги. У
+		// задачи описания архитектуры точки merge нет (add-architecture-c4).
+		if m.Kind != domain.TaskBug {
 			m.Kind = "work"
 		}
 		var cs []domain.Criterion

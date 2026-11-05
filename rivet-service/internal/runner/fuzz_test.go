@@ -3,6 +3,7 @@ package runner
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // FuzzParseUsage: USAGE:-отчёт — внешний ввод от произвольного агента.
@@ -37,6 +38,9 @@ func FuzzParseUsage(f *testing.F) {
 
 // FuzzTail: обрезка вывода агента не паникует на любых строке и лимите,
 // результат не длиннее лимита (плюс многоточие), короткое возвращается как есть.
+// Невалидные байты tail заменяет на U+FFFD (строки protobuf обязаны быть
+// UTF-8), поэтому короткое сравнивается с эталоном strings.ToValidUTF8: на
+// валидном входе он совпадает с самой строкой.
 func FuzzTail(f *testing.F) {
 	f.Add("короткий вывод", 8000)
 	f.Add("строка длиннее лимита", 4)
@@ -52,8 +56,11 @@ func FuzzTail(f *testing.F) {
 		if len(res)-len("…") > limit {
 			t.Fatalf("tail(len %d, %d) длиннее лимита: %d байт", len(s), n, len(res))
 		}
-		if n >= 0 && len(s) <= n && res != s {
-			t.Fatalf("строка короче лимита должна возвращаться как есть")
+		if want := strings.ToValidUTF8(s, "�"); n >= 0 && len(want) <= n && res != want {
+			t.Fatalf("строка короче лимита: %q, ожидалось %q", res, want)
+		}
+		if !utf8.ValidString(res) {
+			t.Fatalf("tail вернул невалидный UTF-8: %q", res)
 		}
 	})
 }

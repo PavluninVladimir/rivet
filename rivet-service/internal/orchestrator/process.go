@@ -955,6 +955,7 @@ func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []stri
 		if r.StepKind == policy.StepPrompt {
 			reason += " со стадией PROMPT"
 		}
+		reason = e.architectureWaitReason(ctx, r.Capabilities, reason)
 		if err := e.St.SetTaskWaitReason(ctx, r.TaskID, reason); err != nil {
 			return err
 		}
@@ -996,7 +997,7 @@ func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool, excl
 			continue
 		}
 		seen[w.Run.TaskID] = true
-		reason := "нет runner'а для свободных агентов роли «" + w.RoleTitle + "»"
+		reason := e.architectureWaitReason(ctx, w.Run.Capabilities, "нет runner'а для свободных агентов роли «"+w.RoleTitle+"»")
 		if w.Busy {
 			reason = "нет свободного агента роли «" + w.RoleTitle + "»: все заняты"
 		}

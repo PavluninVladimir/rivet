@@ -1,0 +1,19 @@
+id: sc.contact-create
+title: Создание контакта
+description: Менеджер добавляет контакт через форму, API проверяет поля и пишет файл.
+participants: [biz.manager, app.web, app.api-routes, app.api-domain, app.api-storage, tech.json-file]
+steps:
+  - {from: biz.manager, to: app.web, message: заполняет форму контакта, kind: sync}
+  - {from: app.web, to: app.api-routes, message: "POST /api/contacts", kind: sync}
+  - {from: app.api-routes, to: app.api-domain, message: createContact, kind: sync}
+  - alt:
+      - when: поля не прошли проверку
+        steps:
+          - {from: app.api-domain, to: app.api-routes, message: ValidationError с полем, kind: return}
+          - {from: app.api-routes, to: app.web, message: "400 и поле с ошибкой", kind: return}
+      - when: иначе
+        steps:
+          - {from: app.api-routes, to: app.api-storage, message: create, kind: sync}
+          - {from: app.api-storage, to: tech.json-file, message: запись во временный файл и rename, kind: sync}
+          - {from: app.api-routes, to: app.web, message: "201 и контакт", kind: return}
+  - {from: app.web, to: biz.manager, message: показывает контакт в списке, kind: return}

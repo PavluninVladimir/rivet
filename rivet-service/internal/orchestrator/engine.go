@@ -95,6 +95,10 @@ type Engine struct {
 	// применение исхода): авто-merge и подтверждения человеком одной задачи
 	// идут по очереди (change add-merge-conflict-recovery).
 	mergeLocks taskLocks
+	// archOnce и archSt — одиночное исполнение обновления снимков
+	// архитектуры проектов (add-architecture-c4).
+	archOnce sync.Once
+	archSt   *archState
 	// Now — источник времени для бюджета (подменяется в тестах).
 	Now func() time.Time
 
@@ -419,6 +423,16 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	checks := make([]*pb.Check, 0, len(p.Checks))
 	for _, c := range p.Checks {
 		checks = append(checks, &pb.Check{Name: c.Name, Cmd: c.Cmd})
+	}
+	// Проверка архитектуры (add-architecture-c4): у задачи описания только
+	// она, у остальных добавляется, если у проекта есть описание.
+	checks = e.architectureChecks(ctx, task, p, checks)
+	if task.Kind == domain.KindArchitecture && step.Kind == policy.StepTest {
+		// Сессии ещё нет: отказ откладывает шаг без «зависшей» сессии.
+		if err := e.recordCheckedSHA(ctx, task, p); err != nil {
+			slog.Warn("dispatch: проверенная вершина задачи описания", "task", task.ID, "err", err)
+			return "", false, err
+		}
 	}
 	// Контекст стадии: замечания при исправлении, diff и отчёт проверок
 	// ревьюеру. Читается без удаления: параллельным участникам нужен один
@@ -845,6 +859,12 @@ func (e *Engine) epicPaused(ctx context.Context, task domain.Task) bool {
 
 // failTask — невосстановимая ошибка: failed + эскалация TEST_FAILED.
 func (e *Engine) failTask(ctx context.Context, task domain.Task, msg, runnerID string, extra ...map[string]any) error {
+	return e.failTaskBy(ctx, task, domain.ActorRunner, runnerID, msg, extra...)
+}
+
+// failTaskBy — failTask с явным автором события (система для отказов
+// control plane, например границы задачи описания архитектуры).
+func (e *Engine) failTaskBy(ctx context.Context, task domain.Task, actor domain.ActorKind, actorID, msg string, extra ...map[string]any) error {
 	failPayload := map[string]any{"status": "failed"}
 	for _, m := range extra {
 		for k, v := range m {
@@ -852,7 +872,7 @@ func (e *Engine) failTask(ctx context.Context, task domain.Task, msg, runnerID s
 		}
 	}
 	return e.St.TransitionTask(ctx, task.ID, domain.TaskFailed,
-		store.EventInput{ActorKind: domain.ActorRunner, ActorID: runnerID, Type: "task.status",
+		store.EventInput{ActorKind: actor, ActorID: actorID, Type: "task.status",
 			Text: msg, Payload: failPayload},
 		func(tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx,
@@ -1137,6 +1157,13 @@ func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Proje
 			_, cerr := e.mergeConflict(ctx, fresh, p, "")
 			return cerr
 		}
+		// PR задачи описания: отказ (задача в failed), сдвиг ветки (задача
+		// на проверке) или сбой хостинга (событие и эскалация уже записаны) —
+		// ничего больше делать не нужно.
+		if errors.Is(err, ErrArchitecturePRRejected) || errors.Is(err, ErrArchitectureHeadMoved) ||
+			errors.Is(err, ErrArchitectureFilesUnavailable) {
+			return nil
+		}
 		// Хостинг отказал по другой причине (защита ветки, обязательные
 		// проверки): задача остаётся в review, причина видна человеку событием.
 		slog.Error("auto-merge", "task", task.ID, "err", err)
@@ -1183,29 +1210,59 @@ func (e *Engine) mergeTask(ctx context.Context, task domain.Task, p domain.Proje
 		if aerr != nil {
 			return aerr
 		}
-		if mergeSHA, err = adapter.Merge(ctx, p.RepoPath, num); err != nil {
+		// Граница задачи описания по данным хостинга, а не только гейтом в
+		// рабочей копии, и merge проверенной вершины (add-architecture-c4).
+		if task.Kind == domain.KindArchitecture {
+			if mergeSHA, err = e.mergeArchitecturePR(ctx, task, p, adapter, num); err != nil {
+				if errors.Is(err, ErrArchitecturePRRejected) || errors.Is(err, ErrArchitectureHeadMoved) ||
+					errors.Is(err, ErrArchitectureFilesUnavailable) {
+					return err
+				}
+				return fmt.Errorf("merge PR: %w", err)
+			}
+		} else if mergeSHA, err = adapter.Merge(ctx, p.RepoPath, num); err != nil {
 			return fmt.Errorf("merge PR: %w", err)
 		}
 	}
-	if err := e.St.CompleteMergedTask(ctx, taskID, ev); err != nil {
+	// Точка merge задаёт состав релиза (add-sdlc-cycle): у задачи описания
+	// архитектуры её нет, документация в релиз не входит и не публикуется.
+	complete := e.St.CompleteMergedTask
+	if task.Kind == domain.KindArchitecture {
+		complete = e.St.CompleteTask
+	}
+	if err := complete(ctx, taskID, ev); err != nil {
 		return err
 	}
 	if err := e.St.RecomputeEpic(ctx, task.EpicID); err != nil {
 		return err
 	}
-	// Шаг deploy отключён в процессе проекта — автопубликация не ставится.
+	// Основная ветка изменилась: снимок архитектуры перечитывается в фоне,
+	// его сбой на merge не влияет (add-architecture-c4).
+	e.RefreshArchitecture(p.ID, false)
+	e.DeployAfterMerge(ctx, p.ID, task, mergeSHA)
+	return nil
+}
+
+// DeployAfterMerge — автопубликации после merge задачи: общий путь для
+// merge в Rivet и внешнего merge по webhook. У задачи описания архитектуры
+// шага deploy нет, публикация документации не запускается
+// (add-architecture-c4). Шаг deploy, отключённый в процессе проекта, даёт
+// deploy.deferred.
+func (e *Engine) DeployAfterMerge(ctx context.Context, projectID string, task domain.Task, mergeSHA string) {
+	if task.Kind == domain.KindArchitecture {
+		return
+	}
 	if proc, _, err := e.processFor(ctx, task); err == nil && !proc.HasKind(policy.StepDeploy) {
 		if _, err := e.St.AppendEvent(ctx, store.EventInput{
-			ActorKind: domain.ActorSystem, Type: "deploy.deferred", ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
+			ActorKind: domain.ActorSystem, Type: "deploy.deferred", ProjectID: projectID, EpicID: task.EpicID, TaskID: task.ID,
 			Text:    "публикация не запускается: шаг deploy отключён в процессе проекта",
 			Payload: map[string]any{"reason": "step_disabled"},
 		}); err != nil {
 			slog.Error("deploy step disabled event", "task", task.ID, "err", err)
 		}
-		return nil
+		return
 	}
-	e.enqueueAutoDeploys(ctx, p.ID, mergeSHA)
-	return nil
+	e.enqueueAutoDeploys(ctx, projectID, mergeSHA)
 }
 
 // enqueueAutoDeploys ставит автопубликации проекта после merge (спека

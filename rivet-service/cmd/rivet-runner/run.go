@@ -45,7 +45,12 @@ func run(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg.Capabilities = strings.Split(*caps, ",")
+	cfg.Capabilities = withArchitectureCapability(strings.Split(*caps, ","))
+	// Проверка архитектуры на шаге test зовёт этот же бинарь (add-architecture-c4):
+	// путь к нему едет в окружение проверок и агента через окружение процесса.
+	if exe, err := os.Executable(); err == nil {
+		_ = os.Setenv("RIVET_RUNNER_BIN", exe)
+	}
 	for _, mdl := range strings.Split(*models, ",") {
 		if mdl = strings.TrimSpace(mdl); mdl != "" {
 			cfg.Models = append(cfg.Models, mdl)

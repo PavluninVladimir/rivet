@@ -1,0 +1,55 @@
+elements:
+  - id: app.web
+    type: component
+    name: Консоль
+    description: Веб-интерфейс платформы
+    props: {technology: React}
+    relations:
+      - {type: serving, to: biz.dev}
+      - {type: serving, to: biz.admin}
+      - {type: serving, to: biz.auditor}
+      - {type: flow, to: app.api}
+  - id: app.api
+    type: component
+    name: API
+    props: {technology: "Go, net/http"}
+    relations:
+      - {type: composition, to: app.api-builds}
+      - {type: composition, to: app.api-auth}
+  - id: app.api-builds
+    type: component
+    name: Сборки
+    description: Ставит сборки в очередь и отдаёт их статус
+    props: {technology: Go}
+    relations:
+      - {type: access, to: data.build, mode: write}
+      - {type: triggering, to: app.github}
+  - id: app.api-auth
+    type: component
+    name: Аутентификация
+    props: {technology: Go}
+    relations:
+      - {type: composition, to: app.login}
+  - id: app.login
+    type: interface
+    name: Вход через GitHub
+    relations:
+      - {type: serving, to: biz.dev}
+  - id: app.worker
+    type: component
+    name: Воркер сборок
+    props: {technology: Go}
+    relations:
+      - {type: access, to: data.build, mode: readwrite}
+      - {type: flow, to: app.github}
+  - id: app.github
+    type: component
+    name: GitHub
+    description: Хостинг репозиториев и событий push
+    props: {c4: system, external: true}
+  - id: app.cleanup
+    type: component
+    name: Скрипт очистки
+    props: {c4: none}
+    relations:
+      - {type: flow, to: app.worker}

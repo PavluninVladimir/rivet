@@ -2,12 +2,15 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/policy"
+	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
 
@@ -201,6 +204,56 @@ func TestGitPolicyMissingFile(t *testing.T) {
 	evs, err := st.Events(ctx, store.EventFilter{ProjectID: p.ID, Type: "policy.sync_failed", Limit: 10})
 	if err != nil || len(evs) != 1 {
 		t.Fatalf("событие о пропавшем файле: %v %d", err, len(evs))
+	}
+}
+
+// Доверенной ветки или проекта нет на хостинге (ветку удалили или
+// переименовали, проект недоступен) — это поломка источника с эскалацией,
+// а не сбой хостинга, который молча пропускается (спека access-policy
+// «Битый файл политики»).
+func TestGitPolicyMissingTrustedRef(t *testing.T) {
+	ctx := context.Background()
+	st := testStore(t)
+	sc := &fakeSCM{fileID: "sha-1"}
+	p, e := seedGitPolicy(t, st, sc, "auto_merge: true\n")
+	if err := e.syncProjectPolicy(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+
+	sc.mu.Lock()
+	sc.readErr = fmt.Errorf("github contents %s@main: %w", policy.PolicyFile, scm.ErrRefNotFound)
+	sc.mu.Unlock()
+	p, _ = st.GetProject(ctx, p.ID)
+	if err := e.syncProjectPolicy(ctx, p); err != nil {
+		t.Fatalf("нет ветки — поломка источника, а не ошибка прохода: %v", err)
+	}
+	eff, _ := st.EffectivePolicy(ctx, p.ID)
+	if !eff.Presets.AutoMerge {
+		t.Fatalf("должна действовать последняя валидная версия: %+v", eff.Presets)
+	}
+	evs, err := st.Events(ctx, store.EventFilter{ProjectID: p.ID, Type: "policy.sync_failed", Limit: 10})
+	if err != nil || len(evs) != 1 || !strings.Contains(evs[0].Text+fmt.Sprint(evs[0].Payload), "доверенная ветка или репозиторий недоступны на хостинге") {
+		t.Fatalf("событие о пропавшей ветке: %v %+v", err, evs)
+	}
+	var n int
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM attention WHERE reason=$1 AND status <> 'resolved'`,
+		string(domain.AttPolicySource)).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("эскалация о пропавшей ветке: %d", n)
+	}
+
+	// Сбой хостинга — не поломка: проход пропускается без события.
+	sc.mu.Lock()
+	sc.readErr = errors.New("github contents: 502")
+	sc.mu.Unlock()
+	if err := e.syncProjectPolicy(ctx, p); err == nil {
+		t.Fatal("сбой хостинга должен вернуться ошибкой прохода")
+	}
+	if evs, _ := st.Events(ctx, store.EventFilter{ProjectID: p.ID, Type: "policy.sync_failed", Limit: 10}); len(evs) != 1 {
+		t.Fatalf("сбой хостинга не даёт события поломки: %d", len(evs))
 	}
 }
 

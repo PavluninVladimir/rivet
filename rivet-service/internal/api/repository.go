@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -240,6 +241,7 @@ func (s *Server) putCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	s.registerWebhook(r, p, in.Token)
 	s.repoEvent(r, p, "учётные данные хостинга заменены")
+	s.refreshArchitecture(p.ID, true)
 	p, err = s.St.GetProject(r.Context(), p.ID)
 	if err != nil {
 		writeErr(w, err)
@@ -262,23 +264,84 @@ func (s *Server) repoEvent(r *http.Request, p domain.Project, text string) {
 // registerWebhook подписывает хостинг на события проекта; без прав или без
 // внешнего URL установки подключение не блокируется (design, решение 7).
 func (s *Server) registerWebhook(r *http.Request, p domain.Project, token string) {
+	s.registerWebhookCtx(r.Context(), p, token)
+}
+
+func (s *Server) registerWebhookCtx(ctx context.Context, p domain.Project, token string) bool {
+	ok, err := s.registerWebhookErr(ctx, p, token)
+	if err != nil {
+		slog.Warn("регистрация webhook не удалась", "project", p.ID, "err", err)
+	}
+	return ok
+}
+
+// registerWebhookErr — регистрация с ошибкой хостинга наружу: переподписка
+// при старте отличает лимит запросов от отсутствия прав.
+func (s *Server) registerWebhookErr(ctx context.Context, p domain.Project, token string) (bool, error) {
 	if s.PublicURL == "" || token == "" {
-		return
+		return false, nil
 	}
 	adapter, err := s.adapters().For(scm.Provider(p.Provider), p.BaseURL, token)
 	if err != nil {
-		return
+		return false, err
 	}
-	ok, err := adapter.RegisterWebhook(r.Context(), p.RepoPath, s.webhookURL(p.Provider), p.WebhookSecret)
+	ok, err := adapter.RegisterWebhook(ctx, p.RepoPath, s.webhookURL(p.Provider), p.WebhookSecret)
 	if err != nil {
-		slog.Warn("регистрация webhook не удалась", "project", p.ID, "err", err)
-		return
+		return false, err
 	}
 	if !ok {
 		slog.Info("webhook не зарегистрирован: нет прав, нужна ручная настройка", "project", p.ID)
+		return false, nil
+	}
+	if err := s.St.SetWebhookRegistered(ctx, p.ID, true); err != nil {
+		slog.Error("отметка регистрации webhook", "project", p.ID, "err", err)
+	}
+	if err := s.St.SetWebhookEvents(ctx, p.ID, scm.HookEventsVersion); err != nil {
+		slog.Error("версия подписки webhook", "project", p.ID, "err", err)
+	}
+	return true, nil
+}
+
+// resubscribePause — пауза между проектами переподписки. У существующего
+// хука один мутирующий запрос (GET, затем PATCH), а мутирующие запросы
+// GitHub ограничивает отдельно (около 80 в минуту): пауза 2 с держит
+// переподписку не выше 30 в минуту.
+var resubscribePause = 2 * time.Second
+
+// ResubscribeWebhooks переподписывает хуки, заведённые со старым набором
+// событий (до подписки на push, add-architecture-c4). Зовётся при старте
+// rivetd в фоне: сбой одного проекта не мешает остальным, а лимит
+// запросов хостинга останавливает проход до следующего старта.
+func (s *Server) ResubscribeWebhooks(ctx context.Context) {
+	if s.PublicURL == "" {
 		return
 	}
-	if err := s.St.SetWebhookRegistered(r.Context(), p.ID, true); err != nil {
-		slog.Error("отметка регистрации webhook", "project", p.ID, "err", err)
+	projects, err := s.St.ProjectsToResubscribe(ctx, scm.HookEventsVersion)
+	if err != nil {
+		slog.Error("переподписка webhook", "err", err)
+		return
+	}
+	for i, p := range projects {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(resubscribePause):
+			}
+		}
+		token, err := s.St.ProjectToken(ctx, p.ID, s.Secrets)
+		if err != nil || token == "" {
+			continue
+		}
+		ok, err := s.registerWebhookErr(ctx, p, token)
+		switch {
+		case errors.Is(err, scm.ErrRateLimited):
+			slog.Warn("переподписка webhook остановлена лимитом запросов хостинга", "project", p.ID, "left", len(projects)-i)
+			return
+		case err != nil:
+			slog.Warn("переподписка webhook не удалась", "project", p.ID, "err", err)
+		case ok:
+			slog.Info("webhook переподписан", "project", p.ID)
+		}
 	}
 }

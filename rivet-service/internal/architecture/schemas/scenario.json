@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "title",
+    "steps"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "process": {
+      "type": "string",
+      "minLength": 1
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "steps": {
+      "$ref": "#/$defs/steps"
+    }
+  },
+  "$defs": {
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "steps"
+      ],
+      "properties": {
+        "when": {
+          "type": "string"
+        },
+        "steps": {
+          "$ref": "#/$defs/steps"
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "required": [
+            "from",
+            "to",
+            "message",
+            "kind"
+          ],
+          "properties": {
+            "from": {
+              "type": "string",
+              "minLength": 1
+            },
+            "to": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "kind": {
+              "enum": [
+                "sync",
+                "async",
+                "return",
+                "self"
+              ]
+            }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": [
+            "alt"
+          ],
+          "properties": {
+            "alt": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/branch"
+              }
+            }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": [
+            "opt"
+          ],
+          "properties": {
+            "opt": {
+              "$ref": "#/$defs/branch"
+            }
+          }
+        },
+        {
+          "additionalProperties": false,
+          "required": [
+            "loop"
+          ],
+          "properties": {
+            "loop": {
+              "$ref": "#/$defs/branch"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

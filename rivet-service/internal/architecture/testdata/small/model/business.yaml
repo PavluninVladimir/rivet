@@ -1,0 +1,9 @@
+elements:
+  - id: biz.client
+    type: actor
+    name: Клиент
+    relations:
+      - {type: assignment, to: biz.request}
+  - id: biz.request
+    type: process
+    name: Подача заявки

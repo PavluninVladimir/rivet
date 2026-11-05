@@ -1,0 +1,13 @@
+format: rivet.architecture/v1
+system: Платформа сборок
+description: Собирает проекты разработчиков по событиям из GitHub и хранит историю сборок
+principles:
+  - id: p.async-builds
+    title: Сборки идут асинхронно через очередь
+scenarios:
+  - sc.build-trigger
+  - sc.build-run
+decisions:
+  - 0001-postgres-history
+  - 0002-github-polling
+  - 0003-github-webhooks
