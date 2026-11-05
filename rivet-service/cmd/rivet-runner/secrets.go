@@ -161,15 +161,16 @@ func prepareSecrets(args []string) (startup, error) {
 		st.secrets[k] = v
 	}
 	if len(found) > 0 && !st.reexeced {
-		if err := reexecClean(cleanArgs, cleanEnv, st.secrets); err != nil {
-			if os.Getenv(allowEnvSecretsEnv) != "1" {
-				return st, fmt.Errorf("не удалось перезапуститься с очищенным окружением (%v): секреты остались бы в окружении процесса "+
-					"(видно в ps eww и /proc/<pid>/environ); передай токен файлом с правами 0600 в %s и убери секреты из окружения "+
-					"либо, если это осознанно, задай %s=1", err, tokenFileEnv, allowEnvSecretsEnv)
-			}
-			st.warnings = append(st.warnings, "не удалось перезапуститься с очищенным окружением ("+err.Error()+"): секреты остаются в окружении процесса ("+
-				allowEnvSecretsEnv+"=1), передавай токен файлом "+tokenFileEnv)
+		// Успешный перезапуск не возвращается (процесс заменяется exec'ом):
+		// возврат из reexecClean всегда означает неудачу.
+		err := reexecClean(cleanArgs, cleanEnv, st.secrets)
+		if os.Getenv(allowEnvSecretsEnv) != "1" {
+			return st, fmt.Errorf("не удалось перезапуститься с очищенным окружением (%v): секреты остались бы в окружении процесса "+
+				"(видно в ps eww и /proc/<pid>/environ); передай токен файлом с правами 0600 в %s и убери секреты из окружения "+
+				"либо, если это осознанно, задай %s=1", err, tokenFileEnv, allowEnvSecretsEnv)
 		}
+		st.warnings = append(st.warnings, "не удалось перезапуститься с очищенным окружением ("+err.Error()+"): секреты остаются в окружении процесса ("+
+			allowEnvSecretsEnv+"=1), передавай токен файлом "+tokenFileEnv)
 	}
 	// Секреты больше не нужны в окружении этого процесса (для потомков
 	// runner'а: они получают окружение из os.Environ()).
