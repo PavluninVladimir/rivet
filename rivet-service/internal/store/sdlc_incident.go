@@ -457,9 +457,11 @@ func maintenanceEpicTx(ctx context.Context, tx pgx.Tx, projectID string) (string
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return "", err
 	}
+	// Epic создаётся сразу running: триггер 0030 ставит started_at только
+	// при смене статуса, поэтому начало пишется здесь.
 	if err := tx.QueryRow(ctx, `
-		INSERT INTO epics (project_id, title, goal, status, kind)
-		VALUES ($1, 'Сопровождение', 'Исправление сбоев работающего приложения по инцидентам наблюдения и публикаций.', 'running', 'maintenance')
+		INSERT INTO epics (project_id, title, goal, status, kind, started_at)
+		VALUES ($1, 'Сопровождение', 'Исправление сбоев работающего приложения по инцидентам наблюдения и публикаций.', 'running', 'maintenance', now())
 		RETURNING id::text`, projectID).Scan(&id); err != nil {
 		return "", err
 	}

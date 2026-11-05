@@ -1,0 +1,30 @@
+elements:
+  - id: tech.vm
+    type: node
+    name: Виртуальная машина
+    props: {technology: Ubuntu 24.04}
+    relations:
+      - {type: assignment, to: tech.docker}
+      - {type: assignment, to: tech.postgres}
+  - id: tech.docker
+    type: system-software
+    name: Docker
+    relations:
+      - {type: serving, to: app.api}
+      - {type: serving, to: app.web}
+      - {type: serving, to: app.worker}
+  - id: tech.postgres
+    type: system-software
+    name: PostgreSQL
+    props: {technology: PostgreSQL 16}
+    relations:
+      - {type: access, to: data.build, mode: readwrite}
+      - {type: access, to: data.project, mode: readwrite}
+  - id: tech.nats
+    type: system-software
+    name: NATS
+    description: Очередь заданий сборки
+    props: {c4: queue, technology: NATS JetStream}
+    relations:
+      - {type: serving, to: app.api-builds}
+      - {type: serving, to: app.worker}

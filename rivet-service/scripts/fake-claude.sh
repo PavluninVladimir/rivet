@@ -66,6 +66,23 @@ case "$PROMPT" in
   ;;
 esac
 
+# Задача описания архитектуры (add-architecture-c4): эталонное описание
+# демо-CRM через fake-describe.sh. Вывод подкоманды идёт текстом
+# ассистента, чтобы не ломать stream-json. Файлы вне docs/architecture не
+# трогаются: проверка задачи описания (-only-docs) их не пропустит.
+case "$PROMPT" in
+*"[rivet:architecture-describe]"*)
+  if OUT=$(sh "$(dirname "$0")/fake-describe.sh" 2>&1); then
+    emit "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-fake-1\",\"usage\":{\"input_tokens\":1500,\"output_tokens\":200},\"content\":[{\"type\":\"text\",\"text\":\"Описываю архитектуру проекта. $(json_escape "$OUT")\"}]}}"
+    hook '{"hook_event_name":"Stop","session_id":"fake-claude-1"}'
+    emit '{"type":"result","subtype":"success","result":"Готово: описание архитектуры в docs/architecture.","total_cost_usd":0.03,"usage":{"input_tokens":1500,"output_tokens":200}}'
+    exit 0
+  fi
+  emit "{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true,\"result\":\"fake-describe.sh: $(json_escape "$OUT")\"}"
+  exit 1
+  ;;
+esac
+
 case "$PROMPT" in
 *"[e2e-block]"*)
   case "$PROMPT" in

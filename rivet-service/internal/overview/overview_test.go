@@ -665,3 +665,41 @@ func TestArchivedDoneEpicShown(t *testing.T) {
 		t.Fatalf("архивный Epic: %+v", ov.Epics)
 	}
 }
+
+// Системные Epic'и («Архитектура проекта», «Сопровождение») видны в списке с
+// пометкой, но в число активных, прогноз и итог отчёта не входят (ревью
+// переноса архитектуры, P3-3).
+func TestSystemEpicsOutOfForecast(t *testing.T) {
+	in := Input{Now: now, Period: mustPeriod(t, Period7d, nil)}
+	in.Epics = []Epic{
+		{ID: "W", Title: "Сделки", Status: EpicRunning, StartedAt: tp(at(-48 * time.Hour))},
+		{ID: "A", Title: "Архитектура проекта", Status: EpicRunning, Kind: "architecture", StartedAt: tp(at(-2 * time.Hour)), TokenBudget: i64(10)},
+		{ID: "M", Title: "Сопровождение", Status: EpicRunning, Kind: "maintenance", StartedAt: tp(at(-time.Hour))},
+	}
+	in.Tasks = []Task{
+		doneTask("w1", "W", 1, 2, at(-3*time.Hour)), doneTask("w2", "W", 2, 2, at(-2*time.Hour)),
+		{ID: "a1", EpicID: "A", Num: 3, Status: TaskRunning, Estimate: 2},
+	}
+	ov := Build(in)
+	if ov.Summary.ActiveEpics != 1 {
+		t.Fatalf("активных Epic'ов: %d, ожидался один обычный", ov.Summary.ActiveEpics)
+	}
+	if len(ov.Epics) != 3 {
+		t.Fatalf("Epic'ов в списке: %d", len(ov.Epics))
+	}
+	for _, e := range ov.Epics {
+		if e.ID == "W" {
+			if e.System {
+				t.Fatal("обычный Epic помечен системным")
+			}
+			continue
+		}
+		if !e.System || e.Forecast.Available || !strings.Contains(e.Forecast.Reason, "системный") || e.BudgetForecastTokens != nil {
+			t.Fatalf("системный Epic %s: %+v", e.ID, e)
+		}
+	}
+	rep := Report(in)
+	if !strings.Contains(rep, "Архитектура проекта (системный)") || !strings.Contains(rep, "Активных Epic'ов на конец периода: 1.") {
+		t.Fatalf("отчёт о системных Epic'ах:\n%s", rep)
+	}
+}

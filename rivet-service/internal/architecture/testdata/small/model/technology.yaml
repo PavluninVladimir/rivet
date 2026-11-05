@@ -1,0 +1,9 @@
+# Узлов нет: развёртывание не описано.
+elements:
+  - id: tech.db
+    type: system-software
+    name: PostgreSQL
+    props: {technology: PostgreSQL 16}
+    relations:
+      - {type: serving, to: app.api}
+      - {type: access, to: data.request, mode: readwrite}

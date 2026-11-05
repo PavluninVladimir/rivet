@@ -52,6 +52,24 @@ type Presets struct {
 	// только для прогноза, конвейер не останавливает. Задаётся только
 	// проектом; omitempty, чтобы хэши прежних версий не менялись.
 	MonthlyBudgetUSD *float64 `json:"monthly_budget_usd,omitempty"`
+	// AutoDescribeArchitecture — автоописание архитектуры проекта
+	// (add-architecture-c4): nil — включено. omitempty, чтобы хэши прежних
+	// версий не менялись.
+	AutoDescribeArchitecture *bool `json:"auto_describe_architecture,omitempty"`
+}
+
+// AutoDescribe — действующее значение пресета автоописания архитектуры.
+func (p Presets) AutoDescribe() bool {
+	return p.AutoDescribeArchitecture == nil || *p.AutoDescribeArchitecture
+}
+
+// Explicit — пресеты для ответа API: значения по умолчанию, которые не
+// пишутся в версии политики (ради неизменного канонического хеша),
+// проставлены явно.
+func (p Presets) Explicit() Presets {
+	v := p.AutoDescribe()
+	p.AutoDescribeArchitecture = &v
+	return p
 }
 
 // RoleModel — переопределение модели роли в проекте: профиль агента,
@@ -104,6 +122,8 @@ type Overrides struct {
 	// только для прогноза, конвейер не останавливает. Задаётся только
 	// проектом; omitempty, чтобы хэши прежних версий не менялись.
 	MonthlyBudgetUSD *float64 `json:"monthly_budget_usd,omitempty"`
+	// AutoDescribeArchitecture — как в Presets; nil — наследуется.
+	AutoDescribeArchitecture *bool `json:"auto_describe_architecture,omitempty"`
 }
 
 // AgentModel — пара подключение/модель из привязок профиля агента.
@@ -341,6 +361,10 @@ func Effective(installation Presets, o Overrides) Presets {
 	}
 	if o.AutoPublish != nil {
 		eff.AutoPublish = *o.AutoPublish
+	}
+	if o.AutoDescribeArchitecture != nil {
+		v := *o.AutoDescribeArchitecture
+		eff.AutoDescribeArchitecture = &v
 	}
 	if o.Process != nil {
 		cp := *o.Process

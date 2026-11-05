@@ -64,6 +64,8 @@ func testServerEngine(t *testing.T) (*store.Store, *httptest.Server, *orchestrat
 	engine := orchestrator.New(st, scm.NewFake(), nil, nopSender{}, 90*time.Second)
 	srv := httptest.NewServer((&Server{St: st, Engine: engine, Hub: stream.NewHub()}).Handler())
 	t.Cleanup(srv.Close)
+	// Снимки архитектуры строятся в фоне: дождаться их до закрытия базы.
+	t.Cleanup(engine.WaitArchitecture)
 	return st, srv, engine
 }
 

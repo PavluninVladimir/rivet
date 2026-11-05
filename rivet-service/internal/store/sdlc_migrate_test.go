@@ -34,19 +34,22 @@ func emptyDB(t *testing.T) string {
 	return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, name)
 }
 
-// withArchitecture — миграции сборки и 0029 change'а архитектуры (копия в
-// testdata: блок вида Epic'а и задачи дословно совпадает с 0032).
-func withArchitecture(t *testing.T) map[string][]byte {
+// architectureMigration — миграция change'а архитектуры: блок вида Epic'а и
+// задачи в ней дословно совпадает с 0032.
+const architectureMigration = "0029_project_architecture.sql"
+
+// withoutArchitecture — миграции сборки без 0029: база main до переноса
+// архитектуры, где 0030–0033 уже применены.
+func withoutArchitecture(t *testing.T) map[string][]byte {
 	t.Helper()
 	files, err := embeddedMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile("testdata/0029_project_architecture.sql")
-	if err != nil {
-		t.Fatal(err)
+	if _, ok := files[architectureMigration]; !ok {
+		t.Fatalf("нет миграции %s", architectureMigration)
 	}
-	files["0029_project_architecture.sql"] = raw
+	delete(files, architectureMigration)
 	return files
 }
 
@@ -91,39 +94,80 @@ func checkKinds(t *testing.T, url string) {
 // Порядок A: 0029 до 0032 на пустой базе.
 func TestMigrationsArchitectureFirst(t *testing.T) {
 	url := emptyDB(t)
-	if err := migrateFiles(context.Background(), url, withArchitecture(t)); err != nil {
+	if err := Migrate(context.Background(), url); err != nil {
 		t.Fatal(err)
 	}
 	checkKinds(t, url)
 }
 
-// Порядок B: база уже на 0032 с Epic'ом «Сопровождение» и багом, затем 0029.
+// Порядок B: база main уже на 0030–0033 с данными (Epic «Сопровождение»,
+// баг, открытая эскалация, зарегистрированный webhook), 0029 применяется
+// последней. Данные остаются, новые колонки получают умолчания.
 func TestMigrationsArchitectureAfter(t *testing.T) {
 	ctx := context.Background()
 	url := emptyDB(t)
-	if err := Migrate(ctx, url); err != nil {
+	if err := migrateFiles(ctx, url, withoutArchitecture(t)); err != nil {
 		t.Fatal(err)
 	}
+	conn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close(ctx)
+	var projectID, epicID, taskID string
+	if err := conn.QueryRow(ctx, `INSERT INTO projects (name, repo_path, webhook_registered) VALUES ('demo', 'o/r', true) RETURNING id::text`).
+		Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(ctx, `INSERT INTO epics (project_id, title, goal, status, kind)
+		VALUES ($1,'Сопровождение','g','running','maintenance') RETURNING id::text`, projectID).Scan(&epicID); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.QueryRow(ctx, `INSERT INTO tasks (epic_id, title, kind, status, merged_at) VALUES ($1,'баг','bug','done',now()) RETURNING id::text`, epicID).
+		Scan(&taskID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, `INSERT INTO attention (project_id, task_id, reason, message) VALUES ($1,$2,'TEST_FAILED','упал')`, projectID, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(ctx, url); err != nil {
+		t.Fatalf("0029 после 0030–0033: %v", err)
+	}
+	var kind, code, checked string
+	var events int
+	var registered bool
+	var registeredAt *time.Time
+	var mergedAt *time.Time
+	if err := conn.QueryRow(ctx, `
+		SELECT t.kind, t.checked_sha, t.merged_at, a.code, p.webhook_events, p.webhook_registered, p.webhook_registered_at
+		FROM tasks t JOIN attention a ON a.task_id = t.id JOIN epics e ON e.id = t.epic_id JOIN projects p ON p.id = e.project_id
+		WHERE t.id = $1`, taskID).Scan(&kind, &checked, &mergedAt, &code, &events, &registered, &registeredAt); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "bug" || checked != "" || mergedAt == nil || code != "" || events != 0 || !registered || registeredAt != nil {
+		t.Fatalf("данные после 0029: kind=%q checked=%q merged=%v code=%q events=%d registered=%v at=%v",
+			kind, checked, mergedAt, code, events, registered, registeredAt)
+	}
+	var capability string
+	if err := conn.QueryRow(ctx, `SELECT capability FROM agent_roles WHERE id='architect'`).Scan(&capability); err != nil || capability != "architecture" {
+		t.Fatalf("capability Архитектора после 0029: %q %v", capability, err)
+	}
+	// Эскалация по коду на мигрированной базе: открытая одна, текст новый.
 	s, err := New(ctx, url)
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := mustOwner(t, s)
-	p, err := s.CreateProject(ctx, "demo", "o/r", nil, owner.ID)
-	if err != nil {
-		t.Fatal(err)
+	defer s.Close()
+	for _, msg := range []string{"первое", "второе"} {
+		if err := s.EscalateOnce(ctx, projectID, taskID, "TEST_FAILED", "architecture_files_unavailable", msg); err != nil {
+			t.Fatal(err)
+		}
 	}
-	var epicID string
-	if err := s.Pool.QueryRow(ctx, `INSERT INTO epics (project_id, title, goal, status, kind)
-		VALUES ($1,'Сопровождение','g','running','maintenance') RETURNING id`, p.ID).Scan(&epicID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Pool.Exec(ctx, `INSERT INTO tasks (epic_id, title, kind) VALUES ($1,'баг','bug')`, epicID); err != nil {
-		t.Fatal(err)
-	}
-	s.Close()
-	if err := migrateFiles(ctx, url, withArchitecture(t)); err != nil {
-		t.Fatalf("0029 после 0032: %v", err)
+	var open int
+	var last string
+	if err := conn.QueryRow(ctx, `SELECT count(*), max(message) FILTER (WHERE code <> '') FROM attention WHERE task_id=$1 AND status <> 'resolved'`, taskID).
+		Scan(&open, &last); err != nil || open != 2 || last != "второе" {
+		t.Fatalf("эскалации после 0029: %d %q %v", open, last, err)
 	}
 	checkKinds(t, url)
 }

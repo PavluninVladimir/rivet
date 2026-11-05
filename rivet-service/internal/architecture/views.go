@@ -90,12 +90,46 @@ func mlabel(s string) string {
 	if s == "" {
 		s = " "
 	}
-	return `"` + strings.NewReplacer(`"`, "#quot;", "<", "#lt;", ">", "#gt;", "|", "#124;").Replace(s) + `"`
+	// Угловые скобки заменяются знаками ‹ ›, а не сущностями #lt; #gt;:
+	// Mermaid раскрывает сущности обратно в символы, и HTML-подпись из
+	// описания (<img src>) дошла бы до браузера. Процент — полноширинный,
+	// как в остальных схемах (ревью консоли, круг 2).
+	return `"` + strings.NewReplacer(`"`, "#quot;", "<", "‹", ">", "›", "|", "#124;", "%", "％").Replace(s) + `"`
 }
 
 // cell — значение ячейки Markdown-таблицы.
 func cell(s string) string {
 	return strings.ReplaceAll(strings.Join(strings.Fields(s), " "), "|", `\|`)
+}
+
+// codeCell — значение ячейки таблицы как код. Ограждение длиннее самой
+// длинной серии обратных кавычек в значении, так что они не рвут разметку.
+func codeCell(s string) string {
+	s = cell(s)
+	if s == "" {
+		return ""
+	}
+	longest, run := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	if longest == 0 {
+		return "`" + s + "`"
+	}
+	fence := strings.Repeat("`", longest+1)
+	return fence + " " + s + " " + fence
+}
+
+// linkText — текст ссылки Markdown: одна строка, квадратные скобки и
+// обратная косая черта экранированы.
+func linkText(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	return strings.NewReplacer(`\`, `\\`, "[", `\[`, "]", `\]`).Replace(s)
 }
 
 func code(ids []string) string {
@@ -557,9 +591,18 @@ func renderChange(ch *Change) string {
 	b.WriteString("## Разрывы\n\n")
 	gaps := slices.Clone(ch.Gaps)
 	sort.Slice(gaps, func(i, j int) bool { return gaps[i].ID < gaps[j].ID })
-	b.WriteString("| Разрыв | Вид | Название | Элементы | Процессы |\n|---|---|---|---|---|\n")
+	withScenarios := slices.ContainsFunc(gaps, func(g Gap) bool { return len(g.Scenarios) > 0 })
+	if withScenarios {
+		b.WriteString("| Разрыв | Вид | Название | Элементы | Процессы | Сценарии |\n|---|---|---|---|---|---|\n")
+	} else {
+		b.WriteString("| Разрыв | Вид | Название | Элементы | Процессы |\n|---|---|---|---|---|\n")
+	}
 	for _, g := range gaps {
-		fmt.Fprintf(&b, "| `%s` | %s | %s | %s | %s |\n", g.ID, g.Kind, cell(g.Title), code(g.Elements), code(g.Processes))
+		fmt.Fprintf(&b, "| `%s` | %s | %s | %s | %s |", g.ID, g.Kind, cell(g.Title), code(g.Elements), code(g.Processes))
+		if withScenarios {
+			fmt.Fprintf(&b, " %s |", code(g.Scenarios))
+		}
+		b.WriteString("\n")
 	}
 
 	b.WriteString("\n## Записи дельты\n\n| Запись | Viewpoint | Изменение | Описание |\n|---|---|---|---|\n")
@@ -593,6 +636,7 @@ func renderChange(ch *Change) string {
 			writeProcessBody(&b, ch.Processes[id])
 		}
 	}
+	renderChangeDocs(&b, ch)
 	return b.String()
 }
 
@@ -613,10 +657,41 @@ func demoteHeadings(md string) string {
 	return strings.Join(lines, "\n")
 }
 
-func renderIndex(m *Model, changes []*Change) string {
+func renderIndex(m *Model, c *C4Model, changes []*Change) string {
 	var b strings.Builder
 	b.WriteString(generatedMark)
 	fmt.Fprintf(&b, "# Архитектура: %s\n\n", m.Manifest.System)
+	if d := strings.Join(strings.Fields(m.Manifest.Description), " "); d != "" {
+		b.WriteString(d + "\n\n")
+	}
+	b.WriteString("## C4 и HLD\n\n- [HLD: обзор архитектуры](hld.md)\n- [Контекст (L1)](c4/context.md)\n")
+	for _, id := range c.systemsWithContainers() {
+		fmt.Fprintf(&b, "- Контейнеры (L2): [%s](c4/container/%s.md)\n", linkText(c.byID[id].Name), id)
+	}
+	for _, id := range c.containersWithComponents() {
+		fmt.Fprintf(&b, "- Компоненты (L3): [%s](c4/component/%s.md)\n", linkText(c.byID[id].Name), id)
+	}
+	if _, ok := c.deployment(); ok {
+		b.WriteString("- [Развёртывание](c4/deployment.md)\n")
+	}
+	b.WriteString("- [Structurizr DSL](c4/workspace.dsl)\n\n")
+	if ents := buildERD(m, c); len(ents) > 0 {
+		b.WriteString("## Данные (ERD)\n\n- [Общая схема](erd/all.md)\n")
+		for _, s := range erdStores(ents) {
+			fmt.Fprintf(&b, "- Хранилище: [%s](erd/%s.md)\n", linkText(c.byID[s].Name), s)
+		}
+		b.WriteString("\n")
+	}
+	if len(m.scenarios) > 0 {
+		b.WriteString("## Сценарии\n\n")
+		for _, sc := range m.scenarios {
+			fmt.Fprintf(&b, "- [%s](scenarios/%s.md)\n", linkText(sc.Title), sc.ID)
+		}
+		b.WriteString("\n")
+	}
+	if len(m.decisions) > 0 {
+		fmt.Fprintf(&b, "## Решения\n\n- [Реестр архитектурных решений](adr.md): решений %d\n\n", len(m.decisions))
+	}
 	if len(m.Manifest.Principles) > 0 {
 		b.WriteString("## Принципы\n\n| Принцип | Формулировка | Обоснование |\n|---|---|---|\n")
 		for _, p := range m.Manifest.Principles {
@@ -626,18 +701,24 @@ func renderIndex(m *Model, changes []*Change) string {
 	}
 	b.WriteString("## Viewpoint'ы\n\n")
 	for _, vp := range m.viewpoints {
-		fmt.Fprintf(&b, "- [%s](%s.md): записей %d\n", vp.Title(), vp.ID(), len(m.docs[vp.ID()].records))
+		fmt.Fprintf(&b, "- [%s](%s.md): записей %d\n", linkText(vp.Title()), vp.ID(), len(m.docs[vp.ID()].records))
 	}
 	if procs := processElements(m); len(procs) > 0 {
 		b.WriteString("\n## Процессы\n\n")
 		for _, e := range procs {
-			fmt.Fprintf(&b, "- [%s](processes/%s.md)\n", elementLabel(e), e.ID)
+			fmt.Fprintf(&b, "- [%s](processes/%s.md)\n", linkText(elementLabel(e)), e.ID)
 		}
 	}
 	if len(changes) > 0 {
 		b.WriteString("\n## Изменения\n\n")
 		for _, ch := range changes {
-			fmt.Fprintf(&b, "- [%s](changes/%s.md)\n", cmp(ch.Info.Title, ch.Info.ID), ch.Info.ID)
+			fmt.Fprintf(&b, "- [%s](changes/%s.md), целевые схемы C4: [changes/%s-c4.md](changes/%s-c4.md)",
+				linkText(cmp(ch.Info.Title, ch.Info.ID)), ch.Info.ID, ch.Info.ID, ch.Info.ID)
+			if len(ch.Scenarios) > 0 {
+				fmt.Fprintf(&b, ", целевые сценарии: [changes/%s%s.md](changes/%s%s.md)",
+					ch.Info.ID, changeScenariosSuffix, ch.Info.ID, changeScenariosSuffix)
+			}
+			b.WriteString("\n")
 		}
 	}
 	return b.String()
@@ -688,16 +769,35 @@ func Views(fsys fs.FS) (map[string][]byte, Defects, error) {
 			changes = append(changes, ch)
 		}
 	}
+	c4m := m.C4()
 	out := map[string][]byte{}
-	out[ViewsDir+"/README.md"] = []byte(renderIndex(m, changes))
+	out[ViewsDir+"/README.md"] = []byte(renderIndex(m, c4m, changes))
 	for _, vp := range m.viewpoints {
 		out[ViewsDir+"/"+vp.ID()+".md"] = []byte(vp.render(m, m.docs[vp.ID()]))
 	}
 	for _, e := range processElements(m) {
 		out[ViewsDir+"/processes/"+e.ID+".md"] = []byte(renderProcess(e, m.processes[e.ID]))
 	}
+	for p, text := range c4m.c4Files() {
+		out[p] = []byte(text)
+	}
+	out[ViewsDir+"/c4/workspace.dsl"] = []byte(renderDSL(c4m))
+	out[ViewsDir+"/hld.md"] = []byte(renderHLD(m, c4m, hldChanges{list: changes, known: true}))
+	for p, text := range erdFiles(m, c4m) {
+		out[p] = []byte(text)
+	}
+	for _, sc := range m.scenarios {
+		out[ViewsDir+"/scenarios/"+sc.ID+".md"] = []byte(m.renderScenario(sc, c4m, "../"))
+	}
+	if len(m.decisions) > 0 {
+		out[ViewsDir+"/adr.md"] = []byte(renderADRIndex(m))
+	}
 	for _, ch := range changes {
 		out[ViewsDir+"/changes/"+ch.Info.ID+".md"] = []byte(renderChange(ch))
+		out[ViewsDir+"/changes/"+ch.Info.ID+"-c4.md"] = []byte(renderChangeC4(ch))
+		if len(ch.Scenarios) > 0 {
+			out[ViewsDir+"/changes/"+ch.Info.ID+changeScenariosSuffix+".md"] = []byte(renderChangeScenarios(ch))
+		}
 	}
 	return out, r.result(), nil
 }

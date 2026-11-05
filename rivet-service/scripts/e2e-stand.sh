@@ -70,6 +70,13 @@ AGENT_CMD="sh $SERVICE_DIR/scripts/fake-agent.sh"
     -d '{"name":"e2e-runners"}' "$API/runner-tokens" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])' > "$STAND_DIR/runner-token" \
   || { echo "e2e-stand: не удалось выпустить токены" >&2; exit 1; }
+  # Автоописание архитектуры на стенде выключено, пока нет e2e-сценариев
+  # архитектуры (add-architecture-c4): иначе каждый проект получал бы
+  # задачу описания, и она занимала бы worker'ы сценариев.
+  curl -sf -b "$STAND_DIR/cookies" "$API/system/policy" \
+    | python3 -c 'import json,sys; p=json.load(sys.stdin)["presets"]; p["auto_describe_architecture"]=False; print(json.dumps(p))' \
+    | curl -sf -b "$STAND_DIR/cookies" -X PUT -H 'Content-Type: application/json' -d @- "$API/system/policy" >/dev/null \
+  || { echo "e2e-stand: не удалось выключить автоописание архитектуры" >&2; exit 1; }
   RUNNER_TOKEN=$(cat "$STAND_DIR/runner-token")
   # Runner'ы: fake-агент, клонирование из локального bare.
   # Worker'ы — нативный адаптер Claude Code с fake-claude: e2e видит полную

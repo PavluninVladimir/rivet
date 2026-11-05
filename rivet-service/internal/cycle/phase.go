@@ -220,8 +220,9 @@ func PhaseOfTask(t Task, cut ReleaseCut) Placement {
 	case "cancelled":
 		return Placement{}
 	case "done":
-		// Задачи любого вида, в том числе architecture, ждут релиза так же,
-		// как входят в состав релиза (ops.Composition).
+		// Релиза ждут задачи с точкой merge, как в составе релиза
+		// (ops.Composition). У задачи описания архитектуры её нет
+		// (add-architecture-c4), сюда она не доходит.
 		if cut.AwaitingRelease(t.MergedAt) {
 			return Placement{Phase: Release, State: StateWaiting, Badge: BadgeAwaitingRelease}
 		}

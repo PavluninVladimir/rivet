@@ -24,6 +24,7 @@ import (
 type repoFixture struct {
 	srv            *httptest.Server
 	st             *store.Store
+	engine         *orchestrator.Engine
 	host           *httptest.Server // подставной хостинг
 	owner, mallory string
 }
@@ -83,8 +84,11 @@ func seedRepoAPI(t *testing.T, host *httptest.Server, withKey bool) repoFixture 
 	// заданы с этим префиксом).
 	engine := orchestrator.New(st, scm.NewFake(), nil, nopSender{}, 90*time.Second)
 	engine.Box = box
+	f.engine = engine
 	f.srv = httptest.NewServer((&Server{St: st, Engine: engine, Secrets: box}).Handler())
 	t.Cleanup(f.srv.Close)
+	// Снимки архитектуры строятся в фоне: дождаться их до закрытия базы.
+	t.Cleanup(engine.WaitArchitecture)
 	return f
 }
 

@@ -1,0 +1,18 @@
+id: sc.build-run
+title: Сборка проекта воркером
+participants: [app.worker, app.github, tech.postgres, biz.dev, app.web, app.api]
+steps:
+  - {from: app.worker, to: tech.postgres, message: статус running, kind: sync}
+  - {from: app.worker, to: app.github, message: клонирование репозитория, kind: sync}
+  - loop:
+      when: для каждого шага сборки
+      steps:
+        - {from: app.worker, to: app.worker, message: выполняет шаг, kind: self}
+        - {from: app.worker, to: tech.postgres, message: лог шага, kind: sync}
+  - {from: app.worker, to: tech.postgres, message: статус done, kind: sync}
+  - opt:
+      when: разработчик открыл консоль
+      steps:
+        - {from: biz.dev, to: app.web, message: открывает сборку, kind: sync}
+        - {from: app.web, to: app.api, message: "GET /builds/{id}", kind: sync}
+        - {from: app.api, to: app.web, message: сборка и лог, kind: return}

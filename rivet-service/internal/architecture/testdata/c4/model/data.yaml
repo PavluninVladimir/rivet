@@ -1,0 +1,23 @@
+elements:
+  - id: data.build
+    type: data-object
+    name: Сборка
+    attributes:
+      - {name: status, type: "varchar(16)", description: "queued, running, done или failed"}
+      - {name: id, type: uuid, pk: true}
+      - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
+      - {name: started_at, type: timestamptz, nullable: true}
+  - id: data.project
+    type: data-object
+    name: Проект
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: repo, type: text, unique: true, description: owner/name на GitHub}
+    relations:
+      - {type: association, to: data.member, cardinality: many-to-many, label: участники}
+  - id: data.member
+    type: data-object
+    name: Участник
+    description: Учётная запись GitHub, приходит из OAuth и в базе не хранится
+    attributes:
+      - {name: login, type: text, pk: true}

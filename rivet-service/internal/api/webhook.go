@@ -1,15 +1,19 @@
 package api
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
+	"time"
+
+	"golang.org/x/sync/semaphore"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
@@ -32,6 +36,7 @@ const (
 	hookPRClosed = "pr_closed" // PR/MR закрыт без merge
 	hookChecks   = "checks"    // внешние проверки завершились
 	hookReview   = "review"    // review человека на хостинге
+	hookPush     = "push"      // push в ветку (снимок архитектуры, add-architecture-c4)
 )
 
 // hostingEvent — то общее, что конвейеру нужно от события любого хостинга.
@@ -54,7 +59,7 @@ type hostingEvent struct {
 }
 
 func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
-	body, ok := readWebhookBody(w, r)
+	body, ok := s.readWebhookBody(w, r)
 	if !ok {
 		return
 	}
@@ -69,7 +74,7 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 // gitlabWebhook — тот же конвейер для GitLab: вместо подписи HMAC общий
 // токен в X-Gitlab-Token (api-contract add-repo-onboarding).
 func (s *Server) gitlabWebhook(w http.ResponseWriter, r *http.Request) {
-	body, ok := readWebhookBody(w, r)
+	body, ok := s.readWebhookBody(w, r)
 	if !ok {
 		return
 	}
@@ -81,12 +86,171 @@ func (s *Server) gitlabWebhook(w http.ResponseWriter, r *http.Request) {
 	s.handleHostingEvent(w, r, string(scm.ProviderGitLab), body, ev, verifyGitLabToken)
 }
 
-func readWebhookBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
-	if err != nil {
-		unprocessable(w, "невалидный payload")
+// Лимиты тела webhook'а: подпись проверяется по всему телу, поэтому оно
+// читается целиком до проверки. Push несёт списки файлов коммитов и
+// бывает больше мегабайта, ему лимит выше.
+const (
+	webhookBodyLimit = 1 << 20
+	pushBodyLimit    = 8 << 20
+)
+
+// Тело webhook'а читается целиком до проверки подписи, а заголовок события
+// ставит кто угодно. Поэтому одновременных чтений немного, лишнее ждёт
+// места, память берётся по фактически пришедшим байтам, а чтение тела
+// ограничено по времени. Место отпускается сразу после чтения: обработка
+// (проверка подписи, merge, снимок) идёт вне ограничителя (ревью Opus,
+// круги 2 и 3, финальная проверка). Потолка на адрес клиента нет: перед
+// rivetd стоит TLS-прокси, и адрес у всех доставок один. Таймаут ставится
+// на запрос, а не на сервер: общий ReadTimeout отменил бы контекст долгих
+// потоков SSE.
+//
+// Потерянную доставку ни GitHub, ни GitLab сами не повторяют: её повторяют
+// вручную (Redeliver у GitHub, Resend Request у GitLab).
+// Параметры подобраны под таймаут доставки хостингов (10 с у GitHub и
+// GitLab, ревью Opus, ограничитель): место стоит одну горутину, поэтому их
+// много, память держит бюджет по пришедшим байтам. Простой чтения
+// ограничен отдельно от общего времени: хостинги шлют тело сразу, а
+// соединение, которое молчит, место не держит.
+const (
+	webhookReaders      = 128              // одновременных чтений тела
+	webhookMemoryBudget = 64 << 20         // байт тел в чтении одновременно
+	webhookSlotWait     = 3 * time.Second  // ожидание места, дальше 503
+	webhookIdleTimeout  = 5 * time.Second  // простой чтения без новых байтов
+	webhookReadTimeout  = 30 * time.Second // потолок чтения тела целиком
+)
+
+// webhookLimiter — места для чтения тел, бюджет памяти, ожидание места
+// (дальше 503) и дедлайны чтения. Один на процесс, тесты подставляют свой
+// в Server.
+type webhookLimiter struct {
+	slots chan struct{}
+	mem   *semaphore.Weighted
+	wait  time.Duration
+	idle  time.Duration
+	total time.Duration
+}
+
+func newWebhookLimiter(readers int, memory int64, wait time.Duration) *webhookLimiter {
+	return &webhookLimiter{slots: make(chan struct{}, readers), mem: semaphore.NewWeighted(memory), wait: wait,
+		idle: webhookIdleTimeout, total: webhookReadTimeout}
+}
+
+var defaultWebhookLimiter = newWebhookLimiter(webhookReaders, webhookMemoryBudget, webhookSlotWait)
+
+func (s *Server) webhookLimits() *webhookLimiter {
+	if s.webhookLim != nil {
+		return s.webhookLim
+	}
+	return defaultWebhookLimiter
+}
+
+// errWebhookBudget — бюджет памяти занят дольше ожидания места.
+var errWebhookBudget = errors.New("бюджет памяти webhook'ов занят")
+
+// budgetReader берёт память из бюджета по мере прихода байтов: соединение
+// без тела почти ничего не держит.
+type budgetReader struct {
+	r     io.Reader
+	ctx   context.Context
+	sem   *semaphore.Weighted // бюджет, из которого взята память
+	wait  time.Duration
+	taken int64
+	// rc, idle, until — дедлайн простоя переставляется перед каждым
+	// чтением, но не дальше общего потолка until.
+	rc    *http.ResponseController
+	idle  time.Duration
+	until time.Time
+}
+
+func (b *budgetReader) Read(p []byte) (int, error) {
+	if b.rc != nil {
+		d := time.Now().Add(b.idle)
+		if d.After(b.until) {
+			d = b.until
+		}
+		_ = b.rc.SetReadDeadline(d)
+	}
+	n, err := b.r.Read(p)
+	if n > 0 {
+		wctx, cancel := context.WithTimeout(b.ctx, b.wait)
+		aerr := b.sem.Acquire(wctx, int64(n))
+		cancel()
+		if aerr != nil {
+			return 0, errWebhookBudget
+		}
+		b.taken += int64(n)
+	}
+	return n, err
+}
+
+func (b *budgetReader) release() {
+	if b.taken > 0 {
+		b.sem.Release(b.taken)
+		b.taken = 0
+	}
+}
+
+func writePayloadTooLarge(w http.ResponseWriter) {
+	writeJSON(w, http.StatusRequestEntityTooLarge, map[string]apiError{"error": {
+		Code: "payload_too_large", Message: "payload webhook больше допустимого"}})
+}
+
+func writeWebhookBusy(w http.ResponseWriter) {
+	writeJSON(w, http.StatusServiceUnavailable, map[string]apiError{"error": {
+		Code: "webhook_busy", Message: "приём webhook'ов перегружен, повторите доставку"}})
+}
+
+// readWebhookBody читает тело под ограничителем и сразу отпускает место.
+// Content-Length больше лимита — 413 сразу, без чтения.
+func (s *Server) readWebhookBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	lim := s.webhookLimits()
+	// Лимит по заголовку события: push без Content-Length (chunked через
+	// прокси) тоже бывает больше мегабайта, а память и так считается по
+	// пришедшим байтам.
+	limit := int64(webhookBodyLimit)
+	if r.Header.Get("X-GitHub-Event") == "push" || r.Header.Get("X-Gitlab-Event") == "Push Hook" {
+		limit = pushBodyLimit
+	}
+	// Отказ без чтения тела: соединение закрывается, иначе сервер ждал бы
+	// непришедшее тело, чтобы переиспользовать соединение, и ответ не ушёл
+	// бы клиенту.
+	reject := func() { w.Header().Set("Connection", "close") }
+	if r.ContentLength > limit {
+		reject()
+		writePayloadTooLarge(w)
 		return nil, false
 	}
+	select {
+	case lim.slots <- struct{}{}:
+	case <-time.After(lim.wait):
+		reject()
+		writeWebhookBusy(w)
+		return nil, false
+	case <-r.Context().Done():
+		return nil, false
+	}
+	defer func() { <-lim.slots }()
+	br := &budgetReader{r: http.MaxBytesReader(w, r.Body, limit), ctx: r.Context(), sem: lim.mem, wait: lim.wait,
+		rc: http.NewResponseController(w), idle: lim.idle, until: time.Now().Add(lim.total)}
+	defer br.release()
+	body, err := io.ReadAll(br)
+	br.release()
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		switch {
+		case errors.As(err, &tooBig):
+			writePayloadTooLarge(w)
+		case errors.Is(err, errWebhookBudget):
+			reject()
+			writeWebhookBusy(w)
+		default:
+			unprocessable(w, "невалидный payload")
+		}
+		return nil, false
+	}
+	// Обработка дольше чтения: дедлайн чтения снимается, ответ пишется
+	// без него (WriteTimeout сервера не задан).
+	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
 	return body, true
 }
 
@@ -126,7 +290,10 @@ func (s *Server) handleHostingEvent(w http.ResponseWriter, r *http.Request, prov
 	// Один и тот же путь может быть у проектов на разных инстансах, а
 	// событие инстанс не называет: кандидата выбирает подпись. Секрет
 	// проекта, иначе секрет установки; нет ни одного — приём выключен.
+	// Push касается всех проектов репозитория с подходящей подписью
+	// (снимок архитектуры у каждого свой), остальные события — первого.
 	var project domain.Project
+	var verified []domain.Project
 	matched, anySecret := false, false
 	for _, c := range candidates {
 		secret := c.WebhookSecret
@@ -138,8 +305,10 @@ func (s *Server) handleHostingEvent(w http.ResponseWriter, r *http.Request, prov
 		}
 		anySecret = true
 		if verify(r, body, secret) {
-			project, matched = c, true
-			break
+			if !matched {
+				project, matched = c, true
+			}
+			verified = append(verified, c)
 		}
 	}
 	if !anySecret {
@@ -156,6 +325,23 @@ func (s *Server) handleHostingEvent(w http.ResponseWriter, r *http.Request, prov
 	// ли нас это событие (спека: проверяется каждое входящее событие).
 	if ev.Kind == "" {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored"})
+		return
+	}
+	// Push в основную ветку: снимок архитектуры перечитывается в фоне
+	// (add-architecture-c4); при неизменном SHA чтения нет.
+	if ev.Kind == hookPush {
+		status := "ignored"
+		for _, p := range verified {
+			base := p.DefaultBranch
+			if base == "" {
+				base = "main"
+			}
+			if ev.Branch == base {
+				s.refreshArchitecture(p.ID, false)
+				status = "noted"
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": status})
 		return
 	}
 
@@ -230,40 +416,72 @@ func (s *Server) hostingMerge(w http.ResponseWriter, r *http.Request,
 	if task.Status == domain.TaskDone {
 		// Задача завершилась процессом без шага merge, а PR смержили позже:
 		// точка merge ставится сейчас, иначе изменение не войдёт ни в один
-		// релиз.
-		if err := s.St.MarkMerged(r.Context(), task.ID); err != nil {
-			writeErr(w, err)
-			return
+		// релиз. Задача описания архитектуры в релиз не входит.
+		if task.Kind != domain.KindArchitecture {
+			if err := s.St.MarkMerged(r.Context(), task.ID); err != nil {
+				writeErr(w, err)
+				return
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "already done"})
 		return
 	}
-	if err := s.St.CompleteMergedTask(r.Context(), task.ID,
+	// Хостинг ждёт ответа недолго и рвёт соединение: обрыв не должен
+	// оборвать уже начатую обработку merge (публикацию, снимок).
+	ctx := context.WithoutCancel(r.Context())
+	// PR задачи описания с файлами вне docs/architecture: merge на хостинге
+	// уже случился, задача уходит в failed с причиной, а не в done
+	// (add-architecture-c4). Основная ветка изменилась, снимок перечитывается.
+	if task.Kind == domain.KindArchitecture && task.Status != domain.TaskFailed {
+		if err := s.Engine.GuardExternalArchitectureMerge(ctx, task, project); err != nil {
+			switch {
+			case errors.Is(err, orchestrator.ErrArchitecturePRRejected):
+				s.refreshArchitecture(project.ID, false)
+				writeJSON(w, http.StatusOK, map[string]string{"status": "rejected"})
+			case errors.Is(err, orchestrator.ErrArchitectureFilesUnavailable):
+				// Список файлов не получен: доставку хостинг сам не повторит,
+				// поэтому сверка идёт в фоне и доводит задачу до done или
+				// failed; пока она идёт, задача в review с одной эскалацией.
+				writeJSON(w, http.StatusAccepted, map[string]string{"status": "verifying"})
+			default:
+				writeErr(w, err)
+			}
+			return
+		}
+	}
+	// Точка merge задаёт состав релиза (add-sdlc-cycle): у задачи описания
+	// архитектуры её нет, документация в релиз не входит и не публикуется.
+	complete := s.St.CompleteMergedTask
+	if task.Kind == domain.KindArchitecture {
+		complete = s.St.CompleteTask
+	}
+	if err := complete(ctx, task.ID,
 		store.EventInput{ActorKind: domain.ActorUser, ActorID: ev.Actor,
 			Type: "task.status", Text: "PR смержен вручную на хостинге",
 			Payload: map[string]any{"status": "done", "pr": ev.URL}}); err != nil {
 		writeErr(w, err)
 		return
 	}
-	if err := s.St.RecomputeEpic(r.Context(), task.EpicID); err != nil {
+	if err := s.St.RecomputeEpic(ctx, task.EpicID); err != nil {
 		writeErr(w, err)
 		return
 	}
+	s.refreshArchitecture(project.ID, false)
 	// Внешний merge запускает автопубликации так же, как merge кнопкой
-	// (спека deployment «Режимы запуска»). Ошибка постановки не валит
-	// ответ: задача уже done, и повтор webhook'а сюда не дойдёт —
-	// публикацию догонит следующий merge, а проблема видна в логе.
-	if ev.MergeSHA != "" {
-		if err := s.Engine.EnqueueAutoDeploys(r.Context(), project.ID, ev.MergeSHA); err != nil {
-			slog.Error("автопубликация после внешнего merge", "project", project.ID, "err", err)
-		}
-	}
+	// (спека deployment «Режимы запуска»), с теми же исключениями: задача
+	// описания архитектуры и процесс без шага deploy. Ошибка постановки не
+	// валит ответ: задача уже done, публикацию догонит следующий merge, а
+	// проблема видна в логе.
+	s.Engine.DeployAfterMerge(ctx, project.ID, task, ev.MergeSHA)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "done"})
 }
 
 func parseGitHubEvent(r *http.Request, body []byte) hostingEvent {
 	var payload struct {
-		Action     string `json:"action"`
+		Action string `json:"action"`
+		// push: ветка и новая вершина.
+		Ref        string `json:"ref"`
+		After      string `json:"after"`
 		Repository struct {
 			FullName string `json:"full_name"`
 		} `json:"repository"`
@@ -313,6 +531,10 @@ func parseGitHubEvent(r *http.Request, body []byte) hostingEvent {
 	}
 	ev := hostingEvent{RepoPath: payload.Repository.FullName}
 	switch r.Header.Get("X-GitHub-Event") {
+	case "push":
+		if branch, ok := strings.CutPrefix(payload.Ref, "refs/heads/"); ok {
+			ev.Kind, ev.Branch, ev.MergeSHA = hookPush, branch, payload.After
+		}
 	case "pull_request":
 		if payload.Action != "closed" {
 			return ev
@@ -395,7 +617,10 @@ func reviewState(s string) string {
 func parseGitLabEvent(r *http.Request, body []byte) hostingEvent {
 	var payload struct {
 		ObjectKind string `json:"object_kind"`
-		User       struct {
+		// Push Hook: ветка и новая вершина.
+		Ref   string `json:"ref"`
+		After string `json:"after"`
+		User  struct {
 			Username string `json:"username"`
 		} `json:"user"`
 		Project struct {
@@ -427,6 +652,10 @@ func parseGitLabEvent(r *http.Request, body []byte) hostingEvent {
 	a := payload.ObjectAttributes
 	ev := hostingEvent{RepoPath: payload.Project.PathWithNamespace, Actor: payload.User.Username}
 	switch r.Header.Get("X-Gitlab-Event") {
+	case "Push Hook":
+		if branch, ok := strings.CutPrefix(payload.Ref, "refs/heads/"); ok {
+			ev.Kind, ev.Branch, ev.MergeSHA = hookPush, branch, payload.After
+		}
 	case "Merge Request Hook":
 		ev.Branch, ev.URL, ev.PRURL = a.SourceBranch, a.URL, a.URL
 		// При squash и fast-forward sha приезжает не в merge_commit_sha:

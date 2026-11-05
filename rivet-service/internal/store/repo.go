@@ -286,7 +286,11 @@ func (s *Store) EnsureWebhookSecret(ctx context.Context, projectID string) (stri
 
 // SetWebhookRegistered отмечает, что подписка на события создана системой.
 func (s *Store) SetWebhookRegistered(ctx context.Context, projectID string, ok bool) error {
-	_, err := s.Pool.Exec(ctx,
-		`UPDATE projects SET webhook_registered=$2 WHERE id=$1`, projectID, ok)
+	// Время регистрации: у общего хука репозитория секрет последнего
+	// зарегистрировавшегося проекта (add-architecture-c4, переподписка).
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE projects SET webhook_registered=$2,
+			webhook_registered_at = CASE WHEN $2 THEN now() ELSE webhook_registered_at END
+		WHERE id=$1`, projectID, ok)
 	return err
 }

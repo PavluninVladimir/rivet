@@ -168,6 +168,10 @@ func Report(data Input) string {
 	// 1. Итог.
 	var doneEpics, onTrack, atRisk, needsHuman int
 	for _, e := range ov.Epics {
+		// Системные Epic'и в итог не входят, как и в число активных.
+		if e.System {
+			continue
+		}
 		switch e.Risk.Status {
 		case RiskDone:
 			doneEpics++
@@ -217,7 +221,11 @@ func Report(data Input) string {
 			if codes := reasonCodes(e.Risk.Reasons); codes != "" {
 				risk += ": " + codes
 			}
-			w("| %s | %s | %s | %s | %s |\n", mdCell(e.Title), epicStatusTitle[e.Status], progress, mdCell(forecast), risk)
+			title := e.Title
+			if e.System {
+				title += " (системный)"
+			}
+			w("| %s | %s | %s | %s | %s |\n", mdCell(title), epicStatusTitle[e.Status], progress, mdCell(forecast), risk)
 		}
 	}
 

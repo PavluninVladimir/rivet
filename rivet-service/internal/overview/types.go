@@ -144,7 +144,13 @@ type Epic struct {
 	BudgetExhausted bool
 	PauseReason     string
 	Spend           Totals
+	// Kind — вид Epic'а; пусто — work. Системные Epic'и («Архитектура
+	// проекта», «Сопровождение») в активные и прогноз не входят.
+	Kind string
 }
+
+// System — системный Epic: живёт вне плана, прогноза у него нет.
+func (e Epic) System() bool { return e.Kind != "" && e.Kind != "work" }
 
 // Task — задача проекта. Estimate — оценка в единицах планировщика.
 type Task struct {
@@ -308,6 +314,9 @@ type EpicOverview struct {
 	Spend                Amount     `json:"spend"`
 	TokenBudget          *int64     `json:"token_budget"`
 	BudgetForecastTokens *int64     `json:"budget_forecast_tokens"`
+	// System — системный Epic: виден в списке с пометкой, в число
+	// активных и в прогноз не входит.
+	System bool `json:"system"`
 }
 
 // Progress — объём W (TotalUnits) и сделанное.

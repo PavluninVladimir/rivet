@@ -114,10 +114,23 @@ func (g *GitLab) Diff(ctx context.Context, repo string, number int) (string, err
 
 // Merge выполняет merge MR и возвращает sha merge-коммита.
 func (g *GitLab) Merge(ctx context.Context, repo string, number int) (string, error) {
+	return g.MergeAt(ctx, repo, number, "")
+}
+
+// MergeAt — merge с проверкой вершины: GitLab отвечает 409 «SHA does not
+// match HEAD of source branch», если ветка MR ушла дальше headSHA.
+func (g *GitLab) MergeAt(ctx context.Context, repo string, number int, headSHA string) (string, error) {
+	body := map[string]any{}
+	if headSHA != "" {
+		body["sha"] = headSHA
+	}
 	raw, code, err := g.do(ctx, "PUT",
-		fmt.Sprintf("/projects/%s/merge_requests/%d/merge", projectID(repo), number), map[string]any{})
+		fmt.Sprintf("/projects/%s/merge_requests/%d/merge", projectID(repo), number), body)
 	if err != nil {
 		return "", err
+	}
+	if code == http.StatusConflict && headSHA != "" {
+		return "", fmt.Errorf("gitlab merge: %w: %s", ErrHeadMoved, tailMsg(raw))
 	}
 	if code != http.StatusOK {
 		if mergeRefusal(code) && g.conflicting(ctx, repo, number) {
@@ -174,6 +187,9 @@ func (g *GitLab) HeadSHA(ctx context.Context, repo, branch string) (string, erro
 		"/projects/"+projectID(repo)+"/repository/branches/"+url.PathEscape(branch), nil)
 	if err != nil {
 		return "", err
+	}
+	if code == http.StatusNotFound && branchMissing(raw) {
+		return "", fmt.Errorf("gitlab branch %s: %w", branch, ErrBranchNotFound)
 	}
 	if code != http.StatusOK {
 		return "", fmt.Errorf("gitlab branch: %d: %s", code, tailMsg(raw))
@@ -323,6 +339,22 @@ func (g *GitLab) namespaceID(ctx context.Context, owner string) (int, error) {
 	return 0, fmt.Errorf("владелец %q не найден среди доступных пространств имён", owner)
 }
 
+// defaultBranch — основная ветка проекта; пусто, если узнать не удалось
+// (тогда push подписывается без фильтра, лишние ветки отсекает обработчик).
+func (g *GitLab) defaultBranch(ctx context.Context, repo string) string {
+	raw, code, err := g.do(ctx, "GET", "/projects/"+projectID(repo), nil)
+	if err != nil || code != http.StatusOK {
+		return ""
+	}
+	var info struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if json.Unmarshal(raw, &info) != nil {
+		return ""
+	}
+	return info.DefaultBranch
+}
+
 // RegisterWebhook подписывает проект на события MR; секрет проекта уезжает
 // в X-Gitlab-Token. Существующий хук с тем же URL обновляется, а не
 // дублируется: иначе у старого остался бы прежний токен.
@@ -330,9 +362,14 @@ func (g *GitLab) RegisterWebhook(ctx context.Context, repo, hookURL, secret stri
 	// Подписка перечисляет всё, что умеет обрабатывать конвейер: merge и
 	// закрытие MR, пайплайны и комментарии (спека scm-integration
 	// «События хостинга в конвейере»).
+	// Push нужен снимку архитектуры (add-architecture-c4), и только по
+	// основной ветке: фильтр хостинга не шлёт пуши веток задач.
 	body := map[string]any{
-		"url": hookURL, "token": secret, "push_events": false,
+		"url": hookURL, "token": secret, "push_events": true,
 		"merge_requests_events": true, "pipeline_events": true, "note_events": true,
+	}
+	if branch := g.defaultBranch(ctx, repo); branch != "" {
+		body["push_events_branch_filter"] = branch
 	}
 	raw, code, err := g.do(ctx, "GET", "/projects/"+projectID(repo)+"/hooks", nil)
 	if err != nil {
@@ -464,16 +501,24 @@ func (g *GitLab) ReadFile(ctx context.Context, repo, ref, path string) (FileCont
 	if err != nil {
 		return FileContent{}, err
 	}
+	if code == http.StatusNotFound && refMissing(raw) {
+		return FileContent{}, fmt.Errorf("gitlab files %s@%s: %w: %s", path, ref, ErrRefNotFound, clip(raw))
+	}
 	if code == http.StatusNotFound {
 		return FileContent{}, ErrFileNotFound
 	}
 	if code != http.StatusOK {
 		return FileContent{}, fmt.Errorf("gitlab files: %d: %s", code, clip(raw))
 	}
+	// Ответ упёрся в лимит чтения: JSON обрезан, файл слишком большой.
+	if len(raw) >= MaxResponseBytes {
+		return FileContent{}, fmt.Errorf("gitlab files: %s: ответ больше лимита чтения %d байт", path, MaxResponseBytes)
+	}
 	var out struct {
 		Content      string `json:"content"`
 		Encoding     string `json:"encoding"`
 		LastCommitID string `json:"last_commit_id"`
+		Size         int64  `json:"size"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return FileContent{}, err
@@ -485,6 +530,9 @@ func (g *GitLab) ReadFile(ctx context.Context, repo, ref, path string) (FileCont
 			return FileContent{}, fmt.Errorf("gitlab files: %w", err)
 		}
 		content = string(decoded)
+	}
+	if out.Size > 0 && int64(len(content)) != out.Size {
+		return FileContent{}, fmt.Errorf("gitlab files: %s: прочитано %d байт из %d", path, len(content), out.Size)
 	}
 	return FileContent{Content: content, FileID: out.LastCommitID}, nil
 }

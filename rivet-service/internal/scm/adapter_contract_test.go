@@ -257,8 +257,13 @@ func TestAdapterRegisterWebhook(t *testing.T) {
 		build          func(base string) Adapter
 	}{
 		{"github",
-			newStub(map[string]stubResp{"POST /repos/own/proj/hooks": {201, `{"id":1}`}}),
-			newStub(map[string]stubResp{"POST /repos/own/proj/hooks": {403, `{"message":"forbidden"}`}}),
+			// GitHub тоже сначала смотрит существующие хуки: у найденного
+			// один мутирующий запрос (PATCH) вместо POST с отказом 422.
+			newStub(map[string]stubResp{
+				"GET /repos/own/proj/hooks":  {200, `[]`},
+				"POST /repos/own/proj/hooks": {201, `{"id":1}`},
+			}),
+			newStub(map[string]stubResp{"GET /repos/own/proj/hooks": {403, `{"message":"forbidden"}`}}),
 			func(b string) Adapter { return &GitHub{Token: "t", Client: httpClient(), Base: b, Web: b} }},
 		{"gitlab",
 			// GitLab сначала смотрит существующие хуки: дубликаты он

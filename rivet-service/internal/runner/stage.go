@@ -3,12 +3,14 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -272,6 +274,28 @@ func (a *agent) workspace(ctx context.Context, as *pb.Assignment, step func(stri
 	// Страховка: блок push тестировщика из конфига репозитория (так его
 	// ставили прежние версии runner'а) не должен пережить сессию.
 	_, _ = runShell(ctx, dir, "git config --unset-all remote.origin.pushurl '^rivet-tester-no-push:' || true", nil)
+	// Состояние .git, которое мог оставить агент прошлой стадии: подмены
+	// объектов (refs/replace, grafts) и refspec origin меняют историю и
+	// базу для следующих стадий и задач этого репозитория на runner'е, в
+	// том числе для проверки архитектуры (ревью Opus, круг 2).
+	// Адрес origin, его переписывание (url.*.insteadOf, в том числе через
+	// include) и pushurl тоже возвращаются к клону: один агент не ломает
+	// проверку следующих задач (ревью Opus, финальная проверка). Хуки
+	// рабочей копии при подготовке не запускаются. Сведётся с gitguard
+	// add-native-agent при слиянии: чистка идёт до снимка конфигурации.
+	if err := scrubGitConfig(ctx, dir, cloneURL(a.cfg.GitBase, as)); err != nil {
+		return "", fmt.Errorf("workspace: %w", err)
+	}
+	const hygiene = `git -c core.hooksPath=/dev/null for-each-ref --format='delete %(refname)' refs/replace/ | ` +
+		`git -c core.hooksPath=/dev/null update-ref --stdin && ` +
+		`git config --replace-all remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*' && ` +
+		`rm -f "$(git rev-parse --git-dir)/info/grafts"`
+	if out, err := runShellEnv(ctx, dir, hygiene, env, nil); err != nil {
+		return "", fmt.Errorf("workspace: %v: %s", err, out)
+	}
+	// Подготовка ветки без хуков рабочей копии: reference-transaction и
+	// post-checkout агента не должны срабатывать с учётными данными runner'а.
+	env = append(append([]string{}, env...), noHooksEnv(append(os.Environ(), env...))...)
 	// Незакоммиченные правки в каталоге — хвост прерванной стадии (остановка
 	// или падение runner'а): в работу новой стадии они не попадают.
 	// Игнорируемые файлы (зависимости, кэши) остаются: копия тёплая.
@@ -287,12 +311,16 @@ func (a *agent) workspace(ctx context.Context, as *pb.Assignment, step func(stri
 			"if git rev-parse -q --verify refs/remotes/origin/%s >/dev/null; then git checkout -B %s origin/%s; else git checkout -B %s origin/%s; fi",
 			br, br, br, br, bs)
 	default:
-		// FIXING, TESTING, REVIEW — ветка обычно уже существует (локально
-		// или на origin). Сессия доработки из blocked/failed может прийти
-		// на другой runner до первого push ветки — тогда она создаётся от
-		// базовой (add-user-sessions).
-		script = fmt.Sprintf(prep+"(git checkout %s || git checkout -b %s origin/%s || git checkout -B %s origin/%s) && (git pull --ff-only origin %s || true)",
-			br, br, br, br, bs, br)
+		// FIXING, TESTING, REVIEW — ветка обычно уже существует на origin:
+		// локальная копия выравнивается на её вершину (reset, а не pull
+		// --ff-only || true). Иначе после force push проверялась бы старая
+		// локальная вершина, а control plane считал бы проверенной новую
+		// (ревью Opus, ограничитель). Сессия доработки из blocked/failed
+		// может прийти на другой runner до первого push ветки — тогда ветка
+		// локальная или создаётся от базовой (add-user-sessions).
+		script = fmt.Sprintf(prep+"if git rev-parse -q --verify refs/remotes/origin/%s >/dev/null; then git checkout -B %s origin/%s; "+
+			"else (git checkout %s || git checkout -B %s origin/%s); fi",
+			br, br, br, br, br, bs)
 	}
 	if out, err := runShellEnv(ctx, dir, script, env, nil); err != nil {
 		return "", fmt.Errorf("checkout: %v: %s", err, out)
@@ -343,6 +371,85 @@ func workspaceKey(as *pb.Assignment) string {
 		}
 	}
 	return b.String()
+}
+
+// noHooksEnv — git без хуков рабочей копии (через GIT_CONFIG_*: действует
+// на каждую команду git в скрипте подготовки). base — окружение процесса и
+// стадии: уже заданные GIT_CONFIG_* (CA, прокси) сохраняются, ключ
+// добавляется следующим номером, как в pushBlockEnv.
+func noHooksEnv(base []string) []string {
+	n := 0
+	for _, kv := range base {
+		if v, ok := strings.CutPrefix(kv, "GIT_CONFIG_COUNT="); ok {
+			if c, err := strconv.Atoi(v); err == nil && c >= 0 {
+				n = c
+			}
+		}
+	}
+	i := strconv.Itoa(n)
+	return []string{
+		"GIT_CONFIG_KEY_" + i + "=core.hooksPath",
+		"GIT_CONFIG_VALUE_" + i + "=/dev/null",
+		"GIT_CONFIG_COUNT=" + strconv.Itoa(n+1),
+	}
+}
+
+// scrubGitConfig возвращает адрес origin к адресу клона и снимает из
+// локальной конфигурации то, чем агент мог подменить источник истории:
+// секции url.* (insteadOf и pushInsteadOf), include.* и includeIf.*,
+// remote.origin.pushurl. Команды без shell: ключи и адрес приходят из
+// конфигурации, которую мог писать агент.
+func scrubGitConfig(ctx context.Context, dir, origin string) error {
+	git := func(args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.hooksPath=/dev/null"}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+		return cmd.Output()
+	}
+	// scrub снимает подходящие ключи в одной области конфигурации.
+	// --get-regexp без совпадений выходит с кодом 1: снимать нечего.
+	scrub := func(scope, pattern string) error {
+		out, err := git("config", scope, "--name-only", "-z", "--get-regexp", pattern)
+		if err != nil && exitCodeOf(err) != 1 {
+			return fmt.Errorf("конфигурация рабочей копии (%s): %v", scope, err)
+		}
+		seen := map[string]bool{}
+		for _, key := range strings.Split(string(out), "\x00") {
+			key = strings.TrimSpace(key)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			// Код 5 — ключа уже нет (одна секция могла держать несколько ключей).
+			if _, err := git("config", scope, "--unset-all", key); err != nil && exitCodeOf(err) != 5 {
+				return fmt.Errorf("снять %s (%s): %v", key, scope, err)
+			}
+		}
+		return nil
+	}
+	// Конфигурация рабочего дерева (.git/config.worktree) читается поверх
+	// локальной, если включена extensions.worktreeConfig: там адрес origin
+	// тоже можно подменить (ревью Opus, ограничитель).
+	if wt, _ := git("config", "--local", "--bool", "--get", "extensions.worktreeConfig"); strings.TrimSpace(string(wt)) == "true" {
+		if err := scrub("--worktree", `^(url|include|includeif)\.|^remote\.origin\.(url|pushurl)$`); err != nil {
+			return err
+		}
+	}
+	if err := scrub("--local", `^(url|include|includeif)\.|^remote\.origin\.pushurl$`); err != nil {
+		return err
+	}
+	if _, err := git("config", "--local", "remote.origin.url", origin); err != nil {
+		return fmt.Errorf("адрес origin: %v", err)
+	}
+	return nil
+}
+
+func exitCodeOf(err error) int {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		return ee.ExitCode()
+	}
+	return -1
 }
 
 // cloneURL — адрес клонирования: из Assignment (репозиторий проекта) или

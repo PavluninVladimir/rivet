@@ -76,7 +76,7 @@ func (s *Store) ListProjects(ctx context.Context, userID string) ([]domain.Proje
 // ─── epics ───────────────────────────────────────────────────────────────
 
 func (s *Store) CreateEpic(ctx context.Context, projectID, title, goal string) (domain.Epic, error) {
-	e := domain.Epic{ProjectID: projectID, Title: title, Goal: goal, Status: domain.EpicPlanned}
+	e := domain.Epic{ProjectID: projectID, Title: title, Goal: goal, Status: domain.EpicPlanned, Kind: domain.KindWork}
 	err := s.Pool.QueryRow(ctx,
 		`INSERT INTO epics (project_id, title, goal) VALUES ($1,$2,$3) RETURNING id, created_at`,
 		projectID, title, goal).Scan(&e.ID, &e.Created)
@@ -262,6 +262,7 @@ func (s *Store) CreateTask(ctx context.Context, epicID string, in NewTask) (doma
 	t.EpicID, t.Title, t.Description = epicID, in.Title, in.Description
 	t.Status, t.Estimate, t.Capabilities = domain.TaskQueued, in.Estimate, in.Capabilities
 	t.Criteria, t.Deps, t.AttemptLimit = in.Criteria, in.Deps, in.AttemptLimit
+	t.Kind = domain.KindWork
 	return t, nil
 }
 

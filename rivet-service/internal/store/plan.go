@@ -86,10 +86,16 @@ func (s *Store) UpdateTaskPlan(ctx context.Context, taskID string, edit PlanEdit
 			Scan(&epicStatus, &projectID); err != nil {
 			return err
 		}
+		var kind string
 		if err := tx.QueryRow(ctx, `
-			SELECT status, attempt_used FROM tasks WHERE id=$1 FOR UPDATE`, taskID).
-			Scan(&from, &used); err != nil {
+			SELECT status, attempt_used, kind FROM tasks WHERE id=$1 FOR UPDATE`, taskID).
+			Scan(&from, &used, &kind); err != nil {
 			return nf(err)
+		}
+		// Задача описания архитектуры строится системой: её план не
+		// правится, доступна только отмена (add-architecture-c4).
+		if kind == domain.KindArchitecture && edit.planFields() {
+			return fmt.Errorf("%w: задачу описания архитектуры нельзя править через план, её можно только отменить", ErrConflict)
 		}
 		if edit.AttemptLimit != nil && *edit.AttemptLimit < used {
 			return fmt.Errorf("%w: лимит %d меньше израсходованных попыток (%d)", ErrInvalid, *edit.AttemptLimit, used)

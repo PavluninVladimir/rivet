@@ -2,6 +2,19 @@
 
 # Архитектура: Интернет-магазин
 
+## C4 и HLD
+
+- [HLD: обзор архитектуры](hld.md)
+- [Контекст (L1)](c4/context.md)
+- Контейнеры (L2): [Интернет-магазин](c4/container/system.md)
+- [Развёртывание](c4/deployment.md)
+- [Structurizr DSL](c4/workspace.dsl)
+
+## Данные (ERD)
+
+- [Общая схема](erd/all.md)
+- Хранилище: [PostgreSQL](erd/tech.postgres.md)
+
 ## Принципы
 
 | Принцип | Формулировка | Обоснование |

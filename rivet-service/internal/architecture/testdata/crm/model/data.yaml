@@ -1,0 +1,15 @@
+elements:
+  - id: data.contact
+    type: data-object
+    name: Контакт
+    description: Запись server/domain/contacts.js, хранится массивом в data/crm.json
+    attributes:
+      - {name: id, type: uuid, pk: true, description: randomUUID при создании}
+      - {name: name, type: string, description: "обязательное, до 100 символов"}
+      - {name: company, type: string, nullable: true, description: до 100 символов}
+      - {name: position, type: string, nullable: true}
+      - {name: email, type: string, nullable: true, description: "до 254 символов, проверка формата"}
+      - {name: phone, type: string, nullable: true}
+      - {name: notes, type: string, nullable: true, description: до 1000 символов}
+      - {name: createdAt, type: timestamp}
+      - {name: updatedAt, type: timestamp}

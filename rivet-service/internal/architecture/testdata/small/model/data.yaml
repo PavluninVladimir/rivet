@@ -1,0 +1,4 @@
+elements:
+  - id: data.request
+    type: data-object
+    name: Заявка

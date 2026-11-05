@@ -59,7 +59,7 @@ func cmdArchitecture(args []string) error {
 		return usageError{"лишние аргументы: " + strings.Join(fs.Args(), " ")}
 	}
 	if *change != "" && !architecture.ValidChangeID(*change) {
-		return usageError{fmt.Sprintf("идентификатор изменения %q: только строчные латинские буквы, цифры и дефис", *change)}
+		return usageError{fmt.Sprintf("%q: %s", *change, architecture.ChangeIDProblem(*change))}
 	}
 
 	switch sub {

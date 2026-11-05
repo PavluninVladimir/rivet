@@ -170,7 +170,8 @@ type Task struct {
 	AgentName string `json:"AgentName"`
 	// Kind — вид задачи: work, architecture, explore или bug (задача-баг
 	// инцидента, add-sdlc-cycle); IncidentID — инцидент задачи-бага;
-	// MergedAt — момент merge (состав релиза считается по нему).
+	// MergedAt — момент merge (состав релиза считается по нему, у задачи
+	// описания архитектуры его нет).
 	Kind       string     `json:"Kind"`
 	IncidentID string     `json:"IncidentID"`
 	MergedAt   *time.Time `json:"MergedAt"`
@@ -180,6 +181,22 @@ type Task struct {
 	// (add-project-lead-view); nil — ещё не было.
 	StartedAt *time.Time
 	DoneAt    *time.Time
+	// Failure — причина провала failed-задачи (GET /tasks/{id}); null у
+	// остальных и там, где её не заполняют (списки задач).
+	Failure *TaskFailure `json:"failure"`
+}
+
+// TaskFailure — причина перевода задачи в failed из последнего события
+// task.status со статусом failed. Для отказа merge задачи описания
+// архитектуры reason — architecture_outside_docs или
+// architecture_files_truncated, files — не больше 50 путей вне
+// docs/architecture, files_total — их общее число.
+type TaskFailure struct {
+	Reason     string   `json:"reason"`
+	Message    string   `json:"message"`
+	Files      []string `json:"files"`
+	FilesTotal int      `json:"files_total"`
+	Merged     bool     `json:"merged"`
 }
 
 type Runner struct {
@@ -937,7 +954,7 @@ var RoleColors = []string{"blue", "violet", "green", "amber", "rose", "teal", "i
 
 // RoleCapabilities — capability, которую может требовать роль; пусто —
 // роль выполняет control plane (lead, analyst).
-var RoleCapabilities = []string{"coding", "review", "explore", ""}
+var RoleCapabilities = []string{"coding", "review", "explore", "architecture", ""}
 
 // ControlPlaneRole — встроенная роль, которую выполняет control plane
 // запросом к модели, а не runner: у неё нет capability и профиля.
@@ -976,3 +993,9 @@ type PlannerModel struct {
 	ConnectionID string `json:"connection_id"`
 	Model        string `json:"model"`
 }
+
+// Виды Epic и задачи (add-architecture-c4).
+const (
+	KindWork         = "work"
+	KindArchitecture = "architecture"
+)

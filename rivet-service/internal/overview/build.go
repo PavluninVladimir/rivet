@@ -82,7 +82,7 @@ func (c *calc) overview() Overview {
 	ov.Delivery = c.delivery(ov.Epics)
 	active := 0
 	for _, e := range in.Epics {
-		if e.Status == EpicRunning || e.Status == EpicPaused {
+		if (e.Status == EpicRunning || e.Status == EpicPaused) && !e.System() {
 			active++
 		}
 	}
@@ -198,6 +198,10 @@ func (c *calc) progress(e Epic) Progress {
 // forecast — прогноз завершения: сейчас плюс R/V часов, вверх до минуты.
 func (c *calc) forecast(e Epic, p Progress) Forecast {
 	f := Forecast{RemainingUnits: p.TotalUnits - p.DoneUnits}
+	if e.System() && e.Status != EpicDone {
+		f.Reason = "системный Epic: прогноз не считается"
+		return f
+	}
 	switch e.Status {
 	case EpicDone:
 		f.Reason = "Epic завершён"
@@ -237,6 +241,9 @@ func (c *calc) forecast(e Epic, p Progress) Forecast {
 // единицу сделанного, умноженное на объём W. Без сделанного или без
 // записей usage не считается.
 func budgetForecast(e Epic, p Progress) (int64, bool) {
+	if e.System() {
+		return 0, false
+	}
 	if p.DoneUnits <= 0 || e.Spend.Records == 0 {
 		return 0, false
 	}
@@ -412,7 +419,7 @@ func (c *calc) epics() []EpicOverview {
 		eo := EpicOverview{
 			ID: e.ID, Title: e.Title, Status: e.Status, Progress: p,
 			DueAt: inLoc(e.DueAt, c.loc), Forecast: f, Spend: e.Spend.Amount(),
-			TokenBudget: e.TokenBudget,
+			TokenBudget: e.TokenBudget, System: e.System(),
 		}
 		if bf, ok := budgetForecast(e, p); ok {
 			eo.BudgetForecastTokens = &bf

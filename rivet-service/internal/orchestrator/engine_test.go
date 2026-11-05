@@ -42,6 +42,62 @@ type fakeSCM struct {
 	branchUnprotected bool
 	// fileID — идентификатор версии файла, отдаваемый ReadFile.
 	fileID string
+	// readErr — ошибка, которую отдаёт ReadFile (нет ветки, сбой хостинга).
+	readErr error
+	// headSHA и headErr — ответ HeadSHA (снимок архитектуры): пустой
+	// headSHA даёт «sha-head».
+	headSHA string
+	headErr error
+	// headBlock задерживает HeadSHA до закрытия канала, heads считает
+	// обращения (одиночное исполнение обновлений снимка).
+	headBlock chan struct{}
+	heads     int
+	// prFiles и prFilesErr — ответ PRFiles (граница задачи описания).
+	prFiles      []string
+	prFilesErr   error
+	prFilesCalls int
+	// prFilesFailN — prFilesErr только на первых N обращениях (0 — всегда).
+	prFilesFailN int
+	// prHead — вершина ветки PR в ответе PRFiles, headMoved — MergeAt
+	// отвечает «ветка сдвинулась», mergedAt — вершина последнего MergeAt.
+	prHead    string
+	headMoved bool
+	mergedAt  string
+	// treeSHA — ответ PathSHA (дерево docs/architecture).
+	treeSHA string
+	// symlinks — пути, где лежит символическая ссылка (ReadFile → ErrSymlink).
+	symlinks map[string]bool
+}
+
+// PathSHA — SHA дерева описания; пустой treeSHA — каталога «нет»,
+// снимок читается целиком.
+func (f *fakeSCM) PathSHA(ctx context.Context, repo, ref, dir string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.treeSHA, nil
+}
+
+func (f *fakeSCM) PRFiles(ctx context.Context, repo string, number int) (scm.PRFileList, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prFilesCalls++
+	if f.prFilesErr != nil && (f.prFilesFailN == 0 || f.prFilesCalls <= f.prFilesFailN) {
+		return scm.PRFileList{}, f.prFilesErr
+	}
+	return scm.PRFileList{Files: f.prFiles, HeadSHA: f.prHead}, nil
+}
+
+// MergeAt — merge проверенной вершины: headMoved имитирует push в ветку PR
+// после проверки файлов.
+func (f *fakeSCM) MergeAt(ctx context.Context, repo string, number int, headSHA string) (string, error) {
+	f.mu.Lock()
+	moved := f.headMoved
+	f.mergedAt = headSHA
+	f.mu.Unlock()
+	if moved {
+		return "", fmt.Errorf("fake merge: %w", scm.ErrHeadMoved)
+	}
+	return f.Merge(ctx, repo, number)
 }
 
 func (f *fakeSCM) CreatePR(ctx context.Context, repo, branch, base, title, body string) (scm.PR, error) {
@@ -55,6 +111,21 @@ func (f *fakeSCM) Merge(ctx context.Context, repo string, number int) (string, e
 	return fmt.Sprintf("sha-merge-%d", number), nil
 }
 func (f *fakeSCM) HeadSHA(ctx context.Context, repo, branch string) (string, error) {
+	f.mu.Lock()
+	f.heads++
+	block := f.headBlock
+	f.mu.Unlock()
+	if block != nil {
+		<-block
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.headErr != nil {
+		return "", f.headErr
+	}
+	if f.headSHA != "" {
+		return f.headSHA, nil
+	}
 	return "sha-head", nil
 }
 func (f *fakeSCM) Probe(ctx context.Context, repo string) scm.ProbeResult {
@@ -104,6 +175,12 @@ var errTrigger = errors.New("хостинг отказал")
 func (f *fakeSCM) ReadFile(ctx context.Context, repo, ref, path string) (scm.FileContent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.readErr != nil {
+		return scm.FileContent{}, f.readErr
+	}
+	if f.symlinks[path] {
+		return scm.FileContent{}, fmt.Errorf("fake %s: %w", path, scm.ErrSymlink)
+	}
 	content, ok := f.files[repo+"@"+ref+":"+path]
 	if !ok {
 		return scm.FileContent{}, scm.ErrFileNotFound
@@ -198,6 +275,9 @@ func testStore(t *testing.T) *store.Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
+	// mergeTask обновляет снимок архитектуры в фоне: дождаться обновлений
+	// до закрытия базы (иначе в логах «closed pool»).
+	t.Cleanup(archInflight.Wait)
 	// Тесты механики конвейера закрепляют прежний шаг test без сессии
 	// тестировщика (add-agent-roles: по умолчанию тестировщик включён и
 	// предпочитает другой runner). Тестировщика проверяют отдельные тесты.
@@ -278,7 +358,10 @@ func TestPipelineEndToEnd(t *testing.T) {
 	if got := taskStatus(t, st, taskA.ID); got != domain.TaskTesting {
 		t.Fatalf("want testing, got %s", got)
 	}
-	if as := out.lastAssign(t); as.Stage != pb.StageResult_TESTING || len(as.Checks) != 1 {
+	// Проверка проекта плюс «Архитектура»: снимка у проекта ещё нет, а
+	// проверку не добавляют только при снимке absent (add-architecture-c4).
+	if as := out.lastAssign(t); as.Stage != pb.StageResult_TESTING || len(as.Checks) != 2 ||
+		as.Checks[0].Name != "tests" || as.Checks[1].Name != "Архитектура" {
 		t.Fatalf("ожидали TESTING с checks, got %v", as)
 	}
 

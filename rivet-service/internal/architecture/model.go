@@ -29,6 +29,8 @@ type Model struct {
 	docs       map[string]*Doc     // по идентификатору viewpoint'а
 	processes  map[string]*Process // по идентификатору элемента process
 	records    map[string]*Record  // все записи по id, первая при дублях
+	scenarios  []*Scenario         // по идентификатору
+	decisions  []*Decision         // по номеру
 }
 
 // Doc — документ viewpoint'а.
@@ -108,10 +110,26 @@ func (m *Model) index() {
 	}
 }
 
-// load разбирает описание: манифест, viewpoint'ы, документы и файлы
-// процессов. Семантику проверяет check. nil без ошибки означает, что
-// описание дальше манифеста не разбирается, причина — в reporter.
+// ErrLimit — описание превышает лимит чтения снимка: частичный снимок ввёл
+// бы в заблуждение, поэтому чтение прерывается.
+var ErrLimit = errors.New("описание превышает лимит чтения")
+
+// loadOptions — ограничения чтения описания. Нулевое значение — без
+// ограничений.
+type loadOptions struct {
+	maxScenarios int
+	maxDecisions int
+}
+
+// load разбирает описание: манифест, viewpoint'ы, документы, файлы
+// процессов, сценарии и решения по индексу манифеста. Семантику проверяет
+// check. nil без ошибки означает, что описание дальше манифеста не
+// разбирается, причина — в reporter.
 func load(fsys fs.FS, r *reporter) (*Model, error) {
+	return loadWith(fsys, r, loadOptions{})
+}
+
+func loadWith(fsys fs.FS, r *reporter, opt loadOptions) (*Model, error) {
 	raw, err := fs.ReadFile(fsys, ManifestFile)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, ErrAbsent
@@ -135,9 +153,19 @@ func load(fsys fs.FS, r *reporter) (*Model, error) {
 	reportSchema(r, manifestSchema, v, func(p []string) (string, string) { return ManifestFile, formatPointer(p) })
 	m := &Model{docs: map[string]*Doc{}, processes: map[string]*Process{}}
 	decodeValue(v, &m.Manifest)
+	if opt.maxScenarios > 0 && len(m.Manifest.Scenarios) > opt.maxScenarios {
+		return nil, fmt.Errorf("%w: в индексе %d сценариев, допустимо не больше %d", ErrLimit, len(m.Manifest.Scenarios), opt.maxScenarios)
+	}
+	if opt.maxDecisions > 0 && len(m.Manifest.Decisions) > opt.maxDecisions {
+		return nil, fmt.Errorf("%w: в индексе %d решений, допустимо не больше %d", ErrLimit, len(m.Manifest.Decisions), opt.maxDecisions)
+	}
 
 	m.viewpoints = BuiltinViewpoints()
-	for _, c := range loadCustomViewpoints(fsys, m.Manifest.Viewpoints, r) {
+	custom, err := loadCustomViewpoints(fsys, m.Manifest.Viewpoints, r)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range custom {
 		m.viewpoints = append(m.viewpoints, c)
 	}
 	for _, vp := range m.viewpoints {
@@ -162,11 +190,20 @@ func load(fsys fs.FS, r *reporter) (*Model, error) {
 		}
 		m.processes[rec.ID] = newProcess(rec.ID, file, raw)
 	}
+	if m.scenarios, err = loadScenarios(fsys, m.Manifest.Scenarios, "", ManifestFile, "/scenarios", r); err != nil {
+		return nil, err
+	}
+	if m.decisions, err = loadDecisions(fsys, m.Manifest.Decisions, "", ManifestFile, "/decisions", r); err != nil {
+		return nil, err
+	}
 	m.reportUnreferenced(fsys, r)
 	return m, nil
 }
 
-func loadCustomViewpoints(fsys fs.FS, ids []string, r *reporter) []*customViewpoint {
+// loadCustomViewpoints читает определения собственных viewpoint'ов.
+// Отсутствие файла — дефект описания, другие ошибки чтения (сбой хостинга
+// при чтении по API) возвращаются вызывающему, а не превращаются в дефект.
+func loadCustomViewpoints(fsys fs.FS, ids []string, r *reporter) ([]*customViewpoint, error) {
 	var out []*customViewpoint
 	seen := map[string]bool{}
 	for i, id := range ids {
@@ -174,6 +211,10 @@ func loadCustomViewpoints(fsys fs.FS, ids []string, r *reporter) []*customViewpo
 		switch {
 		case isBuiltin(id):
 			r.errorf("viewpoint.builtin-conflict", ManifestFile, loc, "viewpoint %s совпадает со встроенным", id)
+			continue
+		case isReservedViewName(id):
+			r.errorf("viewpoint.builtin-conflict", ManifestFile, loc,
+				"имя viewpoint'а %s занято представлением Rivet (views/README.md, views/hld.md, views/adr.md)", id)
 			continue
 		case seen[id]:
 			r.errorf("viewpoint.duplicate", ManifestFile, loc, "viewpoint %s объявлен повторно", id)
@@ -185,9 +226,12 @@ func loadCustomViewpoints(fsys fs.FS, ids []string, r *reporter) []*customViewpo
 		seen[id] = true
 		file := ViewpointsDir + "/" + id + ".yaml"
 		raw, err := fs.ReadFile(fsys, file)
-		if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
 			r.errorf("viewpoint.missing", ManifestFile, loc, "нет файла %s с определением viewpoint'а", file)
 			continue
+		}
+		if err != nil {
+			return nil, err
 		}
 		_, v, err := parseYAML(raw)
 		if err != nil {
@@ -241,7 +285,7 @@ func loadCustomViewpoints(fsys fs.FS, ids []string, r *reporter) []*customViewpo
 		}
 		out = append(out, c)
 	}
-	return out
+	return out, nil
 }
 
 func readDoc(fsys fs.FS, vp Viewpoint, r *reporter) (*Doc, error) {
@@ -341,6 +385,17 @@ func elementFrom(v map[string]any) *Element {
 	if p, ok := v["props"].(map[string]any); ok && len(p) > 0 {
 		e.Props = p
 	}
+	if attrs, ok := v["attributes"].([]any); ok {
+		for _, x := range attrs {
+			obj, ok := x.(map[string]any)
+			if !ok {
+				continue
+			}
+			var a Attribute
+			decodeValue(obj, &a)
+			e.Attributes = append(e.Attributes, a)
+		}
+	}
 	rels, _ := v["relations"].([]any)
 	for _, x := range rels {
 		obj, ok := x.(map[string]any)
@@ -351,6 +406,8 @@ func elementFrom(v map[string]any) *Element {
 		rel.Type, _ = obj["type"].(string)
 		rel.To, _ = obj["to"].(string)
 		rel.Mode, _ = obj["mode"].(string)
+		rel.Cardinality, _ = obj["cardinality"].(string)
+		rel.Label, _ = obj["label"].(string)
 		e.Relations = append(e.Relations, rel)
 	}
 	return e
@@ -382,6 +439,33 @@ func (m *Model) reportUnreferenced(fsys fs.FS, r *reporter) {
 	for _, rec := range m.records {
 		if rec.Element != nil && rec.Element.Type == TypeProcess {
 			known[processFile(rec.ID)] = true
+		}
+	}
+	for _, id := range m.Manifest.Scenarios {
+		known[scenarioFile("", id)] = true
+	}
+	for _, name := range m.Manifest.Decisions {
+		known[adrFile("", name)] = true
+	}
+	// Сценарии и решения читаются только по индексу: файл вне индекса
+	// снимок не увидит, поэтому о нём предупреждаем отдельным правилом.
+	for _, dir := range []struct{ name, ext, rule, msg string }{
+		{ScenariosDir, ".yaml", "scenario.unreferenced", "сценарий не указан в индексе scenarios манифеста и не читается"},
+		{ADRDir, ".md", "adr.unreferenced", "решение не указано в индексе decisions манифеста и не читается"},
+	} {
+		entries, err := fs.ReadDir(fsys, dir.name)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || strings.HasPrefix(name, ".") {
+				continue
+			}
+			file := path.Join(dir.name, name)
+			if !known[file] {
+				r.warnf(dir.rule, file, "", "%s", dir.msg)
+			}
 		}
 	}
 	for _, dir := range []struct{ name, ext string }{{ModelDir, ".yaml"}, {ProcessesDir, ".bpmn"}, {ViewpointsDir, ".yaml"}} {
@@ -441,6 +525,10 @@ func (m *Model) check(r *reporter, opt checkOptions) {
 	for _, vp := range m.viewpoints {
 		vp.check(m, m.docs[vp.ID()], r, opt)
 	}
+	m.checkC4(r)
+	m.checkERD(r, opt)
+	m.checkScenarios(r, opt)
+	m.checkDecisions(r, opt)
 }
 
 func (m *Model) checkRelation(rec *Record, rel Relation, r *reporter, opt checkOptions) {
@@ -502,7 +590,7 @@ func Validate(fsys fs.FS) (Defects, error) {
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() && name != path.Base(ArchiveDir) && !strings.HasPrefix(name, ".") && !ValidChangeID(name) {
-			r.errorf("change.id", ChangesDir+"/"+name, "", "имя каталога изменения не подходит под шаблон %s", changeIDPattern)
+			r.errorf("change.id", ChangesDir+"/"+name, "", "имя каталога изменения не годится: %s", ChangeIDProblem(name))
 		}
 	}
 	return r.result(), nil

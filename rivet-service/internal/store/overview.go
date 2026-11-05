@@ -132,7 +132,7 @@ func overviewEpics(ctx context.Context, tx pgx.Tx, in *overview.Input, q Overvie
 		                (SELECT min(t.created_at) FROM tasks t WHERE t.epic_id = e.id)),
 		       e.started_at, e.done_at, e.due_at, e.token_budget,
 		       COALESCE(u.records, 0), COALESCE(u.cost_records, 0), COALESCE(u.tin, 0), COALESCE(u.tout, 0),
-		       COALESCE(u.cost, 0), COALESCE(u.dur, 0), COALESCE(u.tokens, 0)
+		       COALESCE(u.cost, 0), COALESCE(u.dur, 0), COALESCE(u.tokens, 0), e.kind
 		FROM epics e
 		LEFT JOIN LATERAL (
 			SELECT count(*) AS records, count(*) FILTER (WHERE `+costKnownSQL("")+`) AS cost_records,
@@ -152,7 +152,7 @@ func overviewEpics(ctx context.Context, tx pgx.Tx, in *overview.Input, q Overvie
 		var used int64
 		if err := rows.Scan(&e.ID, &e.Title, &e.Status, &e.CreatedAt, &e.PlannedAt, &e.StartedAt, &e.DoneAt,
 			&e.DueAt, &e.TokenBudget, &e.Spend.Records, &e.Spend.CostRecords, &e.Spend.TokensIn,
-			&e.Spend.TokensOut, &e.Spend.CostUSD, &e.Spend.DurationS, &used); err != nil {
+			&e.Spend.TokensOut, &e.Spend.CostUSD, &e.Spend.DurationS, &used, &e.Kind); err != nil {
 			return err
 		}
 		// Остановка по бюджету — то же правило, что у планировщика

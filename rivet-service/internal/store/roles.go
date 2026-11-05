@@ -137,7 +137,7 @@ func validateRole(in RoleInput) error {
 		return &FieldError{Field: "color", Msg: "цвет из палитры: " + strings.Join(domain.RoleColors, ", ")}
 	}
 	if !containsStr(domain.RoleCapabilities, in.Capability) {
-		return &FieldError{Field: "capability", Msg: "capability: coding, review, explore или пусто для роли control plane"}
+		return &FieldError{Field: "capability", Msg: "capability: coding, review, explore, architecture или пусто для роли control plane"}
 	}
 	// Тимлид и Аналитик работают на control plane (запрос к модели): runner'у
 	// им нечего делать. Остальным встроенным ролям без capability не найти
@@ -147,7 +147,7 @@ func validateRole(in RoleInput) error {
 		return &FieldError{Field: "capability", Msg: "роль выполняет control plane: capability не задаётся"}
 	}
 	if !cp && in.Capability == "" && isBuiltinRunnerRole(in.ID) {
-		return &FieldError{Field: "capability", Msg: "укажите capability: coding, review или explore"}
+		return &FieldError{Field: "capability", Msg: "укажите capability: coding, review, explore или architecture"}
 	}
 	if in.Capability == "" && in.Agent != "" {
 		return &FieldError{Field: "agent", Msg: "роль control plane не запускает агента на runner'е: профиль не задаётся"}

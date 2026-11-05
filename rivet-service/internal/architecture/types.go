@@ -3,6 +3,7 @@ package architecture
 import (
 	"regexp"
 	"slices"
+	"strings"
 )
 
 // Format — поддерживаемая версия формата описания.
@@ -16,6 +17,8 @@ const (
 	ProcessesDir  = "processes"
 	ViewpointsDir = "viewpoints"
 	ViewsDir      = "views"
+	ScenariosDir  = "scenarios"
+	ADRDir        = "adr"
 	ChangesDir    = "changes"
 	ArchiveDir    = "changes/archive"
 )
@@ -23,20 +26,41 @@ const (
 // DefaultDir — каталог описания относительно корня репозитория.
 const DefaultDir = "docs/architecture"
 
-// Manifest — манифест описания: версия формата, система, принципы (фаза
-// Preliminary) и собственные viewpoint'ы проекта.
+// Manifest — манифест описания: версия формата, система и её назначение,
+// принципы (фаза Preliminary) и собственные viewpoint'ы проекта.
 type Manifest struct {
-	Format     string      `json:"format"`
-	System     string      `json:"system"`
-	Principles []Principle `json:"principles,omitempty"`
-	Viewpoints []string    `json:"viewpoints,omitempty"`
+	Format string `json:"format"`
+	System string `json:"system"`
+	// Description — назначение описываемой системы: текст HLD и описание
+	// системы на схеме контекста C4.
+	Description string      `json:"description,omitempty"`
+	Principles  []Principle `json:"principles,omitempty"`
+	Viewpoints  []string    `json:"viewpoints,omitempty"`
+	// Scenarios — индекс сценариев взаимодействия: идентификаторы файлов
+	// scenarios/<id>.yaml. Описание читает только перечисленные.
+	Scenarios []string `json:"scenarios,omitempty"`
+	// Decisions — индекс архитектурных решений: имена файлов adr/<имя>.md
+	// без расширения, вида NNNN-<slug>.
+	Decisions []string `json:"decisions,omitempty"`
 }
+
+// Зарезервированные свойства элемента (props), которые уточняют вывод C4
+// из модели. Остальные свойства остаются свободными.
+const (
+	// PropC4 — вид элемента в C4: person, system, container, database,
+	// queue, component или none.
+	PropC4 = "c4"
+	// PropTechnology — строка технологии на C4-схемах.
+	PropTechnology = "technology"
+	// PropExternal — внешний человек или внешняя система (логическое).
+	PropExternal = "external"
+)
 
 // Principle — принцип архитектуры проекта.
 type Principle struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
-	Rationale string `json:"rationale,omitempty"`
+	Rationale string `json:"rationale"`
 }
 
 // Element — элемент модели. Связи хранятся у источника, поэтому запись
@@ -47,14 +71,19 @@ type Element struct {
 	Name        string         `json:"name"`
 	Description string         `json:"description,omitempty"`
 	Props       map[string]any `json:"props,omitempty"`
-	Relations   []Relation     `json:"relations,omitempty"`
+	// Attributes — атрибуты объекта данных для ERD (только data-object).
+	Attributes []Attribute `json:"attributes,omitempty"`
+	Relations  []Relation  `json:"relations,omitempty"`
 }
 
-// Relation — исходящая связь элемента.
+// Relation — исходящая связь элемента. Cardinality и Label задаются только
+// у association между объектами данных: они нужны ERD.
 type Relation struct {
-	Type string `json:"type"`
-	To   string `json:"to"`
-	Mode string `json:"mode,omitempty"`
+	Type        string `json:"type"`
+	To          string `json:"to"`
+	Mode        string `json:"mode,omitempty"`
+	Cardinality string `json:"cardinality,omitempty"`
+	Label       string `json:"label,omitempty"`
 }
 
 // Gap — разрыв между текущим и целевым состоянием.
@@ -65,6 +94,8 @@ type Gap struct {
 	Description string   `json:"description"`
 	Elements    []string `json:"elements,omitempty"`
 	Processes   []string `json:"processes,omitempty"`
+	// Scenarios — целевые сценарии изменения, которые покрывает разрыв.
+	Scenarios []string `json:"scenarios,omitempty"`
 }
 
 // ChangeInfo — паспорт изменения из change.yaml.
@@ -72,6 +103,10 @@ type ChangeInfo struct {
 	ID    string `json:"id"`
 	Title string `json:"title"`
 	Epic  string `json:"epic,omitempty"`
+	// Scenarios — целевые сценарии изменения: changes/<id>/scenarios/<sid>.yaml.
+	Scenarios []string `json:"scenarios,omitempty"`
+	// Decisions — новые решения изменения: changes/<id>/adr/<имя>.md.
+	Decisions []string `json:"decisions,omitempty"`
 }
 
 // idPattern — шаблон идентификаторов элементов, записей собственных
@@ -83,8 +118,36 @@ var idPattern = regexp.MustCompile(`^[a-z][a-z0-9-]*(\.[a-z0-9-]+)+$`)
 // поэтому без точек и слэшей.
 var changeIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
+// changeC4Suffix и changeScenariosSuffix — суффиксы файлов целевых C4-схем
+// и сценариев изменения (views/changes/<id>-c4.md, <id>-scenarios.md).
+// Изменение с таким суффиксом в id заняло бы имя файла другого изменения,
+// поэтому такой id запрещён.
+const (
+	changeC4Suffix        = "-c4"
+	changeScenariosSuffix = "-scenarios"
+)
+
 // ValidChangeID сообщает, годится ли строка как идентификатор изменения.
-func ValidChangeID(id string) bool { return changeIDPattern.MatchString(id) }
+func ValidChangeID(id string) bool {
+	return ChangeIDProblem(id) == ""
+}
+
+// ChangeIDProblem — почему идентификатор изменения не годится: текст для
+// человека, его выводят и проверка, и CLI. Для годного id — пустая строка.
+func ChangeIDProblem(id string) string {
+	switch {
+	case !changeIDPattern.MatchString(id):
+		return "идентификатор изменения: только строчные латинские буквы, цифры и дефис, первый символ буква или цифра (шаблон " +
+			changeIDPattern.String() + ")"
+	case strings.HasSuffix(id, changeC4Suffix):
+		return "идентификатор изменения не может оканчиваться на " + changeC4Suffix +
+			": это имя занимает файл целевых C4-схем views/changes/<id>-c4.md"
+	case strings.HasSuffix(id, changeScenariosSuffix):
+		return "идентификатор изменения не может оканчиваться на " + changeScenariosSuffix +
+			": это имя занимает файл целевых сценариев views/changes/<id>-scenarios.md"
+	}
+	return ""
+}
 
 // Слои модели. Идентификатор слоя совпадает с идентификатором встроенного
 // viewpoint'а и именем файла model/<id>.yaml.

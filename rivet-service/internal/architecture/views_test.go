@@ -36,8 +36,11 @@ func TestViewsDeterministic(t *testing.T) {
 			t.Fatal("представления отличаются между запусками")
 		}
 	}
-	want := []string{"views/README.md", "views/application.md", "views/business.md", "views/changes/refunds.md",
-		"views/data.md", "views/processes/biz.checkout.md", "views/processes/biz.delivery.md", "views/security.md",
+	want := []string{"views/README.md", "views/application.md", "views/business.md",
+		"views/c4/container/system.md", "views/c4/context.md", "views/c4/deployment.md", "views/c4/workspace.dsl",
+		"views/changes/refunds-c4.md", "views/changes/refunds.md",
+		"views/data.md", "views/erd/all.md", "views/erd/tech.postgres.md",
+		"views/hld.md", "views/processes/biz.checkout.md", "views/processes/biz.delivery.md", "views/security.md",
 		"views/technology.md"}
 	if got := sortedKeys(first); !reflect.DeepEqual(got, want) {
 		t.Errorf("файлы %v", got)
@@ -54,7 +57,7 @@ func TestViewsLayer(t *testing.T) {
 	for _, s := range []string{
 		"```mermaid\nflowchart LR\n",
 		`subgraph n_type_component["Компоненты"]`,
-		`n_app_web_ui["Веб-интерфейс #quot;Витрина#quot; #lt;beta#gt;"]`,
+		`n_app_web_ui["Веб-интерфейс #quot;Витрина#quot; ‹beta›"]`,
 		`n_app_orders -->|"access: write"| n_data_order`,
 		"| `app.orders` | component | Сервис заказов |  |",
 	} {
@@ -168,7 +171,7 @@ func TestDemoteHeadings(t *testing.T) {
 }
 
 func TestMermaidLabelEscaping(t *testing.T) {
-	if got := mlabel("A | \"B\" <c>\n d"); got != `"A #124; #quot;B#quot; #lt;c#gt; d"` {
+	if got := mlabel("A | \"B\" <c>\n d"); got != `"A #124; #quot;B#quot; ‹c› d"` {
 		t.Errorf("подпись %s", got)
 	}
 	if got := mlabel(""); got != `" "` {

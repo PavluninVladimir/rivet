@@ -1,0 +1,16 @@
+id: sc.build-trigger
+title: Запуск сборки по push
+description: GitHub сообщает о push, API ставит сборку в очередь, воркер её забирает.
+participants: [app.github, app.api, tech.postgres, tech.nats, app.worker]
+steps:
+  - {from: app.github, to: app.api, message: "POST /webhooks/push", kind: async}
+  - alt:
+      - when: подпись вебхука неверна
+        steps:
+          - {from: app.api, to: app.github, message: "401", kind: return}
+      - when: иначе
+        steps:
+          - {from: app.api, to: tech.postgres, message: запись сборки со статусом queued, kind: sync}
+          - {from: app.api, to: tech.nats, message: задание сборки, kind: async}
+          - {from: app.api, to: app.github, message: "202", kind: return}
+  - {from: tech.nats, to: app.worker, message: доставка задания, kind: async}
