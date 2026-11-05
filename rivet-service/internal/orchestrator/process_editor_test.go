@@ -7,6 +7,7 @@ import (
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/policy"
+	"github.com/PavluninVladimir/rivet/internal/store"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
@@ -25,8 +26,8 @@ func TestPromptStepVerdicts(t *testing.T) {
 	ctx := context.Background()
 	f := newPolicyFixture(t, "diff --git a/x b/x\n")
 	// Runner'ы стенда объявляют PROMPT.
-	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}, Stages: []string{"CODING", "TESTING", "REVIEW", "FIXING", "PROMPT"}})
-	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: "wrap", Capabilities: []string{"coding", "review"}, Stages: []string{"CODING", "TESTING", "REVIEW", "FIXING", "PROMPT"}})
+	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}, Stages: []string{"CODING", "TESTING", "REVIEW", "FIXING", "PROMPT"}})
+	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: store.AgentRivet, Capabilities: []string{"coding", "review"}, Stages: []string{"CODING", "TESTING", "REVIEW", "FIXING", "PROMPT"}})
 	setProcess(t, f, withPromptAfterReview())
 	driveToReview(t, f)
 	if err := f.e.Tick(ctx); err != nil {
@@ -106,7 +107,7 @@ func TestPromptWaitsForCapableRunner(t *testing.T) {
 	if task.Status != domain.TaskReady || !strings.Contains(task.WaitReason, "PROMPT") {
 		t.Fatalf("ожидание runner'а со стадией PROMPT: %s %q", task.Status, task.WaitReason)
 	}
-	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}, Stages: []string{"CODING", "TESTING", "REVIEW", "FIXING", "PROMPT"}})
+	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}, Stages: []string{"CODING", "TESTING", "REVIEW", "FIXING", "PROMPT"}})
 	if err := f.e.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}

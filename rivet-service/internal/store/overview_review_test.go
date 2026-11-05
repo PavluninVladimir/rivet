@@ -128,7 +128,7 @@ func TestUndoAssignAndDeferSeries(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	tasks := runningEpic(t, s, 1)
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "claude-code", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	enterCode(t, s, tasks, nil)
@@ -200,7 +200,7 @@ func TestDeferSeriesIgnoresOldEvents(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	tasks := runningEpic(t, s, 1)
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "claude-code", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	enterCode(t, s, tasks, nil)

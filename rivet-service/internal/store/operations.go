@@ -136,7 +136,7 @@ func (s *Store) RegisterRunner(ctx context.Context, r domain.Runner, token domai
 		if err := adoptRunnerProfile(ctx, tx, r.ID, r.Agent); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE runners SET boot_id=$2 WHERE id=$1`, r.ID, r.BootID); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE runners SET boot_id=$2, network_isolated=$3, retired=false WHERE id=$1`, r.ID, r.BootID, r.NetworkIsolated); err != nil {
 			return err
 		}
 		var catalog bool

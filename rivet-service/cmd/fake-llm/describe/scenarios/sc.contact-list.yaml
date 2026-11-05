@@ -1,0 +1,14 @@
+id: sc.contact-list
+title: Просмотр списка контактов
+description: Список грузится страницами по 50 контактов, следующая страница по кнопке «Показать ещё».
+participants: [biz.manager, app.web, app.api-routes, app.api-storage]
+steps:
+  - {from: biz.manager, to: app.web, message: открывает CRM, kind: sync}
+  - {from: app.web, to: app.api-routes, message: "GET /api/contacts?page=1&limit=50", kind: sync}
+  - {from: app.api-routes, to: app.api-storage, message: list, kind: sync}
+  - {from: app.api-routes, to: app.web, message: "200 items, total, hasMore", kind: return}
+  - loop:
+      when: пока hasMore и нажато «Показать ещё»
+      steps:
+        - {from: app.web, to: app.api-routes, message: "GET /api/contacts?page=N", kind: sync}
+        - {from: app.api-routes, to: app.web, message: следующая страница, kind: return}

@@ -93,6 +93,16 @@ func scanRun(row pgx.Row) (StepRun, error) {
 // получают.
 const agentRunsOnly = `r.user_login = '' AND r.user_role = ''`
 
+// agentRunner — runner может вести агентскую стадию (CODING, TESTING,
+// REVIEW, FIXING, PROMPT): у него есть агент и он не снят с работы.
+// Runner выкатки без агента исполняет только публикации (add-native-agent,
+// задача 1.12.2): иначе шаг без роли и capabilities подошёл бы ему по
+// пустому набору capabilities. Снятый миграцией runner уходит в offline
+// на первом тике watchdog'а и до этого стадий не получает.
+func agentRunner(alias string) string {
+	return alias + ".agent <> '' AND NOT " + alias + ".retired"
+}
+
 // StepStatus — статус задачи как проекция типа шага и входа на него
 // (спека process «Версия процесса на задаче»): code с начала — running
 // (coding), code по changes — fixing, test — testing, review и merge — review.
@@ -360,9 +370,22 @@ func cancelOpenRuns(ctx context.Context, tx pgx.Tx, taskID string) error {
 	return err
 }
 
+// RunsCancelledByStep — итог сессии, прерванной исходом шага у других
+// участников.
+const RunsCancelledByStep = "прервана: шаг завершён другими участниками"
+
+// RunsCancelledByMerge — итог сессии, прерванной merge задачи: человек
+// подтвердил merge или PR смержили на хостинге, пока шла стадия.
+const RunsCancelledByMerge = "прервана: задача завершена merge"
+
 // CancelOpenRuns — то же вне транзакции; возвращает runner'ы идущих
 // запусков, которым нужно послать отмену, и освобождает их.
 func (s *Store) CancelOpenRuns(ctx context.Context, taskID string, except int64) ([]StepRun, error) {
+	return s.CancelOpenRunsOutcome(ctx, taskID, except, RunsCancelledByStep)
+}
+
+// CancelOpenRunsOutcome — CancelOpenRuns с итогом закрытых сессий outcome.
+func (s *Store) CancelOpenRunsOutcome(ctx context.Context, taskID string, except int64, outcome string) ([]StepRun, error) {
 	var open []StepRun
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT `+runCols+` FROM task_step_runs r
@@ -387,8 +410,8 @@ func (s *Store) CancelOpenRuns(ctx context.Context, taskID string, except int64)
 			}
 			if r.SessionID != "" {
 				if _, err := tx.Exec(ctx, `
-					UPDATE sessions SET ended_at=now(), outcome='прервана: шаг завершён другими участниками'
-					WHERE id=$1 AND ended_at IS NULL`, r.SessionID); err != nil {
+					UPDATE sessions SET ended_at=now(), outcome=$2
+					WHERE id=$1 AND ended_at IS NULL`, r.SessionID, outcome); err != nil {
 					return err
 				}
 			}
@@ -613,7 +636,7 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 				LEFT JOIN team_agents ag ON r.role <> '' AND ag.role_id = r.role AND ag.enabled
 					AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)
 					AND (ag.model = '' OR ag.model = ANY(x.models) OR x.model = ag.model)
-				WHERE x.status = 'idle' AND NOT x.draining AND x.task_id IS NULL AND x.id <> ALL($3::text[])
+				WHERE x.status = 'idle' AND NOT x.draining AND x.task_id IS NULL AND x.id <> ALL($3::text[]) AND `+agentRunner("x")+`
 				  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)
 				  AND (r.agent_kind = '' OR x.agent = r.agent_kind)
 				  -- профиль: агента команды, иначе шаблона (если задан); профиль
@@ -781,7 +804,7 @@ func (s *Store) WaitingRuns(ctx context.Context) ([]StepRun, error) {
 		  AND (r.role = '' OR NOT EXISTS (SELECT 1 FROM team_agents ta WHERE ta.role_id = r.role AND ta.enabled))
 		  AND NOT EXISTS (
 			SELECT 1 FROM runners x
-			WHERE x.status <> 'offline' AND NOT x.draining
+			WHERE x.status <> 'offline' AND NOT x.draining AND `+agentRunner("x")+`
 			  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)
 			  AND (r.agent_kind = '' OR x.agent = r.agent_kind)
 			  AND (r.role_agent = '' OR x.agent = r.role_agent)

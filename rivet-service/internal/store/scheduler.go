@@ -272,7 +272,7 @@ func (s *Store) AssignNext(ctx context.Context, excludedProjects, excludedEpics 
 				AND e.id <> ALL($2::uuid[])
 			JOIN LATERAL (
 				SELECT r.id FROM runners r
-				WHERE r.status = 'idle' AND NOT r.draining AND r.capabilities @> t.capabilities
+				WHERE r.status = 'idle' AND NOT r.draining AND r.capabilities @> t.capabilities AND `+agentRunner("r")+`
 				-- беречь специалистов: из подходящих берём наименее «богатого» по capabilities
 				ORDER BY cardinality(r.capabilities), r.last_seen DESC
 				FOR UPDATE OF r SKIP LOCKED

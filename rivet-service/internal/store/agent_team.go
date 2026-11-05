@@ -153,6 +153,11 @@ func checkAgentModel(ctx context.Context, tx pgx.Tx, agent, connID, model, field
 		if err != nil {
 			return err
 		}
+		// Модели агента Rivet — вычисляемые (каталог подключений), в строке
+		// профиля их нет.
+		if err := fillCatalogModels(ctx, tx, &a); err != nil {
+			return err
+		}
 		if !a.Enabled {
 			return &FieldError{Field: field, Msg: "профиль агента " + agent + " отключён"}
 		}
@@ -441,7 +446,7 @@ func (s *Store) WaitingTeamRuns(ctx context.Context, excludedProjects, excludedE
 		  -- ни одному свободному агенту роли не подходит ни один подключённый
 		  -- runner (занятый подходящий runner — обычное ожидание без причины)
 		  AND NOT EXISTS (
-			SELECT 1 FROM team_agents ag JOIN runners x ON x.status <> 'offline' AND NOT x.draining
+			SELECT 1 FROM team_agents ag JOIN runners x ON x.status <> 'offline' AND NOT x.draining AND `+agentRunner("x")+`
 			WHERE ag.role_id = r.role AND ag.enabled
 			  AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)
 			  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)

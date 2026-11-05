@@ -1,0 +1,13 @@
+format: rivet.architecture/v1
+system: CRM
+description: Учёт клиентов и контактов для небольшого отдела продаж. Один процесс Node.js раздаёт веб-клиент и JSON API, данные лежат в JSON-файле.
+principles:
+  - id: p.no-deps
+    title: Без внешних зависимостей
+    rationale: Только встроенные модули Node.js, установка и запуск одной командой
+scenarios:
+  - sc.contact-create
+  - sc.contact-list
+decisions:
+  - 0001-json-storage
+  - 0002-node-no-deps

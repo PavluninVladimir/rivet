@@ -6,57 +6,45 @@ import (
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
-// Адаптеры подключения агента (спека agent-integration «Официальные
-// адаптеры»): универсальная PTY-обёртка (минимальная глубина) и нативный
-// адаптер Claude Code (полная глубина). Выбор — флагом -adapter; шов для
-// будущих адаптеров других агентов.
+// Подключение агента (add-native-agent, design решение 1): в продукте один
+// адаптер — native, агентский цикл Rivet. Сторонние CLI-агенты (Claude
+// Code, Codex, OpenCode), PTY-обёртка и внешние адаптеры удалены.
 
-const (
-	AdapterWrap       = "wrap"
-	AdapterClaudeCode = "claude-code"
-	// AdapterExternal — адаптер-процесс по публичному контракту
-	// (пакет pkg/adapter): его пишет и запускает сам пользователь.
-	AdapterExternal = "external"
-)
+// AdapterNative — агентский цикл Rivet: runner сам ведёт диалог с моделью
+// провайдера, внешних программ нет.
+const AdapterNative = "native"
 
-// DefaultAgentCmd — команда обёртки по умолчанию (флаг -cmd); её
-// переопределение переводит выбор адаптера по умолчанию на обёртку.
-const DefaultAgentCmd = `claude -p "$(cat "$RIVET_PROMPT_FILE")" --dangerously-skip-permissions`
+// AgentRivet — агент Rivet; единственный агент runner'а (runner выкатки
+// регистрируется без агента).
+const AgentRivet = "rivet"
 
-// DefaultAdapter — выбор адаптера, когда флаг -adapter не задан: нативный
-// Claude Code для агента claude-code с командой по умолчанию, иначе
-// обёртка (существующие стенды с RIVET_AGENT_CMD продолжают работать).
-func DefaultAdapter(agent, agentCmd string) string {
-	if agent == AdapterClaudeCode && agentCmd == DefaultAgentCmd {
-		return AdapterClaudeCode
-	}
-	return AdapterWrap
-}
-
-// agentRun — итог запуска агента.
+// agentRun — итог одного запуска агента.
 type agentRun struct {
-	// FinalText — текст, по которому стадия разбирает маркеры
-	// (BLOCKED:, VERDICT:): у обёртки — весь вывод, у нативного
-	// адаптера — финальный текст результата.
+	// FinalText — текст, по которому стадия разбирает маркеры (BLOCKED:,
+	// VERDICT:): итог finish или ask_human.
 	FinalText string
 	// Usage — расход запуска; nil-поля = данных нет.
 	Usage usageReport
 	// Model — модель фактического запуска; пусто — из конфигурации runner'а.
 	Model string
-	// isError — агент сообщил об ошибке запуска в машиночитаемом итоге.
+	// isError — агент сообщил об ошибке запуска.
 	isError bool
 }
 
-// runSink — потоки запуска: чанки транскрипта и структурированные шаги.
-// step получает событие без task_id/session_id — их заполняет стадия.
+// runSink — куда адаптер отдаёт данные запуска.
 type runSink struct {
+	// transcript — сырой поток вывода агента (транскрипт сессии).
 	transcript func([]byte)
-	step       func(ev *pb.AgentEvent)
-	// session — сессия стадии: под ней адаптер с обратным каналом
-	// регистрирует в contexts очередь контекста на время запуска
-	// (спека agent-integration «Обратный канал контекста»).
+	// step — структурированные шаги сессии (вызовы инструментов).
+	step func(ev *pb.AgentEvent)
+	// session и contexts — обратный канал контекста: адаптер забирает
+	// сообщения Rivet по своей сессии (спека agent-integration «Обратный
+	// канал контекста»).
 	session  string
 	contexts *contextHub
+	// stage — стадия запуска: native-адаптер по ней решает, считать ли
+	// вердикт fail ошибкой запуска (реализация) или маркером (review, prompt).
+	stage pb.StageResult_Stage
 }
 
 // adapter выполняет один запуск агента в каталоге рабочей копии.
@@ -64,85 +52,27 @@ type adapter interface {
 	Run(ctx context.Context, dir, prompt string, sink runSink) (agentRun, error)
 }
 
-// contextChannel — поддерживает ли адаптер runner'а обратный канал
-// контекста: нативный доводит контекст до агента хуком, обёртка ничем не
-// может (режим «только отправка»), внешний — как объявлено при запуске.
-func (c Config) contextChannel() bool {
-	if c.Adapter == AdapterExternal {
-		return c.AdapterContext
-	}
-	return c.Adapter == AdapterClaudeCode
-}
+// contextChannel — агент Rivet принимает контекст от Rivet следующим ходом.
+func (c Config) contextChannel() bool { return c.Adapter == AdapterNative }
 
-// depth — глубина данных адаптера (объявляется при регистрации, спека
-// agent-integration «Уровни глубины данных»). У внешнего адаптера её
-// задаёт запуск runner'а: сам адаптер о себе не отчитывается, а по
-// умолчанию честнее занизить.
+// depth — глубина данных: у агента Rivet полная (шаги инструментов, usage,
+// транскрипт), у runner'а выкатки без агента — минимальная.
 func (c Config) depth() string {
-	switch c.Adapter {
-	case AdapterClaudeCode:
+	if c.Adapter == AdapterNative {
 		return "full"
-	case AdapterExternal:
-		switch c.AdapterDepth {
-		case "full", "partial", "minimal":
-			return c.AdapterDepth
-		}
-		return "minimal"
 	}
 	return "minimal"
 }
 
-// newAdapter — адаптер по конфигурации.
+// testAdapter — подмена адаптера в тестах пакета (скриптовый агент вместо
+// модели); в продукте nil.
+var testAdapter func(Config) adapter
+
 func newAdapter(cfg Config) adapter {
-	switch cfg.Adapter {
-	case AdapterClaudeCode:
-		return &claudeAdapter{cfg: cfg}
-	case AdapterExternal:
-		return &externalAdapter{cfg: cfg}
+	if testAdapter != nil {
+		if a := testAdapter(cfg); a != nil {
+			return a
+		}
 	}
-	return &wrapAdapter{cfg: cfg}
-}
-
-// wrapAdapter — универсальная CLI-обёртка: команда агента в PTY, разбор
-// маркера USAGE: из вывода (минимальная глубина, поведение до этого change).
-type wrapAdapter struct {
-	cfg Config
-}
-
-func (w *wrapAdapter) Run(ctx context.Context, dir, prompt string, sink runSink) (agentRun, error) {
-	pf, err := promptFile(w.cfg.Workdir, prompt)
-	if err != nil {
-		return agentRun{}, err
-	}
-	defer pf.cleanup()
-	// Модель назначения уходит обёрнутому агенту переменной окружения:
-	// что с ней делать, решает команда агента.
-	env := []string{"RIVET_PROMPT_FILE=" + pf.path}
-	if w.cfg.Model != "" {
-		env = append(env, "RIVET_MODEL="+w.cfg.Model)
-	}
-	// Окружение профиля агента поверх окружения runner'а; аргументы профиля
-	// добавляются к команде обёртки.
-	env = append(env, w.cfg.ExtraEnv...)
-	cmd := w.cfg.AgentCmd
-	for _, arg := range w.cfg.ExtraArgs {
-		cmd += " " + shellQuote(arg)
-	}
-	out, err := runPTY(ctx, dir, cmd, env, sink.transcript)
-	return agentRun{FinalText: out, Usage: parseUsage(out)}, err
-}
-
-type tmpFile struct {
-	path    string
-	cleanup func()
-}
-
-// promptFile кладёт промпт во временный файл: PTY эхоирует stdin в вывод и
-// ломает разбор транскрипта, поэтому промпт передаётся путём в окружении.
-func promptFile(workdir, prompt string) (tmpFile, error) {
-	f, err := createTemp(workdir, "prompt-*.md", prompt)
-	if err != nil {
-		return tmpFile{}, err
-	}
-	return f, nil
+	return &nativeAdapter{cfg: cfg}
 }

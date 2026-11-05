@@ -57,8 +57,8 @@ func TestUndeliveredHeadDoesNotBlockTick(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "dead", Agent: "wrap", Capabilities: []string{"coding", "special"}})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "alive", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "dead", Agent: store.AgentRivet, Capabilities: []string{"coding", "special"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "alive", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
 	if err := st.TransitionEpic(ctx, epic.ID, domain.EpicRunning,
 		store.EventInput{ActorKind: domain.ActorUser, ActorID: "test", Type: "epic.status"}); err != nil {
 		t.Fatal(err)

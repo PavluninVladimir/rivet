@@ -104,7 +104,8 @@ case "$P" in *"[changes]"*) echo "VERDICT: CHANGES: критерий 1 не вы
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Workdir: filepath.Join(tmp, "work"), GitBase: "file://" + tmp + "/repos/", Adapter: AdapterWrap, AgentCmd: "sh " + script}
+	// Проверки идут и без песочницы (macOS): runner как с -unsandboxed.
+	cfg := Config{Workdir: filepath.Join(tmp, "work"), GitBase: "file://" + tmp + "/repos/", Adapter: AdapterWrap, AgentCmd: "sh " + script, Unsandboxed: true}
 	if err := os.MkdirAll(cfg.Workdir, 0o755); err != nil {
 		t.Fatal(err)
 	}

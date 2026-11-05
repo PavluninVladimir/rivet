@@ -9,3 +9,6 @@ data/
 /rivet-android/
 /rivet-ios/
 /rivet-e2e/
+
+# скомпилированный fake-llm (тестовая программа, не продукт)
+/rivet-service/cmd/fake-llm/fake-llm

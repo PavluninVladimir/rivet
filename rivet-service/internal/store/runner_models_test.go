@@ -13,10 +13,10 @@ import (
 func TestRunnerModels(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "multi", Agent: "claude-code", Model: "opus", Models: []string{"opus", "sonnet"}, Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "multi", Agent: AgentRivet, Model: "opus", Models: []string{"opus", "sonnet"}, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "single", Agent: "codex", Model: "gpt-5", Capabilities: []string{"review"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "single", Agent: AgentRivet, Model: "gpt-5", Capabilities: []string{"review"}}); err != nil {
 		t.Fatal(err)
 	}
 	multi, err := s.GetRunner(ctx, "multi")

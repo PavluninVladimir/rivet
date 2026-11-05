@@ -72,7 +72,7 @@ func TestProjectProcessAPI(t *testing.T) {
 	good := map[string]any{"process": map[string]any{"steps": []map[string]any{
 		{"id": "code", "kind": "code", "participants": []map[string]any{{"agent": map[string]any{}}}},
 		{"id": "review", "kind": "review", "require": "all", "participants": []map[string]any{
-			{"agent": map[string]any{"kind": "codex", "model": "gpt-5"}}, {"agent": map[string]any{}}}},
+			{"agent": map[string]any{"kind": "rivet", "model": "gpt-5"}}, {"agent": map[string]any{}}}},
 		{"id": "merge", "kind": "merge"},
 	}}}
 	resp, body = call(t, "PUT", url, alice, "", good)

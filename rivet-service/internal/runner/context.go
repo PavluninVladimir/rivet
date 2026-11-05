@@ -90,22 +90,6 @@ func (q *contextQueue) push(text string) {
 	}
 }
 
-// restore возвращает в начало очереди контекст, который не удалось отдать
-// агенту (обрыв соединения с хуком): он уйдёт на следующем вызове
-// инструмента, а не пропадёт. При переполнении действует то же правило,
-// что и при push: остаётся самое свежее.
-func (q *contextQueue) restore(items []string) {
-	if q == nil || len(items) == 0 {
-		return
-	}
-	q.mu.Lock()
-	q.items = append(items, q.items...)
-	if len(q.items) > maxContextMessages {
-		q.items = q.items[len(q.items)-maxContextMessages:]
-	}
-	q.mu.Unlock()
-}
-
 // take забирает накопленный контекст и очищает очередь: одно и то же
 // предупреждение не доставляется агенту дважды.
 func (q *contextQueue) take() []string {

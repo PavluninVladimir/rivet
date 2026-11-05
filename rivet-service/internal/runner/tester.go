@@ -113,7 +113,7 @@ func gitLines(ctx context.Context, dir string, args ...string) ([]string, error)
 	}
 	// core.quotePath=false: пути с кириллицей приходят как есть, а не
 	// восьмеричными escape-последовательностями в кавычках.
-	out, err := runShell(ctx, dir, "git -c core.quotePath=false "+strings.Join(quoted, " "), nil)
+	out, err := runShellEnv(ctx, dir, "git -c core.quotePath=false "+strings.Join(quoted, " "), gitEnv(nil), nil)
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %v: %s", args[0], err, out)
 	}
@@ -171,12 +171,12 @@ func outsideTests(files, patterns []string) []string {
 // должен ломать тестировщика во всех задачах проекта.
 func resetTo(ctx context.Context, dir, head string, env []string) error {
 	script := "git reset -q --hard " + shellQuote(head) + " && git clean -qffd"
-	if out, err := runShell(ctx, dir, script, nil); err != nil {
+	if out, err := runShellEnv(ctx, dir, script, gitEnv(nil), nil); err != nil {
 		return fmt.Errorf("откат правок тестировщика: %v: %s", err, out)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".gitmodules")); err == nil {
 		sub := "git submodule foreach -q --recursive 'git reset -q --hard && git clean -qffd' && git submodule update -q --recursive --force"
-		if out, err := runShellEnv(ctx, dir, sub, env, nil); err != nil {
+		if out, err := runShellEnv(ctx, dir, sub, gitEnv(env), nil); err != nil {
 			slog.Warn("тестировщик: подмодули не приведены к коммиту", "dir", dir, "err", err, "out", tail(out, 500))
 		}
 	}
@@ -258,10 +258,10 @@ func ownPush(ctx context.Context, dir, origin, remote string) bool {
 	if remote == "" {
 		return false
 	}
-	if _, err := runShell(ctx, dir, "git cat-file -e "+shellQuote(remote+"^{commit}"), nil); err != nil {
+	if _, err := runShellEnv(ctx, dir, "git cat-file -e "+shellQuote(remote+"^{commit}"), gitEnv(nil), nil); err != nil {
 		return false
 	}
-	_, err := runShell(ctx, dir, "git merge-base --is-ancestor "+shellQuote(origin)+" "+shellQuote(remote), nil)
+	_, err := runShellEnv(ctx, dir, "git merge-base --is-ancestor "+shellQuote(origin)+" "+shellQuote(remote), gitEnv(nil), nil)
 	return err == nil
 }
 
@@ -274,7 +274,7 @@ func branchDiff(ctx context.Context, dir, base string) string {
 	if validBranch(base) != nil {
 		return ""
 	}
-	out, err := runShell(ctx, dir, "git diff "+shellQuote("origin/"+base)+"...HEAD", nil)
+	out, err := runShellEnv(ctx, dir, "git diff "+shellQuote("origin/"+base)+"...HEAD", gitEnv(nil), nil)
 	if err != nil {
 		return ""
 	}
@@ -282,25 +282,6 @@ func branchDiff(ctx context.Context, dir, base string) string {
 		out = out[:testerDiffCap] + "\n…[diff обрезан]\n"
 	}
 	return out
-}
-
-// runChecks прогоняет проверки проекта: отчёт и общий успех.
-func runChecks(ctx context.Context, dir string, checks []*pb.Check, step func(string), transcript func([]byte)) (bool, string) {
-	if len(checks) == 0 {
-		return true, "нет настроенных проверок"
-	}
-	var report strings.Builder
-	ok := true
-	for _, c := range checks {
-		step("проверка: " + c.Name)
-		out, err := runShell(ctx, dir, c.Cmd, transcript)
-		fmt.Fprintf(&report, "== %s ==\n%s\n", c.Name, tail(out, 4000))
-		if err != nil {
-			ok = false
-			fmt.Fprintf(&report, "FAIL: %v\n", err)
-		}
-	}
-	return ok, report.String()
 }
 
 // testerOutcome — итог шага test с тестировщиком: явный вердикт и отчёт с
@@ -330,11 +311,11 @@ func testerOutcome(r *pb.AgentRole, verdict, notes string, checksOK bool, checks
 // самовольный push тестировщика отменяется на origin. Сбой инфраструктуры
 // (git, push, падение агента) — вердикт error, а не замечания разработчику.
 func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, role *pb.AgentRole,
-	step func(string), transcript func([]byte),
+	step func(string), checksOut func([]byte), checksFlush func(),
 	runAgent func(ws, prompt string) (agentRun, error), noteUsage func(agentRun), emitUsage func(),
 	emit func(*pb.RunnerMsg), setVerdict func(string), result func(bool, string)) {
 	step(roleLabel(role) + " пишет тесты по критериям приёмки")
-	gitEnv, gitCleanup, err := a.gitCredentials(as)
+	creds, gitCleanup, err := a.gitCredentials(as)
 	if err != nil {
 		setVerdict(verdictInfraError)
 		result(false, "git credentials: "+err.Error())
@@ -360,7 +341,7 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 		}
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(sctx), settleTimeout)
 		defer cancel()
-		if err := resetTo(cctx, ws, origin, gitEnv); err != nil {
+		if err := resetTo(cctx, ws, origin, creds); err != nil {
 			slog.Warn("тестировщик: откат рабочей копии", "task", as.TaskId, "err", err)
 		}
 	}
@@ -373,7 +354,7 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 		setVerdict(verdictInfraError)
 		finish(false, msg)
 	}
-	if err := resetTo(sctx, ws, origin, gitEnv); err != nil {
+	if err := resetTo(sctx, ws, origin, creds); err != nil {
 		infra(err.Error())
 		return
 	}
@@ -399,7 +380,7 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 	// Ветка на origin после сессии: свой push тестировщика (в обход блока)
 	// отменяется; чужой сдвиг (человек, параллельный участник) не трогается,
 	// шаг повторится от нового состояния ветки.
-	remote, err := remoteBranchSHA(sctx, ws, gitEnv, as.Branch)
+	remote, err := remoteBranchSHA(sctx, ws, creds, as.Branch)
 	if err != nil {
 		infra("тестировщик: ветка на origin после сессии: " + err.Error())
 		return
@@ -410,7 +391,7 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 			infra("ветка задачи изменилась на origin во время сессии тестировщика: шаг повторится от нового состояния")
 			return
 		}
-		if err := restoreRemote(sctx, ws, gitEnv, as.Branch, remote, origin); err != nil {
+		if err := restoreRemote(sctx, ws, creds, as.Branch, remote, origin); err != nil {
 			infra("тестировщик сам отправил коммиты в ветку, вернуть её не удалось: " + err.Error())
 			return
 		}
@@ -427,7 +408,7 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 	switch {
 	case selfPushed || len(outside) > 0:
 		// Граница роли держится кодом: правки сессии в ветку не попадают.
-		if err := resetTo(sctx, ws, origin, gitEnv); err != nil {
+		if err := resetTo(sctx, ws, origin, creds); err != nil {
 			infra(err.Error())
 			return
 		}
@@ -443,7 +424,7 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 		step("правки тестировщика вне тестов откатаны")
 	case len(changed) > 0:
 		step("тесты готовы — фиксация изменений")
-		if err := gitCommitPush(sctx, ws, as.Branch, gitEnv,
+		if err := gitCommitPush(sctx, ws, as.Branch, creds,
 			fmt.Sprintf("task-%d: тесты (%s)", as.TaskNum, roleLabel(role))); err != nil {
 			infra("git: " + err.Error())
 			return
@@ -452,7 +433,25 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 	default:
 		committed = true
 	}
-	checksOK, report := runChecks(sctx, ws, as.Checks, step, transcript)
+	// Проверки исполняют только что закоммиченные тесты модели: в
+	// песочнице агента и со снимком .git, как проверки стадии без роли.
+	// Подмена служебных файлов git — не замечания разработчику, а сбой:
+	// шаг повторится, повторный сбой эскалирует человеку.
+	snap, err := snapshotGit(ws)
+	if err != nil {
+		infra("тестировщик: " + err.Error())
+		return
+	}
+	checksOK, report, cerr := a.runChecks(sctx, ws, as.Checks, step, checksOut)
+	checksFlush()
+	if verr := snap.verify("код проверки"); verr != nil {
+		infra(verr.Error())
+		return
+	}
+	if cerr != nil {
+		infra(strings.TrimSpace(report + "\n" + cerr.Error()))
+		return
+	}
 	ok, explicit, detail := testerOutcome(role, verdict, notes, checksOK, report)
 	setVerdict(explicit)
 	finish(ok, detail)
@@ -462,7 +461,8 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 // Меньше stopGrace: остановка runner'а успевает дождаться отката.
 const settleTimeout = 20 * time.Second
 
-// verdictInfraError — вердикт стадии тестировщика при сбое инфраструктуры.
+// verdictInfraError — вердикт стадии TESTING при сбое инфраструктуры
+// (тестировщик или проверки проекта): не замечания разработчику.
 const verdictInfraError = "error"
 
 // originBranchSHA — коммит ветки задачи на origin после fetch в workspace.
@@ -483,7 +483,7 @@ func originBranchSHA(ctx context.Context, dir, branch string) (string, error) {
 // remoteBranchSHA — текущий коммит ветки на origin (ls-remote); пусто —
 // ветки нет.
 func remoteBranchSHA(ctx context.Context, dir string, env []string, branch string) (string, error) {
-	out, err := runShellEnv(ctx, dir, "git ls-remote origin "+shellQuote("refs/heads/"+branch), env, nil)
+	out, err := runShellEnv(ctx, dir, "git ls-remote origin "+shellQuote("refs/heads/"+branch), gitEnv(env), nil)
 	if err != nil {
 		return "", fmt.Errorf("ls-remote: %v: %s", err, out)
 	}
@@ -498,7 +498,7 @@ func remoteBranchSHA(ctx context.Context, dir string, env []string, branch strin
 func restoreRemote(ctx context.Context, dir string, env []string, branch, got, want string) error {
 	ref := "refs/heads/" + branch
 	script := "git push -q --force-with-lease=" + shellQuote(ref+":"+got) + " origin " + shellQuote(want+":"+ref)
-	if out, err := runShellEnv(ctx, dir, script, env, nil); err != nil {
+	if out, err := runShellEnv(ctx, dir, script, gitEnv(env), nil); err != nil {
 		return fmt.Errorf("%v: %s", err, out)
 	}
 	return nil

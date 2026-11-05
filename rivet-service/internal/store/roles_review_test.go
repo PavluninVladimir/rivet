@@ -11,25 +11,25 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/policy"
 )
 
-// Находки ревью add-agent-roles: профиль агента команды против профиля
-// шаблона, гонки назначения, ссылки на профили и подключения, ожидание,
+// Находки ревью add-agent-roles: предпочтение модели проекта, гонки
+// назначения, ссылки на профиль агента Rivet и подключения, ожидание,
 // версии Тимлида, перезапуск runner'а.
 
-func setupConnAndProfiles(t *testing.T, s *Store, adminID string) {
+// setupConnections — два подключения каталога: модели агента Rivet
+// вычисляются из них (add-native-agent), своих привязок у профиля нет.
+func setupConnections(t *testing.T, s *Store, adminID string) {
 	t.Helper()
-	ctx := context.Background()
-	if _, err := s.Pool.Exec(ctx, `
+	if _, err := s.Pool.Exec(context.Background(), `
 		INSERT INTO model_connections (id, name, kind, api, base_url, models, updated_by)
 		VALUES ('anthropic', 'Anthropic', 'vendor', 'anthropic', 'https://api.anthropic.com', '[{"id":"opus"},{"id":"sonnet"}]', $1),
 		       ('openai', 'OpenAI', 'vendor', 'openai', 'https://api.openai.com', '[{"id":"gpt-5"}]', $1)`, adminID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Pool.Exec(ctx, `UPDATE agents SET models='[{"connection_id":"anthropic","model":"opus"}]' WHERE id='claude-code'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Pool.Exec(ctx, `UPDATE agents SET models='[{"connection_id":"openai","model":"gpt-5"}]' WHERE id='codex'`); err != nil {
-		t.Fatal(err)
-	}
+}
+
+// rivetRunner — runner агента Rivet (feature native) с поддержкой ролей.
+func rivetRunner(id string, caps ...string) domain.Runner {
+	return domain.Runner{ID: id, Agent: AgentRivet, Capabilities: caps, Features: []string{domain.FeatureRoles, "native"}}
 }
 
 // runningEpic — проект, Epic в работе и n задач.
@@ -69,51 +69,20 @@ func enterCode(t *testing.T, s *Store, tasks []domain.Task, override *policy.Rol
 	}
 }
 
-// Профиль шаблона не перебивает профиль агента команды (P2 обоих ревью).
-func TestAgentProfileBeatsTemplateProfile(t *testing.T) {
-	ctx := context.Background()
-	s := testStore(t)
-	admin := mustOwner(t, s)
-	setupConnAndProfiles(t, s, admin.ID)
-	dev, _ := s.GetRole(ctx, "developer")
-	if _, err := s.UpdateRole(ctx, RoleInput{ID: "developer", Title: dev.Title, Instruction: dev.Instruction, Color: dev.Color,
-		Capability: dev.Capability, Agent: "claude-code"}, admin.ID, admin.Login); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.Pool.Exec(ctx, `DELETE FROM team_agents WHERE id='eva'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "maks", Name: "Макс", RoleID: "developer", Agent: "codex", ConnectionID: "openai", Model: "gpt-5"}, admin.ID, admin.Login); err != nil {
-		t.Fatal(err)
-	}
-	tasks := runningEpic(t, s, 1)
-	for _, r := range []domain.Runner{
-		{ID: "r-codex", Agent: "codex", Models: []string{"gpt-5"}, Capabilities: []string{"coding"}},
-		{ID: "r-claude", Agent: "claude-code", Models: []string{"opus"}, Capabilities: []string{"coding"}},
-	} {
-		if err := s.UpsertRunner(ctx, r); err != nil {
-			t.Fatal(err)
-		}
-	}
-	enterCode(t, s, tasks, nil)
-	a, ok, err := s.AssignRun(ctx, nil, nil)
-	if err != nil || !ok || a.Runner.ID != "r-codex" || a.Run.AgentID != "maks" || a.Run.AgentKind != "" || a.Run.RoleAgent != "claude-code" {
-		t.Fatalf("Макс на codex: %v %v %s %s %+v", ok, err, a.Runner.ID, a.Run.AgentID, a.Run)
-	}
-}
-
-// Профиль переопределения проекта — только предпочтение: без runner'а с ним
-// стадия не встаёт.
+// Переопределение роли в проекте — только предпочтение: runner без его
+// модели всё равно получает стадию, предпочтение пишется в запуск.
 func TestProjectProfileIsPreference(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	tasks := runningEpic(t, s, 1)
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r-claude", Agent: "claude-code", Models: []string{"opus"}, Capabilities: []string{"coding"}}); err != nil {
+	r := rivetRunner("r1", "coding")
+	r.Models = []string{"opus"}
+	if err := s.UpsertRunner(ctx, r); err != nil {
 		t.Fatal(err)
 	}
-	enterCode(t, s, tasks, &policy.RoleModel{Agent: "codex", ConnectionID: "openai", Model: "gpt-5"})
+	enterCode(t, s, tasks, &policy.RoleModel{Agent: AgentRivet, ConnectionID: "openai", Model: "gpt-5"})
 	a, ok, err := s.AssignRun(ctx, nil, nil)
-	if err != nil || !ok || a.Runner.ID != "r-claude" || a.Run.PrefAgent != "codex" {
+	if err != nil || !ok || a.Runner.ID != "r1" || a.Run.PrefAgent != AgentRivet || a.Run.PrefModel != "gpt-5" {
 		t.Fatalf("переопределение — предпочтение: %v %v %s %+v", ok, err, a.Runner.ID, a.Run)
 	}
 }
@@ -128,7 +97,7 @@ func TestAssignRaceSingleAgent(t *testing.T) {
 	}
 	tasks := runningEpic(t, s, 2)
 	for _, id := range []string{"r1", "r2"} {
-		if err := s.UpsertRunner(ctx, domain.Runner{ID: id, Agent: "claude-code", Models: []string{"sonnet"}, Capabilities: []string{"coding"}}); err != nil {
+		if err := s.UpsertRunner(ctx, domain.Runner{ID: id, Agent: AgentRivet, Models: []string{"sonnet"}, Capabilities: []string{"coding"}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -157,31 +126,43 @@ func TestAssignRaceSingleAgent(t *testing.T) {
 	}
 }
 
-// Свободный агент без подходящего runner'а, подходящий runner только у
-// занятого: причина ожидания есть (P3-7).
+// Подходящий runner занят другим агентом роли — обычное ожидание без
+// причины; у свободного агента нет ни одного подключённого runner'а —
+// причина «нет runner'а для свободных агентов» (P3-7). С одним профилем
+// runner агента Rivet подходит любому агенту команды: его модели — весь
+// каталог.
 func TestWaitReasonFreeAgentWithoutRunner(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	admin := mustOwner(t, s)
-	setupConnAndProfiles(t, s, admin.ID)
-	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "maks", Name: "Макс", RoleID: "developer", Agent: "codex", ConnectionID: "openai", Model: "gpt-5"}, admin.ID, admin.Login); err != nil {
+	setupConnections(t, s, admin.ID)
+	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "maks", Name: "Макс", RoleID: "developer", Agent: AgentRivet, ConnectionID: "openai", Model: "gpt-5"}, admin.ID, admin.Login); err != nil {
 		t.Fatal(err)
 	}
 	tasks := runningEpic(t, s, 2)
-	for _, id := range []string{"r1", "r2"} {
-		if err := s.UpsertRunner(ctx, domain.Runner{ID: id, Agent: "claude-code", Models: []string{"opus"}, Capabilities: []string{"coding"}}); err != nil {
-			t.Fatal(err)
-		}
+	if err := s.UpsertRunner(ctx, rivetRunner("r1", "coding")); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := s.GetRunner(ctx, "r1"); !r.Catalog || !containsStr(r.Models, "gpt-5") || !containsStr(r.Models, "opus") {
+		t.Fatalf("модели runner'а агента Rivet — каталог: %+v", r)
 	}
 	enterCode(t, s, tasks, nil)
-	if a, ok, err := s.AssignRun(ctx, nil, nil); err != nil || !ok || a.Run.AgentID != "eva" {
-		t.Fatalf("первую задачу берёт Ева: %v %v %+v", ok, err, a.Run)
+	if a, ok, err := s.AssignRun(ctx, nil, nil); err != nil || !ok || a.Run.AgentID != "maks" || a.Runner.ID != "r1" {
+		t.Fatalf("первую задачу берёт Макс: %v %v %+v", ok, err, a.Run)
 	}
 	if _, ok, err := s.AssignRun(ctx, nil, nil); err != nil || ok {
 		t.Fatalf("вторую некому: %v %v", ok, err)
 	}
 	waits, err := s.WaitingTeamRuns(ctx, nil, nil)
-	if err != nil || len(waits) != 1 || waits[0].Busy {
+	if err != nil || len(waits) != 0 {
+		t.Fatalf("подходящий runner занят — ожидание без причины: %+v %v", waits, err)
+	}
+	r1, _ := s.GetRunner(ctx, "r1")
+	if marked, err := s.MarkRunnerOffline(ctx, "r1", r1.LastSeen); err != nil || !marked {
+		t.Fatalf("отметка offline: %v %v", marked, err)
+	}
+	waits, err = s.WaitingTeamRuns(ctx, nil, nil)
+	if err != nil || len(waits) != 1 || waits[0].Busy || waits[0].Run.TaskID != tasks[1].ID {
 		t.Fatalf("причина «нет runner'а для свободных агентов»: %+v %v", waits, err)
 	}
 	// Проект или Epic, исключённые из назначений по бюджету, причины про
@@ -197,26 +178,31 @@ func TestWaitReasonFreeAgentWithoutRunner(t *testing.T) {
 	}
 }
 
-// Ссылки агентов команды и шаблонов на подключение и профиль (P2-3, P3-6).
+// Ссылки агентов команды и шаблонов на подключение и профиль агента Rivet
+// (P2-3, P3-6): модели профиля — каталог, поэтому сохранение профиля
+// ссылкам не мешает, а выключение и удаление — мешают.
 func TestTeamRefsOnConnectionsAndProfiles(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	admin := mustOwner(t, s)
-	setupConnAndProfiles(t, s, admin.ID)
+	setupConnections(t, s, admin.ID)
 	if _, err := s.Pool.Exec(ctx, `UPDATE model_connections SET enabled=false WHERE id='openai'`); err != nil {
 		t.Fatal(err)
 	}
 	choices, err := s.ModelChoices(ctx)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || len(choices) != 2 {
+		t.Fatalf("выбор без выключенного подключения: %+v %v", choices, err)
 	}
 	for _, c := range choices {
-		if c.ConnectionID == "openai" {
+		if c.ConnectionID == "openai" || c.Agent != AgentRivet {
 			t.Fatalf("тройка выключенного подключения в выборе: %+v", c)
 		}
 	}
 	if _, err := s.Pool.Exec(ctx, `UPDATE model_connections SET enabled=true WHERE id='openai'`); err != nil {
 		t.Fatal(err)
+	}
+	if choices, _ := s.ModelChoices(ctx); len(choices) != 3 {
+		t.Fatalf("включённое подключение снова в выборе: %+v", choices)
 	}
 	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "irina", Name: "Ирина", RoleID: "reviewer", ConnectionID: "openai", Model: "gpt-5"}, admin.ID, admin.Login); err != nil {
 		t.Fatal(err)
@@ -236,30 +222,29 @@ func TestTeamRefsOnConnectionsAndProfiles(t *testing.T) {
 	if _, err := s.SetConnectionModels(ctx, "openai", []domain.ModelEntry{{ID: "gpt-5", Hidden: true}}, admin.ID, admin.Login); !errors.As(err, &inUse) {
 		t.Fatalf("скрытие модели агента команды: %v", err)
 	}
-	// Профиль агента: удалить, выключить, отвязать модель нельзя.
-	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "irina", Name: "Ирина", RoleID: "reviewer", Agent: "codex", ConnectionID: "openai", Model: "gpt-5"}, admin.ID, admin.Login); err != nil {
+	// Агент команды на профиле Rivet: пара проверяется по вычисляемым
+	// моделям профиля.
+	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "irina", Name: "Ирина", RoleID: "reviewer", Agent: AgentRivet, ConnectionID: "openai", Model: "gpt-5"}, admin.ID, admin.Login); err != nil {
+		t.Fatalf("агент команды на модели каталога: %v", err)
+	}
+	rivet, err := s.GetAgent(ctx, AgentRivet)
+	if err != nil {
 		t.Fatal(err)
 	}
-	codex, _ := s.GetAgent(ctx, "codex")
-	in := AgentInput{ID: "codex", Name: codex.Name, Adapter: codex.Adapter, Command: codex.Command, Env: codex.Env, Args: codex.Args, Secrets: codex.Secrets}
-	if _, _, err := s.UpsertAgent(ctx, in, admin.ID, admin.Login); !errors.As(err, &inUse) {
-		t.Fatalf("отвязка модели агента команды: %v", err)
+	// Сохранение включённого профиля не отвязывает модели: они — каталог.
+	in := AgentInput{ID: AgentRivet, Name: rivet.Name, Adapter: AdapterNative, Secrets: rivet.Secrets}
+	saved, _, err := s.UpsertAgent(ctx, in, admin.ID, admin.Login)
+	if err != nil || len(saved.Models) != 3 {
+		t.Fatalf("сохранение профиля со ссылками агентов команды: %+v %v", saved.Models, err)
 	}
-	in.Models = codex.Models
 	in.Enabled = &off
-	if _, _, err := s.UpsertAgent(ctx, in, admin.ID, admin.Login); !errors.As(err, &inUse) {
+	if _, _, err := s.UpsertAgent(ctx, in, admin.ID, admin.Login); !errors.As(err, &inUse) || !hasRef(inUse.Refs, "team_agent", "irina") {
 		t.Fatalf("выключение профиля агента команды: %v", err)
 	}
-	// Удаление: собственный профиль (предустановленные не удаляются вовсе).
-	if _, _, err := s.UpsertAgent(ctx, AgentInput{ID: "oc", Name: "OC", Adapter: "wrap", Command: "oc",
-		Models: []domain.AgentModelRef{{ConnectionID: "anthropic", Model: "sonnet"}}}, admin.ID, admin.Login); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.UpdateTeamAgent(ctx, TeamAgentInput{ID: "irina", Name: "Ирина", RoleID: "reviewer", Agent: "oc", ConnectionID: "anthropic", Model: "sonnet"}, admin.ID, admin.Login); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.DeleteAgent(ctx, "oc", admin.Login); !errors.As(err, &inUse) || !hasRef(inUse.Refs, "team_agent", "irina") {
-		t.Fatalf("удаление профиля агента команды: %v", err)
+	// Профиль Rivet встроенный: не удаляется даже без ссылок.
+	var fe *FieldError
+	if err := s.DeleteAgent(ctx, AgentRivet, admin.Login); !errors.As(err, &fe) || fe.Field != "id" {
+		t.Fatalf("удаление профиля агента Rivet: %v", err)
 	}
 }
 
@@ -270,7 +255,7 @@ func TestTemplateRefsAndRoleModels(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	admin := mustOwner(t, s)
-	setupConnAndProfiles(t, s, admin.ID)
+	setupConnections(t, s, admin.ID)
 	dev, _ := s.GetRole(ctx, "developer")
 	off := false
 	_, err := s.UpdateRole(ctx, RoleInput{ID: "developer", Title: dev.Title, Instruction: dev.Instruction, Color: dev.Color, Capability: dev.Capability, Enabled: &off}, admin.ID, admin.Login)
@@ -336,7 +321,7 @@ func TestPlannerChangeMakesLeadStale(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	admin := mustOwner(t, s)
-	setupConnAndProfiles(t, s, admin.ID)
+	setupConnections(t, s, admin.ID)
 	lead, _ := s.GetRole(ctx, "lead")
 	timur, _ := s.GetTeamAgent(ctx, "timur")
 	time.Sleep(5 * time.Millisecond)
@@ -364,7 +349,7 @@ func TestRunnerRestartAndReuseGuards(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	tasks := runningEpic(t, s, 2)
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "claude-code", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	enterCode(t, s, tasks[:1], nil)

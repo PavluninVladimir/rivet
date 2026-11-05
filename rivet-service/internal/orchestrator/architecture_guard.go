@@ -417,6 +417,7 @@ func (e *Engine) completeMergedArchitecture(ctx context.Context, task domain.Tas
 	}); err != nil {
 		return err
 	}
+	e.CancelRunsOfMerged(ctx, task)
 	if err := e.St.RecomputeEpic(ctx, task.EpicID); err != nil {
 		return err
 	}

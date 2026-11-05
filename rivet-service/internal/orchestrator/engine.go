@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -399,6 +400,9 @@ type sessionSpec struct {
 	private    bool
 }
 
+// featureNative — runner ведёт агентский цикл Rivet (add-native-agent).
+const featureNative = "native"
+
 // dispatchRun открывает сессию запуска участника и отправляет Assignment
 // runner'у. Возвращает id сессии (пусто, если стадию не удалось
 // запустить) и признак доставки. spec — переопределение сессии (сессия
@@ -479,12 +483,14 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	case run.PrefModel != "" && (contains(runner.Models, run.PrefModel) || runner.Model == run.PrefModel):
 		model = run.PrefModel
 	}
-	var launch *store.AgentLaunch
-	// Окружение профиля уезжает только runner'ам, объявившим протокол v12:
-	// прежние полей не знают, а секреты без адресата отправлять незачем.
-	if runner.Catalog && runner.Protocol == "12" {
+	var endpoint *store.ModelEndpoint
+	// Агенту Rivet (feature native) уходит endpoint модели: подключение,
+	// окно, пределы ответа, цены, лимиты, ключ по режиму секретов и каналу
+	// runner'а.
+	if slices.Contains(runner.Features, featureNative) {
+		agentID := store.AgentRivet
 		var override *policy.AgentModel
-		if am, ok := agentModels[runner.Agent]; ok {
+		if am, ok := agentModels[agentID]; ok {
 			override = &am
 		}
 		explicit := model
@@ -495,20 +501,20 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 			override = &policy.AgentModel{ConnectionID: perf.agent.ConnectionID, Model: perf.agent.Model}
 			explicit = ""
 		}
-		prof, binding, ok, rerr := e.St.ResolveAgentModel(ctx, runner.Agent, explicit, override)
+		prof, binding, ok, rerr := e.St.ResolveAgentModel(ctx, agentID, explicit, override)
 		if rerr == nil && ok && explicit == "" && perf.agent != nil && perf.agent.Model != "" && binding.Model != perf.agent.Model {
 			// Пары нет в привязках профиля runner'а: модель — по имени.
-			prof, binding, ok, rerr = e.St.ResolveAgentModel(ctx, runner.Agent, perf.agent.Model, nil)
+			prof, binding, ok, rerr = e.St.ResolveAgentModel(ctx, agentID, perf.agent.Model, nil)
 		}
 		if rerr != nil {
-			slog.Error("dispatch: профиль агента", "agent", runner.Agent, "err", rerr)
+			slog.Error("dispatch: профиль агента", "agent", agentID, "err", rerr)
 		} else if ok {
 			include := prof.Secrets == "always" || (prof.Secrets == "secure" && runner.Secure)
-			l, berr := e.St.BuildAgentLaunch(ctx, prof, binding, e.Box, include)
+			ep, berr := e.St.BuildModelEndpoint(ctx, prof, binding, e.Box, include)
 			if berr != nil {
-				slog.Error("dispatch: окружение агента", "agent", runner.Agent, "err", berr)
+				slog.Error("dispatch: подключение модели", "agent", agentID, "err", berr)
 			} else {
-				launch = &l
+				endpoint = &ep
 				if binding.Model != "" {
 					model = binding.Model
 				}
@@ -612,24 +618,34 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	if perf.role != nil && stage == pb.StageResult_TESTING {
 		msg.GetAssign().TestPaths = testPaths
 	}
-	if launch != nil {
+	if endpoint != nil {
 		as := msg.GetAssign()
-		as.AgentEnv, as.AgentArgs, as.AgentCommand, as.ConnectionId = launch.Env, launch.Args, launch.Command, launch.ConnectionID
-		as.SecretsIncluded = len(launch.SecretNames) > 0
-		as.AgentSecretNames = launch.SecretNames
+		as.ConnectionId = endpoint.ConnectionID
+		as.SecretsIncluded = endpoint.SecretsIncluded
+		as.Endpoint = &pb.ModelEndpoint{
+			Api: endpoint.API, BaseUrl: endpoint.BaseURL, Model: endpoint.Model,
+			ContextWindow:   int32(min(endpoint.ContextWindow, 1<<31-1)),
+			MaxOutputTokens: int32(min(endpoint.MaxOutputTokens, 1<<31-1)),
+			ModelMaxOutput:  int32(min(endpoint.ModelMaxOutput, 1<<31-1)),
+			HasPrices:       endpoint.HasPrices, InputPrice: endpoint.InputPrice, OutputPrice: endpoint.OutputPrice,
+			CachedInputPrice: endpoint.CachedInputPrice,
+			ConnectionId:     endpoint.ConnectionID, Key: endpoint.Key, Headers: endpoint.Headers,
+			Limits: &pb.SessionLimits{MaxTurns: int32(endpoint.Limits.MaxTurns), MaxTokens: endpoint.Limits.MaxTokens,
+				MaxMinutes: int32(endpoint.Limits.MaxMinutes)},
+		}
 	}
 	if !e.Out.Send(runner.ID, msg) {
 		slog.Warn("dispatch: runner недоступен, задачу вернёт heartbeat-таймаут",
 			"runner", runner.ID, "task", task.ID)
 		return sessionID, false, nil
 	}
-	if launch != nil && len(launch.SecretNames) > 0 {
+	if endpoint != nil && endpoint.SecretsIncluded {
 		// Факт доставки секретов в event log без значений (спека agents).
 		if _, err := e.St.AppendEvent(ctx, store.EventInput{
 			ActorKind: domain.ActorRunner, ActorID: runner.ID, Type: "runner.secrets_delivered",
 			ProjectID: p.ID, TaskID: task.ID,
-			Text:    "runner " + runner.ID + " получил учётные данные подключения " + launch.ConnectionID,
-			Payload: map[string]any{"runner_id": runner.ID, "task_id": task.ID, "connection_id": launch.ConnectionID, "env_names": launch.SecretNames, "agent": runner.Agent},
+			Text:    "runner " + runner.ID + " получил учётные данные подключения " + endpoint.ConnectionID,
+			Payload: map[string]any{"runner_id": runner.ID, "task_id": task.ID, "connection_id": endpoint.ConnectionID, "env_names": endpoint.SecretNames, "agent": runner.Agent},
 		}); err != nil {
 			slog.Error("dispatch: событие доставки секретов", "err", err)
 		}
@@ -802,8 +818,9 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 	if !ok {
 		return fmt.Errorf("шаг %q запуска не найден в снимке процесса задачи %s", run.StepID, task.ID)
 	}
-	// Сбой инфраструктуры тестировщика (add-agent-roles): git, push,
-	// падение агента — не замечания разработчику. Шаг повторяется без
+	// Сбой инфраструктуры шага test (add-agent-roles, add-native-agent):
+	// git, push, падение тестировщика, проверки без песочницы или упавшие
+	// из-за её окружения — не замечания разработчику. Шаг повторяется без
 	// расхода попытки, повторный сбой эскалирует.
 	infraExhausted := false
 	if step.Kind == policy.StepTest && sr.Verdict == verdictInfraError {
@@ -812,7 +829,7 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 			return err
 		}
 		infraExhausted = true
-		sr.Detail = "повторный сбой инфраструктуры тестировщика: " + sr.Detail
+		sr.Detail = "повторный сбой инфраструктуры шага проверки: " + sr.Detail
 	}
 	// Вердикт самого агента (тестировщик, шаг prompt): по нему подписывается
 	// исход шага.
@@ -1233,6 +1250,9 @@ func (e *Engine) mergeTask(ctx context.Context, task domain.Task, p domain.Proje
 	if err := complete(ctx, taskID, ev); err != nil {
 		return err
 	}
+	// Человек мог подтвердить merge, пока шёл review: запуски ревьюеров
+	// прерываются, их поздний результат отбрасывается.
+	e.CancelRunsOfMerged(ctx, task)
 	if err := e.St.RecomputeEpic(ctx, task.EpicID); err != nil {
 		return err
 	}

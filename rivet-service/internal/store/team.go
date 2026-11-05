@@ -304,7 +304,7 @@ func (s *Store) StartUserSession(ctx context.Context, taskID, login string, priv
 		var runnerID string
 		err := tx.QueryRow(ctx, `
 			SELECT r.id FROM runners r
-			WHERE r.status='idle' AND NOT r.draining
+			WHERE r.status='idle' AND NOT r.draining AND `+agentRunner("r")+`
 			  AND r.capabilities @> (SELECT capabilities FROM tasks WHERE id=$1)
 			ORDER BY cardinality(r.capabilities), r.last_seen DESC
 			FOR UPDATE OF r SKIP LOCKED

@@ -80,8 +80,8 @@ func newConflictFixture(t *testing.T, conflicts, attemptLimit int) conflictFixtu
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: "wrap", Capabilities: []string{"coding", "review"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: store.AgentRivet, Capabilities: []string{"coding", "review"}})
 	if err := st.TransitionEpic(ctx, epic.ID, domain.EpicRunning,
 		store.EventInput{ActorKind: domain.ActorUser, ActorID: "test", Type: "epic.status"}); err != nil {
 		t.Fatal(err)
@@ -452,5 +452,78 @@ func TestMergeConflictManualDuringReview(t *testing.T) {
 	}
 	if got := taskStatus(t, f.st, f.task.ID); got != domain.TaskDone {
 		t.Fatalf("после разрешения задача done: %s", got)
+	}
+}
+
+// Человек подтверждает merge, пока идёт review, и merge проходит: задача
+// done, запуск ревьюера прерывается (CancelTask, сессия закрыта), поздний
+// результат ревьюера отбрасывается. Раньше он записывал шаг review у
+// задачи в done и падал на переходе done → review (e2e, overview.spec).
+func TestManualMergeDuringReviewCancelsReviewer(t *testing.T) {
+	f := newConflictFixture(t, 0, 0)
+	ctx := context.Background()
+	off := false
+	if _, err := f.st.SaveProjectPolicy(ctx, f.p.ID, policy.Overrides{AutoMerge: &off}, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	worker := mustTaskRunner(t, f.st, f.task.ID)
+	if err := f.e.OnStageResult(ctx, worker, &pb.StageResult{TaskId: f.task.ID, SessionId: f.out.lastAssign(t).SessionId, Stage: pb.StageResult_CODING, Ok: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.OnStageResult(ctx, worker, &pb.StageResult{TaskId: f.task.ID, SessionId: f.out.lastAssign(t).SessionId, Stage: pb.StageResult_TESTING, Ok: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	review := f.out.lastAssign(t)
+	if review.Stage != pb.StageResult_REVIEW {
+		t.Fatalf("ожидали REVIEW, got %v", review.Stage)
+	}
+
+	if err := f.e.MergeTask(ctx, f.task.ID, f.owner.ID); err != nil {
+		t.Fatalf("ручной merge на шаге review: %v", err)
+	}
+	if got := taskStatus(t, f.st, f.task.ID); got != domain.TaskDone {
+		t.Fatalf("после merge задача done: %s", got)
+	}
+	f.out.mu.Lock()
+	cancelled := false
+	for _, m := range f.out.sent {
+		if m.GetCancel() != nil && m.GetCancel().TaskId == f.task.ID {
+			cancelled = true
+		}
+	}
+	f.out.mu.Unlock()
+	if !cancelled {
+		t.Fatal("ревьюер должен получить отмену стадии")
+	}
+	var outcome string
+	var ended bool
+	if err := f.st.Pool.QueryRow(ctx, `SELECT coalesce(outcome, ''), ended_at IS NOT NULL FROM sessions WHERE id=$1`,
+		review.SessionId).Scan(&outcome, &ended); err != nil {
+		t.Fatal(err)
+	}
+	if !ended || outcome != store.RunsCancelledByMerge {
+		t.Fatalf("сессия ревьюера закрыта merge: ended=%v outcome=%q", ended, outcome)
+	}
+
+	// Поздний результат ревьюера: без ошибки и без шага review в журнале.
+	if err := f.e.OnStageResult(ctx, "reviewer", &pb.StageResult{TaskId: f.task.ID, SessionId: review.SessionId, Stage: pb.StageResult_REVIEW, Ok: true}); err != nil {
+		t.Fatalf("поздний результат ревьюера: %v", err)
+	}
+	var reviewSteps int
+	if err := f.st.Pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE task_id=$1 AND type='task.step' AND payload->>'step'=$2`,
+		f.task.ID, policy.StepReview).Scan(&reviewSteps); err != nil {
+		t.Fatal(err)
+	}
+	if reviewSteps != 0 {
+		t.Fatalf("шаг review у задачи в done: %d событий", reviewSteps)
+	}
+	if got := taskStatus(t, f.st, f.task.ID); got != domain.TaskDone {
+		t.Fatalf("поздний результат не меняет задачу: %s", got)
 	}
 }

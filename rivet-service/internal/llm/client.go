@@ -1,8 +1,9 @@
 // Package llm — клиенты провайдеров моделей по типу API подключения
 // (add-model-connections, спека backend/model-connections): Anthropic
 // Messages API и OpenAI-совместимый chat completions (вендоры, агрегаторы,
-// локальные серверы). Два метода: список моделей (проверка ключа и
-// обнаружение) и одно текстовое дополнение (планировщик).
+// локальные серверы). Методы: список моделей (проверка ключа и
+// обнаружение), одно текстовое дополнение (планировщик) и диалог с
+// инструментами для агентского цикла Rivet (chat.go, add-native-agent).
 package llm
 
 import (
@@ -48,6 +49,8 @@ type Client struct {
 	// (thinking-модели и длинные ответы Аналитика идут минутами). Срок
 	// конкретного запроса задаёт контекст вызывающего.
 	HTTP *http.Client
+	// Retry — повторы диалога (Chat) на перегрузку и сбои сети.
+	Retry RetryPolicy
 }
 
 // ErrUnauthorized — провайдер отклонил ключ (401/403): состояние invalid.
@@ -141,7 +144,10 @@ func (c Client) CompleteWithUsage(ctx context.Context, model, prompt string, max
 // ─── Anthropic ───────────────────────────────────────────────────────────
 
 func (c Client) anthropic() anthropic.Client {
-	opts := []option.RequestOption{option.WithAPIKey(c.Key), option.WithHTTPClient(c.httpClient()), option.WithMaxRetries(0)}
+	// Без автоподстановки из окружения: SDK иначе взял бы ANTHROPIC_AUTH_TOKEN,
+	// профиль или WIF runner'а и отправил бы их на чужой base URL. Все опции
+	// задаются явно.
+	opts := []option.RequestOption{option.WithoutEnvironmentDefaults(), option.WithAPIKey(c.Key), option.WithHTTPClient(c.httpClient()), option.WithMaxRetries(0)}
 	if b := c.base(); b != "" {
 		opts = append(opts, option.WithBaseURL(b))
 	}

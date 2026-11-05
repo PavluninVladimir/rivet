@@ -112,7 +112,7 @@ func TestImportHistory(t *testing.T) {
 	}
 
 	// История не видна планировщику: назначать нечего.
-	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r-hist", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
+	if err := s.UpsertRunner(ctx, domain.Runner{ID: "r-hist", Agent: AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := s.AssignNext(ctx, nil, nil); err != nil || ok {

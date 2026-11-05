@@ -341,6 +341,11 @@ func runnerFits(r domain.Runner, task domain.Task, step policy.ResolvedStep, p p
 	if p.IsUser() {
 		return false
 	}
+	// Runner выкатки и снятый с работы агентских стадий не ведут: то же
+	// правило, что у подбора в store (agentRunner).
+	if r.Agent == "" || r.Retired {
+		return false
+	}
 	if p.Agent.Kind != "" && r.Agent != p.Agent.Kind {
 		return false
 	}
@@ -585,7 +590,19 @@ func performerLabel(r store.StepRun, titles, labels map[string]string) string {
 // cancelOpenRuns прерывает остальные запуски шага (any удовлетворён,
 // участник заблокирован): вердикт cancelled, runner'ам — CancelTask.
 func (e *Engine) cancelOpenRuns(ctx context.Context, task domain.Task, except int64) {
-	open, err := e.St.CancelOpenRuns(ctx, task.ID, except)
+	e.cancelRuns(ctx, task, except, store.RunsCancelledByStep)
+}
+
+// CancelRunsOfMerged прерывает стадии задачи, завершённой merge (кнопкой
+// или на хостинге), пока они шли: иначе ревьюер продолжал бы работу на
+// runner'е, уже свободном в базе, а его поздний результат записал бы шаг
+// review у задачи в done и упал на переходе done → review.
+func (e *Engine) CancelRunsOfMerged(ctx context.Context, task domain.Task) {
+	e.cancelRuns(ctx, task, 0, store.RunsCancelledByMerge)
+}
+
+func (e *Engine) cancelRuns(ctx context.Context, task domain.Task, except int64, outcome string) {
+	open, err := e.St.CancelOpenRunsOutcome(ctx, task.ID, except, outcome)
 	if err != nil {
 		slog.Error("cancel open runs", "task", task.ID, "err", err)
 		return
@@ -1127,12 +1144,13 @@ func testerObjected(verdicts []map[string]any) bool {
 	return false
 }
 
-// verdictInfraError — вердикт runner'а о сбое инфраструктуры стадии
-// тестировщика (git, push, падение агента): не замечания разработчику.
+// verdictInfraError — вердикт runner'а о сбое инфраструктуры шага test
+// (git, push, падение тестировщика, проверки без песочницы или упавшие из-за
+// её окружения): не замечания разработчику.
 const verdictInfraError = "error"
 
-// infraRetryLimit — сколько раз шаг повторяется после сбоя инфраструктуры
-// тестировщика без расхода попытки; следующий сбой эскалирует.
+// infraRetryLimit — сколько раз шаг test повторяется после сбоя
+// инфраструктуры без расхода попытки; следующий сбой эскалирует.
 const infraRetryLimit = 1
 
 // retryInfra — повтор шага после сбоя инфраструктуры: запуск отвязывается
@@ -1156,7 +1174,7 @@ func (e *Engine) retryInfra(ctx context.Context, task domain.Task, step policy.R
 	_, err = e.St.AppendEvent(ctx, store.EventInput{
 		ActorKind: domain.ActorScheduler, Type: "task.assign",
 		ProjectID: p.ID, EpicID: epic.ID, TaskID: task.ID,
-		Text:    fmt.Sprintf("сбой инфраструктуры тестировщика — повтор шага без расхода попытки (%d/%d)", n, infraRetryLimit),
+		Text:    fmt.Sprintf("сбой инфраструктуры шага проверки — повтор шага без расхода попытки (%d/%d)", n, infraRetryLimit),
 		Payload: map[string]any{"step": step.ID, "infra_error": detail, "retry": n},
 	})
 	return true, err

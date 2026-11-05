@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,6 +67,47 @@ type Server struct {
 	// спека team-visibility): приватность неизменна после создания.
 	privMu    sync.Mutex
 	privCache map[string]bool
+
+	// Последнее событие отказа регистрации по runner'у и причине: забытый
+	// runner прежней версии переподключается раз в несколько секунд, и без
+	// окна event log и лента аудита росли бы на десятки тысяч записей в
+	// сутки (ревью add-native-agent P2-2).
+	rejMu   sync.Mutex
+	rejSeen map[string]rejection
+}
+
+// rejectedEventWindow — не чаще одного события runner.rejected на runner и
+// причину за это время. Повтор после рестарта rivetd допустим.
+const rejectedEventWindow = time.Hour
+
+type rejection struct {
+	at         time.Time
+	suppressed int
+}
+
+// noteRejection — писать ли событие отказа сейчас и сколько отказов с той
+// же причиной пропущено с прошлого события. Чужие записи старше окна
+// чистятся: карта не растёт от runner'ов, которые давно не появлялись.
+func (s *Server) noteRejection(runnerID, reason string, now time.Time) (bool, int) {
+	s.rejMu.Lock()
+	defer s.rejMu.Unlock()
+	if s.rejSeen == nil {
+		s.rejSeen = map[string]rejection{}
+	}
+	key := runnerID + "\x00" + reason
+	r, seen := s.rejSeen[key]
+	if seen && now.Sub(r.at) < rejectedEventWindow {
+		r.suppressed++
+		s.rejSeen[key] = r
+		return false, 0
+	}
+	for k, o := range s.rejSeen {
+		if k != key && now.Sub(o.at) >= rejectedEventWindow {
+			delete(s.rejSeen, k)
+		}
+	}
+	s.rejSeen[key] = rejection{at: now}
+	return true, r.suppressed
 }
 
 // sessionPrivate — приватность сессии с кэшем; при ошибке чтения считается
@@ -198,6 +240,27 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 			return nil, err
 		}
 	}
+	// Агентом может быть только агент Rivet (add-native-agent, design
+	// решение 7): сторонние CLI-агенты не регистрируются. Runner без агента
+	// допускается только как runner выкатки (единственная capability deploy).
+	// Событие runner.rejected — не чаще раза в час на runner и причину:
+	// отказанный runner переподключается каждые несколько секунд.
+	if msg, ok := agentAllowed(req); !ok {
+		if write, suppressed := s.noteRejection(req.RunnerId, msg, time.Now()); write {
+			token := tokenFromContext(ctx)
+			payload := map[string]any{"runner_id": req.RunnerId, "agent": req.Agent, "host": req.Host, "token_name": token.Name, "reason": msg}
+			if suppressed > 0 {
+				payload["repeated"] = suppressed
+			}
+			if _, err := s.St.AppendEvent(ctx, store.EventInput{
+				ActorKind: domain.ActorRunner, ActorID: req.RunnerId, Type: "runner.rejected", Text: "регистрация runner'а " + req.RunnerId + " отклонена: " + msg,
+				Payload: payload,
+			}); err != nil {
+				slog.Error("register: событие отказа", "err", err)
+			}
+		}
+		return nil, status.Error(codes.FailedPrecondition, msg)
+	}
 	// Проверки наблюдения прежней сессии прерваны: ожидание снимается, а
 	// проверка повторяется сразу, без ложного провала по таймауту.
 	if err := s.St.ReleaseMonitorChecks(ctx, req.RunnerId); err != nil {
@@ -235,6 +298,7 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 		Adapter: req.Adapter, Depth: domain.SessionDepth(req.Depth),
 		ContextChannel: req.ContextChannel, Secure: secure, Protocol: req.ProtocolVersion,
 		DisplayName: displayName(req.DisplayName), Features: req.Features, BootID: req.BootId,
+		NetworkIsolated: req.NetworkIsolated,
 	}, token)
 	if err != nil {
 		return nil, err
@@ -250,6 +314,27 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 		Catalog:            rn.Catalog,
 		Secure:             secure,
 	}, nil
+}
+
+// agentAllowed — агент runner'а допустим: rivet с feature native, либо без
+// агента с единственной capability deploy (runner выкатки).
+func agentAllowed(req *pb.RegisterRequest) (string, bool) {
+	const reject = "агентом может быть только агент Rivet: запустите rivet-runner -agent rivet"
+	switch req.Agent {
+	case "rivet":
+		// Агент уже rivet, но бинарник прежней версии без агентского цикла:
+		// совет «запустите -agent rivet» тут не поможет.
+		if !slices.Contains(req.Features, "native") {
+			return "runner прежней версии без агентского цикла Rivet: обновите rivet-runner", false
+		}
+		return "", true
+	case "":
+		if len(req.Capabilities) == 1 && req.Capabilities[0] == "deploy" {
+			return "", true
+		}
+		return "runner без агента допускается только с единственной capability deploy (runner выкатки)", false
+	}
+	return reject, false
 }
 
 // secureChannel — защищён ли канал runner'а: TLS у соединения или
@@ -676,6 +761,7 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 			SourceMsgID: msg.MsgId, SessionID: k.Usage.SessionId, ProjectID: projectID, EpicID: epicID,
 			TaskID: k.Usage.TaskId, RunnerID: runnerID, Model: k.Usage.Model,
 			TokensIn: nonNegative(k.Usage.TokensIn), TokensOut: nonNegative(k.Usage.TokensOut),
+			TokensCached: nonNegative(k.Usage.TokensCached), TokensCacheWrite: nonNegative(k.Usage.TokensCacheWrite),
 			CostUSD: nonNegative(k.Usage.CostUsd), DurationS: max(int(k.Usage.DurationS), 0),
 		})
 

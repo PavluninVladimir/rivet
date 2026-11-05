@@ -160,7 +160,7 @@ func (s *Store) UpsertConnection(ctx context.Context, in ConnectionInput, box *s
 	}
 	var out domain.ModelConnection
 	created := false
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+	err := s.inCatalogTx(ctx, func(tx pgx.Tx) error {
 		var oldHeaders []byte
 		var exists, hasKey bool
 		err := tx.QueryRow(ctx, `SELECT true, headers, key_enc IS NOT NULL FROM model_connections WHERE id=$1 FOR UPDATE`, in.ID).Scan(&exists, &oldHeaders, &hasKey)
@@ -345,7 +345,7 @@ func (s *Store) ConnectionRefs(ctx context.Context, id string) ([]Ref, error) {
 }
 
 func (s *Store) DeleteConnection(ctx context.Context, id, actorLogin string) error {
-	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+	err := s.inCatalogTx(ctx, func(tx pgx.Tx) error {
 		// Ссылки читаются под общей блокировкой настройки планировщика:
 		// параллельный выбор этого подключения не проскочит между проверкой и
 		// удалением, а порядок захвата один у всех писателей (нет deadlock).
@@ -389,6 +389,7 @@ func (s *Store) DeleteConnection(ctx context.Context, id, actorLogin string) err
 		})
 		return err
 	})
+	return err
 }
 
 // MergeDiscoveredModels сливает обнаруженный список с текущим: новые как
@@ -397,7 +398,7 @@ func (s *Store) DeleteConnection(ctx context.Context, id, actorLogin string) err
 func (s *Store) MergeDiscoveredModels(ctx context.Context, id string, found []llm.Model, actorLogin string) (domain.ModelConnection, []string, []string, error) {
 	var out domain.ModelConnection
 	var added, missing []string
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+	err := s.inCatalogTx(ctx, func(tx pgx.Tx) error {
 		var raw []byte
 		if err := tx.QueryRow(ctx, `SELECT models FROM model_connections WHERE id=$1 FOR UPDATE`, id).Scan(&raw); err != nil {
 			return nf(err)
@@ -412,7 +413,7 @@ func (s *Store) MergeDiscoveredModels(ctx context.Context, id string, found []ll
 		have := map[string]bool{}
 		for _, m := range cur {
 			have[m.ID] = true
-			if m.Source == "discovered" {
+			if m.Source == ModelSourceDiscovered {
 				wasMissing := m.Missing
 				m.Missing = !seen[m.ID]
 				if m.Missing && !wasMissing {
@@ -429,7 +430,7 @@ func (s *Store) MergeDiscoveredModels(ctx context.Context, id string, found []ll
 			if label == "" {
 				label = f.ID
 			}
-			next = append(next, domain.ModelEntry{ID: f.ID, Label: label, Source: "discovered"})
+			next = append(next, domain.ModelEntry{ID: f.ID, Label: label, Source: ModelSourceDiscovered})
 			added = append(added, f.ID)
 		}
 		mj, _ := json.Marshal(next)
@@ -450,8 +451,93 @@ func (s *Store) MergeDiscoveredModels(ctx context.Context, id string, found []ll
 	return out, added, missing, err
 }
 
+// Источники моделей подключения.
+const (
+	ModelSourceDiscovered = "discovered"
+	ModelSourceManual     = "manual"
+	ModelSourcePreset     = "preset"
+)
+
+// ApplyPresetModels дополняет список моделей подключения данными пресета
+// (add-native-agent, спека model-connections «Пресеты провайдеров»): у
+// моделей списка с тем же идентификатором пустые окно контекста, пределы
+// ответа и цены берутся из пресета, заданные значения не меняются.
+// addMissing — модели пресета, которых в списке нет, добавляются с
+// источником preset (провайдер списка не отдал).
+func (s *Store) ApplyPresetModels(ctx context.Context, id string, preset []domain.ModelEntry, addMissing bool, actorLogin string) (domain.ModelConnection, error) {
+	var out domain.ModelConnection
+	var added []string
+	changed := false
+	err := s.inCatalogTx(ctx, func(tx pgx.Tx) error {
+		var raw []byte
+		if err := tx.QueryRow(ctx, `SELECT models FROM model_connections WHERE id=$1 FOR UPDATE`, id).Scan(&raw); err != nil {
+			return nf(err)
+		}
+		var cur []domain.ModelEntry
+		_ = json.Unmarshal(raw, &cur)
+		idx := map[string]int{}
+		for i, m := range cur {
+			idx[m.ID] = i
+		}
+		fill := func(dst **int64, v *int64) {
+			if *dst == nil && v != nil {
+				x := *v
+				*dst = &x
+				changed = true
+			}
+		}
+		for _, p := range preset {
+			if i, ok := idx[p.ID]; ok {
+				e := &cur[i]
+				fill(&e.ContextWindow, p.ContextWindow)
+				fill(&e.MaxOutputTokens, p.MaxOutputTokens)
+				fill(&e.ModelMaxOutput, p.ModelMaxOutput)
+				fill(&e.InputPrice, p.InputPrice)
+				fill(&e.OutputPrice, p.OutputPrice)
+				fill(&e.CachedInputPrice, p.CachedInputPrice)
+				continue
+			}
+			if !addMissing {
+				continue
+			}
+			if p.Label == "" {
+				p.Label = p.ID
+			}
+			p.Source, p.Hidden, p.Missing = ModelSourcePreset, false, false
+			idx[p.ID] = len(cur)
+			cur = append(cur, p)
+			added = append(added, p.ID)
+			changed = true
+		}
+		if !changed {
+			var err error
+			out, err = scanConn(tx.QueryRow(ctx, `SELECT `+connCols+` FROM model_connections c JOIN users u ON u.id=c.updated_by WHERE c.id=$1`, id))
+			return err
+		}
+		mj, _ := json.Marshal(cur)
+		var err error
+		out, err = scanConn(tx.QueryRow(ctx, `
+			WITH up AS (UPDATE model_connections SET models=$2, updated_at=now() WHERE id=$1 RETURNING *)
+			SELECT `+connCols+` FROM up c JOIN users u ON u.id=c.updated_by`, id, mj))
+		if err != nil {
+			return err
+		}
+		if added == nil {
+			added = []string{}
+		}
+		_, err = appendEvent(ctx, tx, EventInput{
+			ActorKind: domain.ActorUser, ActorID: actorLogin, Type: "connection.updated",
+			Text:    fmt.Sprintf("данные пресета в списке моделей подключения %s: добавлено %d", id, len(added)),
+			Payload: map[string]any{"connection_id": id, "preset_models": added},
+		})
+		return err
+	})
+	return out, err
+}
+
 // SetConnectionModels — ручные правки списка: обнаруженные записи меняют
-// только подпись, скрытие и цены; ручные добавляются и удаляются целиком.
+// только подпись, скрытие, цены, окно и пределы ответа; ручные и записи
+// пресета заменяются и удаляются целиком.
 func (s *Store) SetConnectionModels(ctx context.Context, id string, models []domain.ModelEntry, actorID, actorLogin string) (domain.ModelConnection, error) {
 	ids := map[string]bool{}
 	for i := range models {
@@ -468,14 +554,29 @@ func (s *Store) SetConnectionModels(ctx context.Context, id string, models []dom
 		for _, pr := range []struct {
 			v *int64
 			f string
-		}{{m.InputPrice, "input_price"}, {m.OutputPrice, "output_price"}, {m.ContextWindow, "context_window"}} {
+		}{{m.InputPrice, "input_price"}, {m.OutputPrice, "output_price"}, {m.ContextWindow, "context_window"},
+			{m.CachedInputPrice, "cached_input_price"}, {m.MaxOutputTokens, "max_output_tokens"}, {m.ModelMaxOutput, "model_max_output"}} {
 			if pr.v != nil && *pr.v < 0 {
 				return domain.ModelConnection{}, &FieldError{Field: fmt.Sprintf("models[%d].%s", i, pr.f), Msg: "значение не может быть отрицательным"}
 			}
 		}
+		if m.MaxOutputTokens != nil && m.ModelMaxOutput != nil && *m.ModelMaxOutput > 0 && *m.MaxOutputTokens > *m.ModelMaxOutput {
+			return domain.ModelConnection{}, &FieldError{Field: fmt.Sprintf("models[%d].max_output_tokens", i), Msg: "предел ответа на ход больше предельного выхода модели"}
+		}
+		// Ответ модели идёт в то же окно, что и запрос: предел ответа не
+		// меньше окна переполнял бы каждый ход, а предельный выход — повтор
+		// обрезанного хода.
+		if win := m.ContextWindow; win != nil && *win > 0 {
+			if v := m.MaxOutputTokens; v != nil && *v >= *win {
+				return domain.ModelConnection{}, &FieldError{Field: fmt.Sprintf("models[%d].max_output_tokens", i), Msg: "предел ответа на ход должен быть меньше окна контекста"}
+			}
+			if v := m.ModelMaxOutput; v != nil && *v >= *win {
+				return domain.ModelConnection{}, &FieldError{Field: fmt.Sprintf("models[%d].model_max_output", i), Msg: "предельный выход модели должен быть меньше окна контекста"}
+			}
+		}
 	}
 	var out domain.ModelConnection
-	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+	err := s.inCatalogTx(ctx, func(tx pgx.Tx) error {
 		if err := lockPlanner(ctx, tx); err != nil {
 			return err
 		}
@@ -491,9 +592,10 @@ func (s *Store) SetConnectionModels(ctx context.Context, id string, models []dom
 		}
 		next := make([]domain.ModelEntry, 0, len(models))
 		for _, m := range models {
-			if old, ok := curBy[m.ID]; ok && old.Source == "discovered" {
+			if old, ok := curBy[m.ID]; ok && old.Source == ModelSourceDiscovered {
 				old.Label, old.Hidden = m.Label, m.Hidden
 				old.InputPrice, old.OutputPrice, old.ContextWindow = m.InputPrice, m.OutputPrice, m.ContextWindow
+				old.CachedInputPrice, old.MaxOutputTokens, old.ModelMaxOutput = m.CachedInputPrice, m.MaxOutputTokens, m.ModelMaxOutput
 				if old.Label == "" {
 					old.Label = old.ID
 				}
@@ -503,7 +605,12 @@ func (s *Store) SetConnectionModels(ctx context.Context, id string, models []dom
 			if m.Label == "" {
 				m.Label = m.ID
 			}
-			m.Source, m.Missing = "manual", false
+			// Модель пресета остаётся моделью пресета и после ручной правки
+			// (спека model-connections «Пресеты провайдеров»).
+			m.Source, m.Missing = ModelSourceManual, false
+			if old, ok := curBy[m.ID]; ok && old.Source == ModelSourcePreset {
+				m.Source = ModelSourcePreset
+			}
 			next = append(next, m)
 		}
 		// Модель планировщика нельзя убрать или скрыть: сначала сменить её.
@@ -739,4 +846,34 @@ func plannerRoleEvents(ctx context.Context, tx pgx.Tx, actorLogin string, model 
 		}
 	}
 	return nil
+}
+
+// inCatalogTx — транзакция правки каталога подключений: модели runner'ов
+// агента Rivet пересчитываются в ней же (ревью add-native-agent P3-7).
+// Отдельная транзакция после фиксации давала 500 на уже сохранённой правке,
+// если пересчёт падал.
+func (s *Store) inCatalogTx(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return syncRivetRunners(ctx, tx)
+	})
+}
+
+// syncRivetRunners — модели runner'ов агента Rivet равны моделям каталога
+// подключений: после правки каталога они обновляются без перезапуска
+// runner'ов (спека runners «Регистрация runner'а»).
+func syncRivetRunners(ctx context.Context, tx pgx.Tx) error {
+	a, err := scanAgent(tx.QueryRow(ctx, `SELECT `+agentCols+` FROM agents a LEFT JOIN users u ON u.id=a.updated_by WHERE a.id=$1`, AgentRivet))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := fillCatalogModels(ctx, tx, &a); err != nil {
+		return err
+	}
+	return syncRunnersForAgent(ctx, tx, a)
 }

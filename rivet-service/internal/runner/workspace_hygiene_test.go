@@ -2,9 +2,11 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -137,12 +139,142 @@ func TestWorkspaceScrubsWorktreeConfig(t *testing.T) {
 	}
 }
 
-// noHooksEnv не затирает GIT_CONFIG_* из окружения runner'а.
-func TestNoHooksEnvKeepsRunnerConfig(t *testing.T) {
-	base := []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.sslCAInfo", "GIT_CONFIG_VALUE_0=/etc/ca.pem"}
-	got := strings.Join(noHooksEnv(base), " ")
-	if got != "GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null GIT_CONFIG_COUNT=2" {
-		t.Fatalf("окружение без хуков: %s", got)
+// Риск P3-5 add-architecture-c4: прошлая сессия оставила в .git код, а
+// сверка его не поймала (runner упал между сессией агента и сверкой). Это
+// хуки, fsmonitor, фильтр через info/attributes, помощник учётных данных,
+// core.worktree на чужой каталог. Подготовка следующей стадии идёт с
+// токеном назначения у fetch и ничего из этого не исполняет, а
+// конфигурация после неё как у свежего клона.
+func TestWorkspacePrepIgnoresLeftoverGitCode(t *testing.T) {
+	tmp, a, as := revAgent(t)
+	as.GitToken = "benign-test-token"
+	dir, err := a.workspace(context.Background(), as, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markers := t.TempDir()
+	script := func(name, body string) string {
+		p := filepath.Join(t.TempDir(), name+".sh")
+		if err := os.WriteFile(p, []byte("#!/bin/sh\ntouch '"+filepath.Join(markers, name)+"'\n"+body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, h := range []string{"post-checkout", "reference-transaction", "post-merge", "pre-auto-gc"} {
+		markerHook(t, filepath.Join(dir, ".git", "hooks", h), filepath.Join(markers, h))
+	}
+	gitT(t, dir, "config", "core.fsmonitor", script("fsmonitor", ""))
+	gitT(t, dir, "config", "credential.helper", "!"+script("credential", ""))
+	gitT(t, dir, "config", "filter.leftover.clean", script("clean", "cat\n"))
+	gitT(t, dir, "config", "filter.leftover.smudge", script("smudge", "cat\n"))
+	gitT(t, dir, "config", "filter.leftover.required", "true")
+	if err := os.WriteFile(filepath.Join(dir, ".git", "info", "attributes"), []byte("* filter=leftover\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := t.TempDir()
+	mustWriteFile(t, filepath.Join(elsewhere, "keep.txt"), "чужой каталог\n")
+	gitT(t, dir, "config", "core.hooksPath", filepath.Join(dir, ".git", "hooks"))
+	gitT(t, dir, "config", "core.worktree", elsewhere)
+
+	// Ветка задачи сдвинулась на хостинге: checkout обновит файлы, и
+	// smudge-фильтр сработал бы, переживи он подготовку.
+	seed := filepath.Join(tmp, "seed")
+	mustWriteFile(t, filepath.Join(seed, "main.js"), "next\n")
+	gitT(t, seed, "commit", "-q", "-a", "-m", "следующий коммит")
+	gitT(t, seed, "push", "-q", "origin", "agent/task-1")
+
+	if _, err := a.workspace(context.Background(), as, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	noMarkers(t, markers)
+	if b, err := os.ReadFile(filepath.Join(elsewhere, "keep.txt")); err != nil || string(b) != "чужой каталог\n" {
+		t.Fatalf("подготовка тронула каталог из core.worktree: %q %v", b, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "main.js")); string(b) != "next\n" {
+		t.Fatalf("checkout не взял вершину ветки: %q", b)
+	}
+	for _, key := range strings.Fields(gitOutT(t, dir, "config", "--file", filepath.Join(dir, ".git", "config"), "--name-only", "--list")) {
+		if !keepGitConfig(key, strings.TrimSpace(gitOutT(t, dir, "config", "--file", filepath.Join(dir, ".git", "config"), "--get", key))) &&
+			key != "remote.origin.url" && key != "remote.origin.fetch" {
+			t.Errorf("ключ %s пережил подготовку", key)
+		}
+	}
+}
+
+// .git в неизвестном состоянии (commondir на другой репозиторий, shallow,
+// alternates, .git файлом): подготовка не правит такой клон, а клонирует
+// заново.
+func TestWorkspaceReclonesUnsafeGitDir(t *testing.T) {
+	cases := map[string]func(t *testing.T, dir string){
+		"alternates": func(t *testing.T, dir string) {
+			// Безобидное стороннее хранилище: пустой каталог объектов.
+			other := filepath.Join(t.TempDir(), "objects")
+			if err := os.MkdirAll(other, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mustWriteFile(t, filepath.Join(dir, ".git", "objects", "info", "alternates"), other+"\n")
+		},
+		"http-alternates": func(t *testing.T, dir string) {
+			mustWriteFile(t, filepath.Join(dir, ".git", "objects", "info", "http-alternates"), "http://127.0.0.1:9/objects\n")
+		},
+		"config ссылкой": func(t *testing.T, dir string) {
+			// Безобидная цель: копия той же конфигурации вне клона.
+			cfg := filepath.Join(dir, ".git", "config")
+			b, err := os.ReadFile(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			copyPath := filepath.Join(t.TempDir(), "config")
+			mustWriteFile(t, copyPath, string(b))
+			if err := os.Remove(cfg); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(copyPath, cfg); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"commondir": func(t *testing.T, dir string) {
+			mustWriteFile(t, filepath.Join(dir, ".git", "commondir"), "../elsewhere\n")
+		},
+		"shallow": func(t *testing.T, dir string) {
+			mustWriteFile(t, filepath.Join(dir, ".git", "shallow"), strings.TrimSpace(gitOutT(t, dir, "rev-parse", "HEAD"))+"\n")
+		},
+		".git файлом": func(t *testing.T, dir string) {
+			if err := os.RemoveAll(filepath.Join(dir, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			mustWriteFile(t, filepath.Join(dir, ".git"), "gitdir: /nowhere\n")
+		},
+	}
+	for name, spoil := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, a, as := revAgent(t)
+			dir, err := a.workspace(context.Background(), as, func(string) {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			spoil(t, dir)
+			var steps []string
+			if _, err := a.workspace(context.Background(), as, func(s string) { steps = append(steps, s) }); err != nil {
+				t.Fatalf("подготовка после порчи: %v", err)
+			}
+			if !slices.ContainsFunc(steps, func(s string) bool {
+				return strings.HasPrefix(s, "рабочая копия клонируется заново")
+			}) {
+				t.Fatalf("клон не пересоздан: %v", steps)
+			}
+			for _, f := range []string{"commondir", "shallow", gitAlternates, gitHTTPAlternates} {
+				if _, err := os.Lstat(filepath.Join(dir, ".git", filepath.FromSlash(f))); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf(".git/%s пережил пересоздание", f)
+				}
+			}
+			if st, err := os.Lstat(filepath.Join(dir, ".git", "config")); err != nil || !st.Mode().IsRegular() {
+				t.Errorf(".git/config после пересоздания не обычный файл: %v", err)
+			}
+			if got := strings.TrimSpace(gitOutT(t, dir, "rev-parse", "--abbrev-ref", "HEAD")); got != "agent/task-1" {
+				t.Fatalf("ветка после пересоздания: %s", got)
+			}
+		})
 	}
 }
 

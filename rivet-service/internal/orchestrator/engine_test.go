@@ -329,10 +329,10 @@ func TestPipelineEndToEnd(t *testing.T) {
 	}
 
 	// Два runner'а: исполнитель и ревьюер (review ≠ исполнитель).
-	if err := st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}}); err != nil {
+	if err := st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: "wrap", Capabilities: []string{"coding", "review"}}); err != nil {
+	if err := st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: store.AgentRivet, Capabilities: []string{"coding", "review"}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -429,7 +429,7 @@ func TestBlockedEscalation(t *testing.T) {
 	p, _ := st.CreateProject(ctx, "demo", "o/r", nil, owner.ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A", Criteria: []domain.Criterion{{Text: "c"}}})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
 	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
 	if err := e.Tick(ctx); err != nil {
 		t.Fatal(err)
@@ -476,7 +476,7 @@ func TestTestFailureConsumesAttempt(t *testing.T) {
 	p, _ := st.CreateProject(ctx, "demo", "o/r", []domain.Check{{Name: "tests", Cmd: "true"}}, owner.ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A", AttemptLimit: 2})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
 	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
 	if err := e.Tick(ctx); err != nil {
 		t.Fatal(err)
@@ -528,7 +528,7 @@ func TestPauseParksAtStageBoundary(t *testing.T) {
 	p, _ := st.CreateProject(ctx, "demo", "o/r", []domain.Check{{Name: "tests", Cmd: "true"}}, mustOwner(t, st).ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
 	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
 	if err := e.Tick(ctx); err != nil {
 		t.Fatal(err)
@@ -613,8 +613,8 @@ func TestReviewRejectionReassignsFixing(t *testing.T) {
 	p, _ := st.CreateProject(ctx, "demo", "owner/repo", []domain.Check{{Name: "tests", Cmd: "true"}}, mustOwner(t, st).ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: "wrap", Capabilities: []string{"coding", "review"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: store.AgentRivet, Capabilities: []string{"coding", "review"}})
 	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
 	if err := e.Tick(ctx); err != nil {
 		t.Fatal(err)
@@ -688,7 +688,7 @@ func TestStaleSessionResultDropped(t *testing.T) {
 	p, _ := st.CreateProject(ctx, "demo", "o/r", []domain.Check{{Name: "tests", Cmd: "true"}}, mustOwner(t, st).ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
 	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
 	if err := e.Tick(ctx); err != nil {
 		t.Fatal(err)
@@ -743,7 +743,7 @@ func TestSessionRecoveredAfterRestart(t *testing.T) {
 	p, _ := st.CreateProject(ctx, "demo", "o/r", nil, mustOwner(t, st).ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
 	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
 	if err := e.Tick(ctx); err != nil {
 		t.Fatal(err)
@@ -772,7 +772,7 @@ func TestStageResultDetailMasked(t *testing.T) {
 	p, _ := st.CreateProject(ctx, "demo", "o/r", nil, owner.ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
 	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
 	if err := e.Tick(ctx); err != nil {
 		t.Fatal(err)
@@ -815,7 +815,7 @@ func TestCancelledTaskStaleResultIgnored(t *testing.T) {
 	p, _ := st.CreateProject(ctx, "demo", "o/r", nil, mustOwner(t, st).ID)
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
 	task, _ := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
 	_ = st.TransitionEpic(ctx, epic.ID, domain.EpicRunning, store.EventInput{ActorKind: domain.ActorUser, Type: "epic.status"})
 	if err := e.Tick(ctx); err != nil {
 		t.Fatal(err)

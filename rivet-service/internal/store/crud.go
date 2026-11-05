@@ -375,7 +375,7 @@ const upsertRunnerSQL = `
 const runnerCols = `r.id, r.agent, r.model, r.models, r.stages, r.host, r.capabilities, r.status, COALESCE(r.task_id::text,''), r.ctx_pct, r.draining, r.last_seen, r.adapter, r.depth, r.context_channel,
 	r.catalog, r.secure, COALESCE(a.name, ''), r.declared_models, r.declared_capabilities, r.protocol,
 	r.display_name, r.display_name_locked, r.features,
-	COALESCE(cur.role, ''), COALESCE(cur.agent_id, ''), COALESCE(cur.agent_name, '')`
+	COALESCE(cur.role, ''), COALESCE(cur.agent_id, ''), COALESCE(cur.agent_name, ''), r.network_isolated, r.retired`
 
 // runnerFrom — runner'ы с профилем агента и текущим агентом команды
 // (add-agent-roles): роль и агент открытого запуска на runner'е.
@@ -390,7 +390,7 @@ func scanRunner(row pgx.Row) (domain.Runner, error) {
 	err := row.Scan(&r.ID, &r.Agent, &r.Model, &r.Models, &r.Stages, &r.Host, &r.Capabilities,
 		&r.Status, &r.TaskID, &r.CtxPct, &r.Draining, &r.LastSeen, &r.Adapter, &r.Depth, &r.ContextChannel,
 		&r.Catalog, &r.Secure, &r.ProfileName, &r.DeclaredModels, &r.DeclaredCapabilities, &r.Protocol,
-		&r.DisplayName, &r.DisplayNameLocked, &r.Features, &r.RoleID, &r.AgentID, &r.AgentName)
+		&r.DisplayName, &r.DisplayNameLocked, &r.Features, &r.RoleID, &r.AgentID, &r.AgentName, &r.NetworkIsolated, &r.Retired)
 	return r, err
 }
 
@@ -403,6 +403,10 @@ func adoptRunnerProfile(ctx context.Context, tx pgx.Tx, runnerID, agent string) 
 		return nil
 	}
 	if err != nil {
+		return err
+	}
+	// Модели агента Rivet — все модели каталога подключений.
+	if err := fillCatalogModels(ctx, tx, &a); err != nil {
 		return err
 	}
 	return syncRunnersForAgent(ctx, tx, a, runnerID)
@@ -437,12 +441,10 @@ func runnerStages(r domain.Runner) []string {
 	return []string{"CODING", "TESTING", "REVIEW", "FIXING"}
 }
 
-// normalizeAdapter — значения адаптера и глубины по умолчанию для
-// внутренних потребителей и старых вызовов (обёртка, минимальная глубина).
+// normalizeAdapter — глубина по умолчанию для внутренних потребителей и
+// старых вызовов (минимальная). Адаптер не подставляется: у runner'а
+// выкатки его нет, у агента Rivet — native из регистрации.
 func normalizeAdapter(r domain.Runner) domain.Runner {
-	if r.Adapter == "" {
-		r.Adapter = "wrap"
-	}
 	switch r.Depth {
 	case domain.DepthFull, domain.DepthPartial, domain.DepthMinimal:
 	default:
@@ -747,8 +749,12 @@ type UsageInput struct {
 	Model     string
 	TokensIn  *int64
 	TokensOut *int64
-	CostUSD   *float64
-	DurationS int
+	// TokensCached и TokensCacheWrite — чтение из кеша провайдера и запись
+	// в кеш, входят в TokensIn (агент Rivet, add-native-agent).
+	TokensCached     *int64
+	TokensCacheWrite *int64
+	CostUSD          *float64
+	DurationS        int
 	// Role — роль запроса control plane без сессии стадии: analyst
 	// (add-product-discovery), devops и sre (add-sdlc-cycle). Пусто у стадий
 	// runner'ов, их роль берётся из запуска шага сессии.
@@ -758,11 +764,11 @@ type UsageInput struct {
 func (s *Store) RecordUsage(ctx context.Context, u UsageInput) error {
 	_, err := s.Pool.Exec(ctx, `
 		INSERT INTO usage_records (source_msg_id, project_id, epic_id, task_id, runner_id, model,
-			tokens_in, tokens_out, cost_usd, duration_s, session_id, role)
-		VALUES (NULLIF($1,''),$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,NULLIF($5,''),$6,$7,$8,$9,$10,NULLIF($11,'')::uuid,NULLIF($12,''))
+			tokens_in, tokens_out, cost_usd, duration_s, session_id, role, tokens_cached, tokens_cache_write)
+		VALUES (NULLIF($1,''),$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,NULLIF($5,''),$6,$7,$8,$9,$10,NULLIF($11,'')::uuid,NULLIF($12,''),$13,$14)
 		ON CONFLICT (source_msg_id) DO NOTHING`,
 		u.SourceMsgID, u.ProjectID, u.EpicID, u.TaskID, u.RunnerID, u.Model,
-		u.TokensIn, u.TokensOut, u.CostUSD, u.DurationS, u.SessionID, u.Role)
+		u.TokensIn, u.TokensOut, u.CostUSD, u.DurationS, u.SessionID, u.Role, u.TokensCached, u.TokensCacheWrite)
 	return err
 }
 
@@ -777,6 +783,10 @@ type UsageRow struct {
 	TokensOut *int64   `json:"tokens_out"`
 	CostUSD   *float64 `json:"cost_usd"`
 	Duration  int64    `json:"duration_s"`
+	// TokensCached, TokensCacheWrite — часть tokens_in из кеша провайдера и
+	// запись в кеш; нет в ответе — источники группы их не сообщали.
+	TokensCached     *int64 `json:"tokens_cached,omitempty"`
+	TokensCacheWrite *int64 `json:"tokens_cache_write,omitempty"`
 }
 
 // UsageScope — границы агрегации: проекты зрителя или вся установка.
@@ -807,7 +817,8 @@ func (s *Store) UsageSummary(ctx context.Context, scope UsageScope, groupBy stri
 			"LEFT JOIN epics e ON e.id = u.epic_id"}
 	}
 	rows, err := s.Pool.Query(ctx, `
-		SELECT `+g.key+` AS k, MIN(`+g.label+`), SUM(u.tokens_in), SUM(u.tokens_out), SUM(u.cost_usd)::float8, SUM(u.duration_s)
+		SELECT `+g.key+` AS k, MIN(`+g.label+`), SUM(u.tokens_in), SUM(u.tokens_out), SUM(u.cost_usd)::float8, SUM(u.duration_s),
+			SUM(u.tokens_cached), SUM(u.tokens_cache_write)
 		FROM usage_records u `+g.join+`
 		WHERE ($1::timestamptz IS NULL OR u.ts >= $1) AND ($2::timestamptz IS NULL OR u.ts < $2)
 		  AND ($4 OR u.project_id IN (SELECT project_id FROM project_members WHERE user_id = $3))
@@ -819,7 +830,7 @@ func (s *Store) UsageSummary(ctx context.Context, scope UsageScope, groupBy stri
 	var out []UsageRow
 	for rows.Next() {
 		var r UsageRow
-		if err := rows.Scan(&r.Key, &r.Label, &r.TokensIn, &r.TokensOut, &r.CostUSD, &r.Duration); err != nil {
+		if err := rows.Scan(&r.Key, &r.Label, &r.TokensIn, &r.TokensOut, &r.CostUSD, &r.Duration, &r.TokensCached, &r.TokensCacheWrite); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -839,7 +850,8 @@ func nullableTime(t time.Time) *time.Time {
 func (s *Store) EpicUsage(ctx context.Context, epicID string) (rows []UsageRow, total *UsageRow, err error) {
 	res, err := s.Pool.Query(ctx, `
 		SELECT COALESCE(task_id::text,'—') AS k,
-			SUM(tokens_in), SUM(tokens_out), SUM(cost_usd)::float8, SUM(duration_s)
+			SUM(tokens_in), SUM(tokens_out), SUM(cost_usd)::float8, SUM(duration_s),
+			SUM(tokens_cached), SUM(tokens_cache_write)
 		FROM usage_records WHERE epic_id=$1 GROUP BY k ORDER BY k`, epicID)
 	if err != nil {
 		return nil, nil, err
@@ -847,7 +859,7 @@ func (s *Store) EpicUsage(ctx context.Context, epicID string) (rows []UsageRow, 
 	defer res.Close()
 	for res.Next() {
 		var r UsageRow
-		if err := res.Scan(&r.Key, &r.TokensIn, &r.TokensOut, &r.CostUSD, &r.Duration); err != nil {
+		if err := res.Scan(&r.Key, &r.TokensIn, &r.TokensOut, &r.CostUSD, &r.Duration, &r.TokensCached, &r.TokensCacheWrite); err != nil {
 			return nil, nil, err
 		}
 		rows = append(rows, r)
@@ -864,6 +876,8 @@ func (s *Store) EpicUsage(ctx context.Context, epicID string) (rows []UsageRow, 
 		total.TokensIn = addNullable(total.TokensIn, r.TokensIn)
 		total.TokensOut = addNullable(total.TokensOut, r.TokensOut)
 		total.CostUSD = addNullable(total.CostUSD, r.CostUSD)
+		total.TokensCached = addNullable(total.TokensCached, r.TokensCached)
+		total.TokensCacheWrite = addNullable(total.TokensCacheWrite, r.TokensCacheWrite)
 	}
 	return rows, total, nil
 }

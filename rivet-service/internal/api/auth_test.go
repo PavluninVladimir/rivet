@@ -458,7 +458,7 @@ func TestRunnerTaskRedaction(t *testing.T) {
 	var task domain.Task
 	_ = json.Unmarshal(body, &task)
 
-	if err := st.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: "fake", Model: "m", Host: "h", Capabilities: []string{}}); err != nil {
+	if err := st.UpsertRunner(ctx, domain.Runner{ID: "r1", Agent: store.AgentRivet, Model: "m", Host: "h", Capabilities: []string{}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `UPDATE runners SET task_id=$1, status='running' WHERE id='r1'`, task.ID); err != nil {

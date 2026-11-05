@@ -1,5 +1,6 @@
-// fake-llm — OpenAI-совместимый провайдер для e2e-стенда: список моделей
-// и chat completions с готовым планом декомпозиции. Ключ «fake-key»
+// fake-llm — OpenAI-совместимый провайдер для e2e-стенда: список моделей,
+// chat completions с готовым планом декомпозиции и сценарии вызовов
+// инструментов для агентского цикла Rivet (native.go). Ключ «fake-key»
 // принимается, любой другой отклоняется 401 (сценарий «неверный ключ»).
 // Задания агентов control plane (Аналитик add-product-discovery, Релиз-инженер
 // и Инженер сопровождения add-sdlc-cycle) узнаются по маркеру в первой
@@ -21,6 +22,12 @@ import (
 func main() {
 	addr := flag.String("addr", ":8283", "адрес HTTP")
 	flag.Parse()
+	fmt.Println("fake-llm:", *addr)
+	log.Fatal(http.ListenAndServe(*addr, newMux()))
+}
+
+// newMux — маршруты провайдера (вынесены для тестов).
+func newMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
@@ -37,7 +44,19 @@ func main() {
 		_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"fake-planner","object":"model","name":"Fake Planner"},{"id":"fake-small","object":"model"},{"id":"fake-large","object":"model"}]}`))
 	})
 	complete := auth(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		raw, _ := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+		// Агентский цикл Rivet (запрос с tools): сценарии вызовов
+		// инструментов (native.go).
+		if isNativeRequest(raw) {
+			w.Header().Set("Content-Type", "application/json")
+			if msg, bad := deepseekThinkingViolation(raw); bad {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": msg, "type": "invalid_request_error"}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(nativeResponse(raw))
+			return
+		}
 		var in struct {
 			Model    string `json:"model"`
 			Messages []struct {
@@ -93,8 +112,7 @@ func main() {
 	for _, p := range []string{"/chat/completions", "/v1/chat/completions"} {
 		mux.HandleFunc("POST "+p, complete)
 	}
-	fmt.Println("fake-llm:", *addr)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	return mux
 }
 
 func writeCompletion(w http.ResponseWriter, model, content string) {

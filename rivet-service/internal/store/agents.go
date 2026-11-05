@@ -16,15 +16,12 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/secretbox"
 )
 
-// Каталог агентов (add-agent-profiles, спека backend/agents): профили с
-// адаптером, командой, привязками моделей из каталога подключений, шаблоном
-// окружения и режимом доставки секретов. Runner'ы с агентом из каталога
-// получают модели из привязок; окружение назначения собирается по шаблону.
+// Каталог агентов (add-agent-profiles, спека backend/agents): после
+// add-native-agent в нём один профиль rivet с адаптером native. Его модели —
+// все видимые модели включённых подключений, назначение несёт endpoint
+// модели с секретами по режиму профиля.
 
 var agentIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
-
-// Подстановки шаблона окружения и аргументов.
-var placeholderRe = regexp.MustCompile(`\{\{\s*([a-z_]+)(?::([A-Za-z0-9-]+))?\s*\}\}`)
 
 // AgentInput — что сохраняет администратор.
 type AgentInput struct {
@@ -39,19 +36,34 @@ type AgentInput struct {
 	Args         []string
 	Secrets      string
 	Enabled      *bool
+	Limits       *domain.AgentLimits
+	// KeepName, KeepDefaultModel, KeepLimits — поле не передано в запросе:
+	// у существующего профиля сохраняется прежнее значение, у нового
+	// действует Name, DefaultModel и Limits (умолчания). Без флага поле
+	// заменяется, nil DefaultModel — автоматический выбор, nil или пустые
+	// Limits — умолчания цикла.
+	KeepName, KeepDefaultModel, KeepLimits bool
 }
 
+// AdapterNative — адаптер агента Rivet: единственный в каталоге
+// (add-native-agent). AgentRivet — его профиль.
+const (
+	AdapterNative = "native"
+	AgentRivet    = "rivet"
+)
+
 const agentCols = `a.id, a.name, a.adapter, a.command, a.capabilities, a.models, a.default_model, a.env, a.args, a.secrets, a.enabled, a.preset, a.updated_at, COALESCE(u.login, ''),
-	(SELECT count(*) FROM runners r WHERE r.agent = a.id)`
+	(SELECT count(*) FROM runners r WHERE r.agent = a.id), a.limits`
 
 func scanAgent(row pgx.Row) (domain.AgentProfile, error) {
 	var a domain.AgentProfile
-	var models, def, env, args []byte
+	var models, def, env, args, limits []byte
 	err := row.Scan(&a.ID, &a.Name, &a.Adapter, &a.Command, &a.Capabilities, &models, &def, &env, &args,
-		&a.Secrets, &a.Enabled, &a.Preset, &a.UpdatedAt, &a.UpdatedBy, &a.Runners)
+		&a.Secrets, &a.Enabled, &a.Preset, &a.UpdatedAt, &a.UpdatedBy, &a.Runners, &limits)
 	if err != nil {
 		return a, err
 	}
+	_ = json.Unmarshal(limits, &a.Limits)
 	_ = json.Unmarshal(models, &a.Models)
 	if a.Models == nil {
 		a.Models = []domain.AgentModelRef{}
@@ -76,31 +88,6 @@ func scanAgent(row pgx.Row) (domain.AgentProfile, error) {
 	return a, nil
 }
 
-// validatePlaceholders — все подстановки известны: key, base_url, model,
-// connection_id, header:Имя.
-var anyPlaceholderRe = regexp.MustCompile(`\{\{[^}]*\}\}`)
-
-func validatePlaceholders(field, v string) error {
-	if len(anyPlaceholderRe.FindAllString(v, -1)) != len(placeholderRe.FindAllString(v, -1)) {
-		return &FieldError{Field: field, Msg: "некорректная подстановка: допустимы {{key}}, {{base_url}}, {{model}}, {{connection_id}}, {{header:Имя}}"}
-	}
-	for _, m := range placeholderRe.FindAllStringSubmatch(v, -1) {
-		switch m[1] {
-		case "key", "base_url", "model", "connection_id":
-			if m[2] != "" {
-				return &FieldError{Field: field, Msg: "подстановка {{" + m[1] + "}} без аргумента"}
-			}
-		case "header":
-			if m[2] == "" {
-				return &FieldError{Field: field, Msg: "подстановка {{header:Имя}} требует имя заголовка"}
-			}
-		default:
-			return &FieldError{Field: field, Msg: "неизвестная подстановка {{" + m[1] + "}}: допустимы key, base_url, model, connection_id, header:Имя"}
-		}
-	}
-	return nil
-}
-
 func validateAgent(in AgentInput) error {
 	if !agentIDRe.MatchString(in.ID) {
 		return &FieldError{Field: "id", Msg: "идентификатор: латиница, цифры, дефис, до 63 символов"}
@@ -108,13 +95,14 @@ func validateAgent(in AgentInput) error {
 	if strings.TrimSpace(in.Name) == "" {
 		return &FieldError{Field: "name", Msg: "укажите название"}
 	}
-	switch in.Adapter {
-	case "claude-code", "wrap":
-	default:
-		return &FieldError{Field: "adapter", Msg: "адаптер: claude-code или wrap"}
+	if in.ID != AgentRivet || in.Adapter != AdapterNative {
+		return &FieldError{Field: "adapter", Msg: "агентом может быть только агент Rivet (адаптер native)"}
 	}
-	if strings.ContainsAny(in.Command, "\r\n") {
-		return &FieldError{Field: "command", Msg: "команда в одну строку"}
+	if in.Command != "" || len(in.Env) > 0 || len(in.Args) > 0 {
+		return &FieldError{Field: "command", Msg: "у агента Rivet нет команды, окружения и аргументов CLI"}
+	}
+	if l := in.Limits; l != nil && (l.MaxTurns < 0 || l.MaxTokens < 0 || l.MaxMinutes < 0) {
+		return &FieldError{Field: "limits", Msg: "лимиты не могут быть отрицательными"}
 	}
 	switch in.Secrets {
 	case "never", "secure", "always":
@@ -126,33 +114,18 @@ func validateAgent(in AgentInput) error {
 			return &FieldError{Field: fmt.Sprintf("capabilities[%d]", i), Msg: "некорректная capability"}
 		}
 	}
-	envRe := regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-	for i, e := range in.Env {
-		if !envRe.MatchString(e.Name) {
-			return &FieldError{Field: fmt.Sprintf("env[%d].name", i), Msg: "имя переменной: буквы, цифры, подчёркивание"}
-		}
-		if err := validatePlaceholders(fmt.Sprintf("env[%d].value", i), e.Value); err != nil {
-			return err
-		}
-	}
-	for i, a := range in.Args {
-		if err := validatePlaceholders(fmt.Sprintf("args[%d]", i), a); err != nil {
-			return err
-		}
-		for _, m := range placeholderRe.FindAllStringSubmatch(a, -1) {
-			if m[1] == "key" || m[1] == "header" {
-				return &FieldError{Field: fmt.Sprintf("args[%d]", i), Msg: "секреты в аргументах недопустимы: аргументы видны в списке процессов, используйте переменные окружения"}
-			}
-		}
-	}
 	return nil
 }
 
-// UpsertAgent создаёт или меняет профиль: привязки проверяются по каталогу
-// подключений, runner'ы с этим агентом получают модели из привязок.
+// UpsertAgent создаёт или меняет профиль: модель по умолчанию проверяется
+// по каталогу подключений, runner'ы агента получают модели каталога.
+// Непереданный режим секретов у существующего профиля сохраняется (поле
+// безопасности не сбрасывается молча), у нового — secure. Так же
+// сохраняются название, модель по умолчанию и лимиты с флагами Keep*.
 func (s *Store) UpsertAgent(ctx context.Context, in AgentInput, actorID, actorLogin string) (domain.AgentProfile, bool, error) {
 	in.Name, in.Command = strings.TrimSpace(in.Name), strings.TrimSpace(in.Command)
-	if in.Secrets == "" {
+	keepSecrets := in.Secrets == ""
+	if keepSecrets {
 		in.Secrets = "secure"
 	}
 	if err := validateAgent(in); err != nil {
@@ -161,33 +134,28 @@ func (s *Store) UpsertAgent(ctx context.Context, in AgentInput, actorID, actorLo
 	var out domain.AgentProfile
 	created := false
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		// Привязки: подключение включено, модель в списке, не скрыта и не пропала.
-		seen := map[string]bool{}
-		for i, m := range in.Models {
-			key := m.ConnectionID + "/" + m.Model
-			if seen[key] {
-				return &FieldError{Field: fmt.Sprintf("models[%d]", i), Msg: "привязка повторяется"}
-			}
-			seen[key] = true
-			if err := checkBinding(ctx, tx, m, fmt.Sprintf("models[%d]", i)); err != nil {
-				return err
-			}
-			in.Models[i].Unavailable = false
-		}
-		if in.DefaultModel != nil {
-			if !seen[in.DefaultModel.ConnectionID+"/"+in.DefaultModel.Model] {
-				return &FieldError{Field: "default_model", Msg: "модель по умолчанию должна быть одной из привязок"}
-			}
-		} else if len(in.Models) > 0 {
-			d := in.Models[0]
-			in.DefaultModel = &d
-		}
-		var exists bool
-		if err := tx.QueryRow(ctx, `SELECT true FROM agents WHERE id=$1 FOR UPDATE`, in.ID).Scan(&exists); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		// Модели агента Rivet вычисляются из каталога подключений: свои
+		// привязки не хранятся, модель по умолчанию — одна из моделей
+		// каталога.
+		catalog, err := catalogModels(ctx, tx)
+		if err != nil {
 			return err
 		}
-		if in.Models == nil {
-			in.Models = []domain.AgentModelRef{}
+		in.Models = []domain.AgentModelRef{}
+		seen := map[string]bool{}
+		for _, m := range catalog {
+			seen[m.ConnectionID+"/"+m.Model] = true
+		}
+		if in.DefaultModel != nil && !seen[in.DefaultModel.ConnectionID+"/"+in.DefaultModel.Model] {
+			return &FieldError{Field: "default_model", Msg: "модель по умолчанию должна быть моделью включённого подключения"}
+		}
+		var cur string
+		if err := tx.QueryRow(ctx, `SELECT secrets FROM agents WHERE id=$1 FOR UPDATE`, in.ID).Scan(&cur); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		exists := cur != ""
+		if keepSecrets && exists {
+			in.Secrets = cur
 		}
 		if in.Env == nil {
 			in.Env = []domain.EnvVar{}
@@ -201,10 +169,12 @@ func (s *Store) UpsertAgent(ctx context.Context, in AgentInput, actorID, actorLo
 		// Профиль, на который ссылаются агенты команды, шаблоны или
 		// переопределения ролей, нельзя выключить, а их модели — отвязать.
 		if exists {
+			// Включённый профиль сохраняет все модели каталога: ссылками
+			// мешают только модели вне его.
 			var keep map[string]bool
 			if in.Enabled == nil || *in.Enabled {
 				keep = map[string]bool{}
-				for _, m := range in.Models {
+				for _, m := range catalog {
 					keep[m.ConnectionID+"/"+m.Model] = true
 				}
 			}
@@ -217,6 +187,11 @@ func (s *Store) UpsertAgent(ctx context.Context, in AgentInput, actorID, actorLo
 			}
 		}
 		mj, _ := json.Marshal(in.Models)
+		limits := domain.AgentLimits{}
+		if in.Limits != nil {
+			limits = *in.Limits
+		}
+		lj, _ := json.Marshal(limits)
 		ej, _ := json.Marshal(in.Env)
 		aj, _ := json.Marshal(in.Args)
 		var dj []byte
@@ -230,20 +205,25 @@ func (s *Store) UpsertAgent(ctx context.Context, in AgentInput, actorID, actorLo
 				enabled = *in.Enabled
 			}
 			if _, err := tx.Exec(ctx, `
-				INSERT INTO agents (id, name, adapter, command, capabilities, models, default_model, env, args, secrets, enabled, updated_by)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-				in.ID, in.Name, in.Adapter, in.Command, in.Capabilities, mj, dj, ej, aj, in.Secrets, enabled, actorID); err != nil {
+				INSERT INTO agents (id, name, adapter, command, capabilities, models, default_model, env, args, secrets, enabled, updated_by, limits)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+				in.ID, in.Name, in.Adapter, in.Command, in.Capabilities, mj, dj, ej, aj, in.Secrets, enabled, actorID, lj); err != nil {
 				return err
 			}
 		} else if _, err := tx.Exec(ctx, `
-				UPDATE agents SET name=$2, adapter=$3, command=$4, capabilities=$5, models=$6, default_model=$7, env=$8, args=$9,
-					secrets=$10, enabled=COALESCE($11, enabled), updated_at=now(), updated_by=$12 WHERE id=$1`,
-			in.ID, in.Name, in.Adapter, in.Command, in.Capabilities, mj, dj, ej, aj, in.Secrets, in.Enabled, actorID); err != nil {
+				UPDATE agents SET name=CASE WHEN $14 THEN name ELSE $2 END, adapter=$3, command=$4, capabilities=$5, models=$6,
+					default_model=CASE WHEN $15 THEN default_model ELSE $7 END, env=$8, args=$9,
+					secrets=$10, enabled=COALESCE($11, enabled), updated_at=now(), updated_by=$12,
+					limits=CASE WHEN $16 THEN limits ELSE $13 END WHERE id=$1`,
+			in.ID, in.Name, in.Adapter, in.Command, in.Capabilities, mj, dj, ej, aj, in.Secrets, in.Enabled, actorID, lj,
+			in.KeepName, in.KeepDefaultModel, in.KeepLimits); err != nil {
 			return err
 		}
-		var err error
 		out, err = scanAgent(tx.QueryRow(ctx, `SELECT `+agentCols+` FROM agents a LEFT JOIN users u ON u.id=a.updated_by WHERE a.id=$1`, in.ID))
 		if err != nil {
+			return err
+		}
+		if err := fillCatalogModels(ctx, tx, &out); err != nil {
 			return err
 		}
 		if err := syncRunnersForAgent(ctx, tx, out); err != nil {
@@ -346,12 +326,82 @@ func (s *Store) ListAgents(ctx context.Context) ([]domain.AgentProfile, error) {
 		}
 		out = append(out, a)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for i := range out {
+		if err := fillCatalogModels(ctx, s.Pool, &out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) GetAgent(ctx context.Context, id string) (domain.AgentProfile, error) {
 	a, err := scanAgent(s.Pool.QueryRow(ctx, `SELECT `+agentCols+` FROM agents a LEFT JOIN users u ON u.id=a.updated_by WHERE a.id=$1`, id))
-	return a, nf(err)
+	if err != nil {
+		return a, nf(err)
+	}
+	return a, fillCatalogModels(ctx, s.Pool, &a)
+}
+
+// rowsQuerier — пул или транзакция.
+type rowsQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// catalogModels — видимые модели включённых подключений (не скрытые и не
+// пропавшие), по порядку подключений и их списков.
+func catalogModels(ctx context.Context, q rowsQuerier) ([]domain.AgentModelRef, error) {
+	rows, err := q.Query(ctx, `SELECT id, models FROM model_connections WHERE enabled ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.AgentModelRef{}
+	for rows.Next() {
+		var id string
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, err
+		}
+		var models []domain.ModelEntry
+		_ = json.Unmarshal(raw, &models)
+		for _, m := range models {
+			if !m.Hidden && !m.Missing {
+				out = append(out, domain.AgentModelRef{ConnectionID: id, Model: m.ID})
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
+// fillCatalogModels — у агента Rivet модели вычисляются из каталога
+// подключений; модель по умолчанию, пропавшая из каталога, сбрасывается к
+// первой доступной.
+func fillCatalogModels(ctx context.Context, q rowsQuerier, a *domain.AgentProfile) error {
+	if a.Adapter != AdapterNative {
+		return nil
+	}
+	models, err := catalogModels(ctx, q)
+	if err != nil {
+		return err
+	}
+	a.Models = models
+	if a.DefaultModel != nil {
+		for _, m := range models {
+			if m.ConnectionID == a.DefaultModel.ConnectionID && m.Model == a.DefaultModel.Model {
+				return nil
+			}
+		}
+		a.DefaultModel = nil
+	}
+	if len(models) > 0 {
+		d := models[0]
+		a.DefaultModel = &d
+	}
+	return nil
 }
 
 // ExternalAgent — агент вне каталога, объявленный runner'ами.
@@ -517,9 +567,11 @@ func (s *Store) ValidateProcessAgents(ctx context.Context, p *policy.Process) er
 				}
 				continue
 			}
+			// Агентом может быть только агент Rivet (add-native-agent): типы
+			// устаревших runner'ов вне каталога не принимаются.
 			e, ok := extBy[part.Agent.Kind]
-			if !ok {
-				return &policy.ProcessError{Step: st.ID, Field: field + ".kind", Msg: "агента " + part.Agent.Kind + " нет ни в каталоге, ни среди зарегистрированных runner'ов"}
+			if !ok || part.Agent.Kind != AgentRivet {
+				return &policy.ProcessError{Step: st.ID, Field: field + ".kind", Msg: "агентом может быть только агент Rivet, указан " + part.Agent.Kind}
 			}
 			if part.Agent.Model != "" && !containsStr(e.Models, part.Agent.Model) {
 				return &policy.ProcessError{Step: st.ID, Field: field + ".model", Msg: "модель " + part.Agent.Model + " не объявлена runner'ами агента " + e.ID}
@@ -563,22 +615,6 @@ func containsStr(list []string, v string) bool {
 
 // ─── окружение назначения ────────────────────────────────────────────────
 
-// AgentLaunch — что runner получает для запуска агента: модель, окружение и
-// аргументы по шаблону профиля, команда обёртки, подключение модели.
-type AgentLaunch struct {
-	Model        string
-	ConnectionID string
-	Env          map[string]string
-	Args         []string
-	Command      string
-	// SecretNames — переменные с секретами; SecretValues — их значения для
-	// маскирования; Secrets — режим профиля.
-	SecretNames  []string
-	SecretValues []string
-	Secrets      string
-	Catalog      bool
-}
-
 // ResolveAgentModel — действующая модель агента: явная модель участника,
 // иначе переопределение проекта, иначе модель по умолчанию профиля.
 // Возвращает привязку (подключение и модель); ok=false — агент вне каталога.
@@ -612,89 +648,118 @@ func (s *Store) ResolveAgentModel(ctx context.Context, agentID, explicit string,
 	return a, domain.AgentModelRef{}, true, nil
 }
 
-// BuildAgentLaunch собирает окружение и аргументы по шаблону профиля и
-// подключению привязки. Секреты подставляются всегда (решение о доставке
-// принимает вызывающий по режиму и каналу): при отказе в доставке их
-// переменные выбрасываются целиком.
-func (s *Store) BuildAgentLaunch(ctx context.Context, a domain.AgentProfile, b domain.AgentModelRef, box *secretbox.Box, includeSecrets bool) (AgentLaunch, error) {
-	l := AgentLaunch{Model: b.Model, ConnectionID: b.ConnectionID, Env: map[string]string{}, Args: []string{}, Command: a.Command, Secrets: a.Secrets, Catalog: true}
-	key, baseURL := "", ""
-	headers := map[string]string{}
-	secretHeaders := map[string]bool{}
-	if b.ConnectionID != "" {
-		cl, c, err := s.ConnectionClient(ctx, b.ConnectionID, box)
-		if err != nil && !errors.Is(err, ErrSecret) && !errors.Is(err, secretbox.ErrNoKey) {
-			return l, err
-		}
-		if err == nil {
-			key, baseURL, headers = cl.Key, cl.BaseURL, cl.Headers
-		} else {
-			baseURL = c.BaseURL
-		}
-		for _, h := range c.Headers {
-			if h.Secret {
-				secretHeaders[h.Name] = true
-			}
-		}
-	}
-	subst := func(v string) (string, bool) {
-		secret := false
-		out := placeholderRe.ReplaceAllStringFunc(v, func(m string) string {
-			sm := placeholderRe.FindStringSubmatch(m)
-			switch sm[1] {
-			case "key":
-				secret = true
-				return key
-			case "base_url":
-				return baseURL
-			case "model":
-				return b.Model
-			case "connection_id":
-				return b.ConnectionID
-			case "header":
-				if secretHeaders[sm[2]] {
-					secret = true
-				}
-				return headers[sm[2]]
-			}
-			return ""
-		})
-		return out, secret
-	}
-	for _, e := range a.Env {
-		v, secret := subst(e.Value)
-		if secret {
-			if !includeSecrets {
-				continue
-			}
-			l.SecretNames = append(l.SecretNames, e.Name)
-			if v != "" {
-				l.SecretValues = append(l.SecretValues, v)
-			}
-		}
-		if v == "" && strings.Contains(e.Value, "{{") {
-			continue // подстановка пустая: переменную не задаём
-		}
-		l.Env[e.Name] = v
-	}
-	for _, arg := range a.Args {
-		v, secret := subst(arg)
-		if secret && !includeSecrets {
-			continue
-		}
-		if secret && v != "" {
-			l.SecretValues = append(l.SecretValues, v)
-		}
-		l.Args = append(l.Args, v)
-	}
-	sort.Strings(l.SecretNames)
-	return l, nil
-}
-
 // SetRunModel фиксирует модель, выбранную при назначении (для консоли и usage).
 func (s *Store) SetRunModel(ctx context.Context, runID int64, model string) error {
 	// Назначенная модель — отдельно от явной модели участника: она не
 	// становится требованием при повторном назначении.
 	_, err := s.Pool.Exec(ctx, `UPDATE task_step_runs SET assigned_model=$2 WHERE id=$1`, runID, model)
 	return err
+}
+
+// ModelEndpoint — подключение модели для агентского цикла Rivet в
+// назначении (Assignment.endpoint): адрес, модель, окно и цены из каталога,
+// лимиты профиля, ключ — только по режиму секретов.
+type ModelEndpoint struct {
+	API           string
+	BaseURL       string
+	Model         string
+	ConnectionID  string
+	ContextWindow int64
+	// MaxOutputTokens — предел ответа на ход, ModelMaxOutput — предельный
+	// выход модели; 0 — по умолчанию цикла.
+	MaxOutputTokens int64
+	ModelMaxOutput  int64
+	HasPrices       bool
+	InputPrice      float64 // USD за миллион токенов
+	OutputPrice     float64
+	// CachedInputPrice — цена чтения из кеша; 0 — цены кеша нет, цикл
+	// считает кешированный вход по цене входа.
+	CachedInputPrice float64
+	Limits           domain.AgentLimits
+	Key              string
+	Headers          map[string]string
+	SecretsIncluded  bool
+	// SecretNames — что доставлено (для события без значений).
+	SecretNames []string
+}
+
+// BuildModelEndpoint собирает подключение агента Rivet по привязке. Ключ и
+// секретные заголовки включаются, только если includeSecrets (решение по
+// режиму профиля и каналу runner'а принимает вызывающий).
+func (s *Store) BuildModelEndpoint(ctx context.Context, a domain.AgentProfile, b domain.AgentModelRef, box *secretbox.Box, includeSecrets bool) (ModelEndpoint, error) {
+	ep := ModelEndpoint{Model: b.Model, ConnectionID: b.ConnectionID, Limits: a.Limits}
+	if b.ConnectionID == "" {
+		return ep, nil
+	}
+	cl, c, err := s.ConnectionClient(ctx, b.ConnectionID, box)
+	if err != nil && !errors.Is(err, ErrSecret) && !errors.Is(err, secretbox.ErrNoKey) {
+		return ep, err
+	}
+	ep.API, ep.BaseURL = c.API, c.BaseURL
+	if ep.BaseURL == "" {
+		ep.BaseURL = cl.BaseURL
+	}
+	for _, m := range c.Models {
+		if m.ID != b.Model {
+			continue
+		}
+		if m.ContextWindow != nil {
+			ep.ContextWindow = *m.ContextWindow
+		}
+		if m.MaxOutputTokens != nil {
+			ep.MaxOutputTokens = *m.MaxOutputTokens
+		}
+		if m.ModelMaxOutput != nil {
+			ep.ModelMaxOutput = *m.ModelMaxOutput
+		}
+		// Цены в каталоге — микродоллары за миллион токенов.
+		if m.InputPrice != nil || m.OutputPrice != nil {
+			ep.HasPrices = true
+			if m.InputPrice != nil {
+				ep.InputPrice = float64(*m.InputPrice) / 1e6
+			}
+			if m.OutputPrice != nil {
+				ep.OutputPrice = float64(*m.OutputPrice) / 1e6
+			}
+			if m.CachedInputPrice != nil {
+				ep.CachedInputPrice = float64(*m.CachedInputPrice) / 1e6
+			}
+		}
+	}
+	if includeSecrets && err == nil {
+		secret := map[string]bool{}
+		for _, h := range c.Headers {
+			if h.Secret {
+				secret[h.Name] = true
+			}
+		}
+		if cl.Key != "" {
+			ep.Key = cl.Key
+			ep.SecretNames = append(ep.SecretNames, "key")
+		}
+		ep.Headers = map[string]string{}
+		for k, v := range cl.Headers {
+			ep.Headers[k] = v
+			if secret[k] {
+				ep.SecretNames = append(ep.SecretNames, "header:"+k)
+			}
+		}
+		ep.SecretsIncluded = len(ep.SecretNames) > 0
+	} else if err == nil {
+		// Без секретов уходят только несекретные заголовки.
+		secret := map[string]bool{}
+		for _, h := range c.Headers {
+			if h.Secret {
+				secret[h.Name] = true
+			}
+		}
+		ep.Headers = map[string]string{}
+		for k, v := range cl.Headers {
+			if !secret[k] {
+				ep.Headers[k] = v
+			}
+		}
+	}
+	sort.Strings(ep.SecretNames)
+	return ep, nil
 }

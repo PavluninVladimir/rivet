@@ -88,14 +88,30 @@ func driveToReview(t *testing.T, f policyFixture) {
 	}
 }
 
+// reviewWithTwoAgents — два ревьюера агента Rivet на разных моделях.
 func reviewWithTwoAgents(mode, require string) policy.Process {
 	p := policy.DefaultProcess()
 	p.Steps[2].Participants = []policy.Participant{
-		{Agent: &policy.AgentRef{Kind: "wrap"}},
-		{Agent: &policy.AgentRef{Kind: "codex", Model: "gpt-5"}},
+		{Agent: &policy.AgentRef{Kind: store.AgentRivet, Model: "sonnet"}},
+		{Agent: &policy.AgentRef{Kind: store.AgentRivet, Model: "gpt-5"}},
 	}
 	p.Steps[2].Mode, p.Steps[2].Require = mode, require
 	return p
+}
+
+// twoReviewers — runner'ы ревьюеров под модели участников: без подключений
+// в каталоге модели runner'а агента Rivet — объявленные.
+func twoReviewers(t *testing.T, f policyFixture) {
+	t.Helper()
+	ctx := context.Background()
+	for _, r := range []domain.Runner{
+		{ID: "reviewer", Agent: store.AgentRivet, Models: []string{"sonnet"}, Capabilities: []string{"coding", "review"}},
+		{ID: "gpt-r", Agent: store.AgentRivet, Models: []string{"gpt-5"}, Capabilities: []string{"review"}},
+	} {
+		if err := f.st.UpsertRunner(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // Два агента-ревьюера параллельно: обе сессии стартуют сразу на разных
@@ -103,7 +119,7 @@ func reviewWithTwoAgents(mode, require string) policy.Process {
 func TestTwoReviewersParallelMergeRemarks(t *testing.T) {
 	ctx := context.Background()
 	f := newPolicyFixture(t, "diff --git a/x b/x\n")
-	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "codex-r", Agent: "codex", Models: []string{"gpt-5"}, Capabilities: []string{"review"}})
+	twoReviewers(t, f)
 	setProcess(t, f, reviewWithTwoAgents(policy.ModeParallel, policy.RequireAll))
 	driveToReview(t, f)
 	mark := f.out.count()
@@ -131,7 +147,7 @@ func TestTwoReviewersParallelMergeRemarks(t *testing.T) {
 	if st := taskStatus(t, f.st, f.task.ID); st != domain.TaskReview {
 		t.Fatalf("после одного вердикта задача должна ждать второго: %s", st)
 	}
-	if err := f.e.OnStageResult(ctx, "codex-r", &pb.StageResult{TaskId: f.task.ID, SessionId: byPart["p2"].SessionId, Stage: pb.StageResult_REVIEW, Ok: false, Detail: "второе замечание"}); err != nil {
+	if err := f.e.OnStageResult(ctx, "gpt-r", &pb.StageResult{TaskId: f.task.ID, SessionId: byPart["p2"].SessionId, Stage: pb.StageResult_REVIEW, Ok: false, Detail: "второе замечание"}); err != nil {
 		t.Fatal(err)
 	}
 	task, _ := f.st.GetTask(ctx, f.task.ID)
@@ -143,7 +159,7 @@ func TestTwoReviewersParallelMergeRemarks(t *testing.T) {
 	}
 	fix := f.out.lastAssign(t)
 	if fix.Stage != pb.StageResult_FIXING || !strings.Contains(fix.ExtraContext, "первое замечание") ||
-		!strings.Contains(fix.ExtraContext, "второе замечание") || !strings.Contains(fix.ExtraContext, "участника p2 (codex/gpt-5)") {
+		!strings.Contains(fix.ExtraContext, "второе замечание") || !strings.Contains(fix.ExtraContext, "участника p2 (rivet/gpt-5)") {
 		t.Fatalf("контекст исправления должен нести оба списка с автором: %+v", fix)
 	}
 	steps := eventsOfType(t, f.st, f.task.ID, "task.step")
@@ -158,7 +174,7 @@ func TestTwoReviewersParallelMergeRemarks(t *testing.T) {
 func TestSequentialReviewers(t *testing.T) {
 	ctx := context.Background()
 	f := newPolicyFixture(t, "diff --git a/x b/x\n")
-	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "codex-r", Agent: "codex", Models: []string{"gpt-5"}, Capabilities: []string{"review"}})
+	twoReviewers(t, f)
 	setProcess(t, f, reviewWithTwoAgents(policy.ModeSequential, policy.RequireAll))
 	driveToReview(t, f)
 	mark := f.out.count()
@@ -206,7 +222,7 @@ func TestSequentialReviewers(t *testing.T) {
 	if second.Participant != "p2" || second.Model != "gpt-5" {
 		t.Fatalf("после одобрения первого стартует второй: %+v", second)
 	}
-	if err := f.e.OnStageResult(ctx, "codex-r", &pb.StageResult{TaskId: f.task.ID, SessionId: second.SessionId, Stage: pb.StageResult_REVIEW, Ok: true}); err != nil {
+	if err := f.e.OnStageResult(ctx, "gpt-r", &pb.StageResult{TaskId: f.task.ID, SessionId: second.SessionId, Stage: pb.StageResult_REVIEW, Ok: true}); err != nil {
 		t.Fatal(err)
 	}
 	if evs := eventsOfType(t, f.st, f.task.ID, "task.review_passed"); len(evs) != 1 {
@@ -218,7 +234,7 @@ func TestSequentialReviewers(t *testing.T) {
 func TestRequireAnyCancelsOthers(t *testing.T) {
 	ctx := context.Background()
 	f := newPolicyFixture(t, "diff --git a/x b/x\n")
-	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "codex-r", Agent: "codex", Models: []string{"gpt-5"}, Capabilities: []string{"review"}})
+	twoReviewers(t, f)
 	setProcess(t, f, reviewWithTwoAgents(policy.ModeParallel, policy.RequireAny))
 	driveToReview(t, f)
 	mark := f.out.count()
@@ -247,7 +263,7 @@ func TestRequireAnyCancelsOthers(t *testing.T) {
 		t.Fatalf("второй сессии должна уйти отмена: %d", cancels)
 	}
 	// Поздний результат отменённой сессии отбрасывается.
-	if err := f.e.OnStageResult(ctx, "codex-r", &pb.StageResult{TaskId: f.task.ID, SessionId: reviews[1].SessionId, Stage: pb.StageResult_REVIEW, Ok: false, Detail: "поздно"}); err != nil {
+	if err := f.e.OnStageResult(ctx, "gpt-r", &pb.StageResult{TaskId: f.task.ID, SessionId: reviews[1].SessionId, Stage: pb.StageResult_REVIEW, Ok: false, Detail: "поздно"}); err != nil {
 		t.Fatal(err)
 	}
 	if st := taskStatus(t, f.st, f.task.ID); st != domain.TaskReview {
@@ -266,7 +282,7 @@ func TestRequireAnyCancelsOthers(t *testing.T) {
 func TestBlockedParticipantReturnsToSameStep(t *testing.T) {
 	ctx := context.Background()
 	f := newPolicyFixture(t, "diff --git a/x b/x\n")
-	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "codex-r", Agent: "codex", Models: []string{"gpt-5"}, Capabilities: []string{"review"}})
+	twoReviewers(t, f)
 	setProcess(t, f, reviewWithTwoAgents(policy.ModeParallel, policy.RequireAll))
 	driveToReview(t, f)
 	mark := f.out.count()
@@ -274,7 +290,7 @@ func TestBlockedParticipantReturnsToSameStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	reviews := f.out.assignsSince(mark)
-	if err := f.e.OnBlocked(ctx, "codex-r", &pb.BlockedQuestion{TaskId: f.task.ID, SessionId: reviews[1].SessionId, Question: "какой стиль?"}); err != nil {
+	if err := f.e.OnBlocked(ctx, "gpt-r", &pb.BlockedQuestion{TaskId: f.task.ID, SessionId: reviews[1].SessionId, Question: "какой стиль?"}); err != nil {
 		t.Fatal(err)
 	}
 	task, _ := f.st.GetTask(ctx, f.task.ID)
@@ -431,19 +447,19 @@ func TestProcessVersionPinnedOnTask(t *testing.T) {
 	}
 }
 
-// Нет runner'а с нужным агентом и моделью: задача ждёт с явной причиной,
-// назначается после регистрации подходящего runner'а.
+// Нет runner'а агента Rivet с нужной моделью: задача ждёт с явной
+// причиной, назначается после регистрации подходящего runner'а.
 func TestWaitsForAgentAndModel(t *testing.T) {
 	ctx := context.Background()
 	f := newPolicyFixture(t, "")
 	proc := policy.DefaultProcess()
-	proc.Steps[0].Participants = []policy.Participant{{Agent: &policy.AgentRef{Kind: "codex", Model: "gpt-5"}}}
+	proc.Steps[0].Participants = []policy.Participant{{Agent: &policy.AgentRef{Kind: store.AgentRivet, Model: "gpt-5"}}}
 	setProcess(t, f, proc)
 	if err := f.e.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	task, _ := f.st.GetTask(ctx, f.task.ID)
-	if task.Status != domain.TaskReady || !strings.Contains(task.WaitReason, "codex/gpt-5") {
+	if task.Status != domain.TaskReady || !strings.Contains(task.WaitReason, "rivet/gpt-5") {
 		t.Fatalf("ожидание с причиной: %s %q", task.Status, task.WaitReason)
 	}
 	if evs := eventsOfType(t, f.st, f.task.ID, "task.wait"); len(evs) != 1 {
@@ -455,13 +471,13 @@ func TestWaitsForAgentAndModel(t *testing.T) {
 	if evs := eventsOfType(t, f.st, f.task.ID, "task.wait"); len(evs) != 1 {
 		t.Fatalf("повторный тик не плодит событий: %d", len(evs))
 	}
-	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "codex-w", Agent: "codex", Models: []string{"gpt-5", "gpt-5-mini"}, Capabilities: []string{"coding"}})
+	_ = f.st.UpsertRunner(ctx, domain.Runner{ID: "gpt-w", Agent: store.AgentRivet, Models: []string{"gpt-5", "gpt-5-mini"}, Capabilities: []string{"coding"}})
 	if err := f.e.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	as := f.out.lastAssign(t)
 	task, _ = f.st.GetTask(ctx, f.task.ID)
-	if task.RunnerID != "codex-w" || as.Model != "gpt-5" || task.WaitReason != "" {
+	if task.RunnerID != "gpt-w" || as.Model != "gpt-5" || task.WaitReason != "" {
 		t.Fatalf("назначение подходящему runner'у с моделью: %s %q wait=%q", task.RunnerID, as.Model, task.WaitReason)
 	}
 }

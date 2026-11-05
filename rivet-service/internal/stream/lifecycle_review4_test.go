@@ -63,9 +63,9 @@ func newLifecycleFixture(t *testing.T) *lifecycleFixture {
 
 func (f *lifecycleFixture) register(t *testing.T, boot string, pending []string) {
 	t.Helper()
-	if resp, err := f.client.Register(f.authed, &pb.RegisterRequest{RunnerId: "r1", Agent: "claude-code", Host: "h",
+	if resp, err := f.client.Register(f.authed, &pb.RegisterRequest{RunnerId: "r1", Agent: "rivet", Host: "h",
 		Capabilities: []string{"coding"}, ProtocolVersion: protocolVersion, Adapter: "wrap", Depth: "minimal",
-		BootId: boot, PendingSessions: pending}); err != nil || !resp.Accepted {
+		BootId: boot, PendingSessions: pending, Features: []string{"native"}}); err != nil || !resp.Accepted {
 		t.Fatalf("register: %v %+v", err, resp)
 	}
 }

@@ -1,8 +1,12 @@
 #!/bin/sh
 # E2E-стенд: чистая база, локальный bare-репозиторий вместо GitHub,
-# rivetd с fake SCM и три runner'а с fake-агентом (токен регистрации
-# выпускается через API после старта rivetd). Процесс остаётся
-# на переднем плане (rivetd), Playwright использует его как webServer.
+# rivetd с fake SCM, fake-llm вместо провайдера модели и runner'ы агента
+# Rivet поверх него (add-native-agent): агентский цикл настоящий, модель —
+# детерминированные сценарии fake-llm. Токен регистрации и подключение к
+# fake-llm создаются через API после старта rivetd. Процесс остаётся на
+# переднем плане (rivetd), Playwright использует его как webServer.
+# Fake-провайдер и fake SCM — только тестовая инфраструктура: в консоли и
+# пресетах продукта их нет.
 set -eu
 
 SERVICE_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -12,7 +16,7 @@ GRPC_PORT=${E2E_GRPC_PORT:-8291}
 DB_BASE=${RIVET_DATABASE_URL:-postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable}
 
 rm -rf "$STAND_DIR"
-mkdir -p "$STAND_DIR/repos/e2e" "$STAND_DIR/rw-worker" "$STAND_DIR/rw-reviewer"
+mkdir -p "$STAND_DIR/repos/e2e"
 
 # Чистая база на прогон: команда нашего CLI, работает без psql.
 DB_NAME="rivet_e2e_$$_$(date +%s)"
@@ -27,10 +31,13 @@ git init -b main -q "$SEED"
   && git -c user.email=e2e@rivet -c user.name=e2e commit -q --allow-empty -m "seed" \
   && git push -q "$BARE" main)
 
-# Свежая сборка консоли во встроенную статику, затем бинарники.
-(cd "$SERVICE_DIR/../rivet-web" && npm run build >/dev/null)
+# Свежая сборка консоли во встроенную статику, затем бинарники. Путь консоли
+# вычисляется через cd: если rivet-service — символическая ссылка, `..` в
+# пути для cp разворачивался бы от цели ссылки, а не от её каталога.
+WEB_DIR=$(cd "$SERVICE_DIR/../rivet-web" && pwd -P)
+(cd "$WEB_DIR" && npm run build >/dev/null)
 rm -rf "$SERVICE_DIR/internal/webui/dist"
-cp -r "$SERVICE_DIR/../rivet-web/dist" "$SERVICE_DIR/internal/webui/dist"
+cp -r "$WEB_DIR/dist" "$SERVICE_DIR/internal/webui/dist"
 (cd "$SERVICE_DIR" && go build -o "$STAND_DIR/rivetd" ./cmd/rivetd \
   && go build -o "$STAND_DIR/rivet-runner" ./cmd/rivet-runner \
   && go build -o "$STAND_DIR/fake-llm" ./cmd/fake-llm)
@@ -54,7 +61,7 @@ done
 ADMIN_LOGIN="${E2E_ADMIN_LOGIN:-e2e-admin}"
 ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-e2e-password}"
 API="http://localhost:$HTTP_PORT/api/v1"
-AGENT_CMD="sh $SERVICE_DIR/scripts/fake-agent.sh"
+LLM_CONN=${E2E_LLM_CONNECTION:-e2e-llm}
 (
   for _ in $(seq 1 120); do
     curl -sf "$API/health" >/dev/null 2>&1 && break
@@ -72,37 +79,64 @@ AGENT_CMD="sh $SERVICE_DIR/scripts/fake-agent.sh"
   || { echo "e2e-stand: не удалось выпустить токены" >&2; exit 1; }
   # Автоописание архитектуры на стенде выключено, пока нет e2e-сценариев
   # архитектуры (add-architecture-c4): иначе каждый проект получал бы
-  # задачу описания, и она занимала бы worker'ы сценариев.
+  # задачу описания, и она занимала бы worker'ы сценариев. Сценарий
+  # Архитектора в fake-llm есть (маркер задания describe).
   curl -sf -b "$STAND_DIR/cookies" "$API/system/policy" \
     | python3 -c 'import json,sys; p=json.load(sys.stdin)["presets"]; p["auto_describe_architecture"]=False; print(json.dumps(p))' \
     | curl -sf -b "$STAND_DIR/cookies" -X PUT -H 'Content-Type: application/json' -d @- "$API/system/policy" >/dev/null \
   || { echo "e2e-stand: не удалось выключить автоописание архитектуры" >&2; exit 1; }
   RUNNER_TOKEN=$(cat "$STAND_DIR/runner-token")
-  # Runner'ы: fake-агент, клонирование из локального bare.
-  # Worker'ы — нативный адаптер Claude Code с fake-claude: e2e видит полную
-  # глубину (шаги с файлами); двое — для пересечений работ (две задачи
-  # правят общий файл параллельно). Ревьюер остаётся на обёртке (минимальная).
-  RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
-    "$STAND_DIR/rivet-runner" -id e2e-worker -agent claude-code -caps coding \
-    -adapter claude-code -claude-bin "$SERVICE_DIR/scripts/fake-claude.sh" -workdir "$STAND_DIR/rw-worker" &
-  mkdir -p "$STAND_DIR/rw-worker2"
-  RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
-    "$STAND_DIR/rivet-runner" -id e2e-worker2 -agent claude-code -caps coding \
-    -adapter claude-code -claude-bin "$SERVICE_DIR/scripts/fake-claude.sh" -workdir "$STAND_DIR/rw-worker2" &
-  RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
-    "$STAND_DIR/rivet-runner" -id e2e-reviewer -agent fake -caps review -models fake-small \
-    -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-reviewer" &
-  # Второй ревьюер с другой моделью: процесс проекта с двумя агентами на
-  # шаге review (change add-process-model).
-  mkdir -p "$STAND_DIR/rw-reviewer2"
-  RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
-    "$STAND_DIR/rivet-runner" -id e2e-reviewer2 -agent fake -caps review -models fake-large,fake-small \
-    -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-reviewer2" &
-  # Деплой-runner: окружения e2e исполняют команды локально (пустой host).
-  mkdir -p "$STAND_DIR/rw-deployer"
-  RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
-    "$STAND_DIR/rivet-runner" -id e2e-deployer -agent fake -caps deploy \
-    -cmd "$AGENT_CMD" -workdir "$STAND_DIR/rw-deployer" &
+  # Служебное подключение стенда к fake-llm (не пресет): модели агента Rivet
+  # — модели каталога, поэтому подключение создаётся до старта runner'ов.
+  # fake-llm отдаёт модели без цен. Цены fake-small и fake-large (3 и 15
+  # долларов за миллион токенов входа и выхода, в каталоге — микродоллары)
+  # ставятся поверх обнаруженного списка: агент Rivet считает по ним
+  # стоимость сессий, как раньше её сообщал fake-claude, и обзор с отчётом
+  # показывают расход в долларах. Остальные модели списка не меняются.
+  curl -sf -b "$STAND_DIR/cookies" -X PUT -H 'Content-Type: application/json' \
+    -d "{\"name\":\"E2E LLM\",\"kind\":\"local\",\"api\":\"openai\",\"base_url\":\"http://localhost:$LLM_PORT/v1\",\"key\":\"fake-key\"}" \
+    "$API/system/connections/$LLM_CONN" >/dev/null \
+  && curl -sf -b "$STAND_DIR/cookies" -X POST "$API/system/connections/$LLM_CONN/discover" \
+    | python3 -c '
+import json, sys
+models = json.load(sys.stdin)["connection"]["models"]
+prices = {"fake-small": (3_000_000, 15_000_000), "fake-large": (3_000_000, 15_000_000)}
+for m in models:
+    if m["id"] in prices:
+        m["input_price"], m["output_price"] = prices[m["id"]]
+missing = set(prices) - {m["id"] for m in models}
+if missing:
+    sys.exit("e2e-stand: fake-llm не отдал модели " + ", ".join(sorted(missing)))
+print(json.dumps({"models": models}))' > "$STAND_DIR/llm-models.json" \
+  && curl -sf -b "$STAND_DIR/cookies" -X PUT -H 'Content-Type: application/json' \
+    -d @"$STAND_DIR/llm-models.json" "$API/system/connections/$LLM_CONN/models" >/dev/null \
+  && curl -sf -b "$STAND_DIR/cookies" -X PUT -H 'Content-Type: application/json' \
+    -d "{\"default_model\":{\"connection_id\":\"$LLM_CONN\",\"model\":\"fake-small\"}}" \
+    "$API/system/agents/rivet" >/dev/null \
+  || { echo "e2e-stand: не удалось подключить fake-llm" >&2; exit 1; }
+  # Runner'ы агента Rivet: клонирование из локального bare. Песочница для
+  # команд агента на машине стенда может быть недоступна (macOS, Docker с
+  # seccomp по умолчанию, Linux без user namespaces): модель здесь —
+  # fake-llm, поэтому runner'ы стартуют с -unsandboxed. Флаг только
+  # разрешает работать без песочницы: если проба проходит, команды агента
+  # идут в песочнице без сети. Итог пробы runner пишет в журнал, журнал
+  # каждого runner'а копируется в $STAND_DIR/runner-<id>.log: по нему e2e
+  # сверяет флаг изоляции в API. Двое worker'ов — для пересечений работ,
+  # двое ревьюеров — для процесса с двумя агентами на шаге review.
+  start_runner() { # $1 — id, остальное — флаги
+    id=$1; shift
+    mkdir -p "$STAND_DIR/rw-$id"
+    RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
+      RIVET_RUNNER_UNSANDBOXED=1 \
+      "$STAND_DIR/rivet-runner" -id "$id" -workdir "$STAND_DIR/rw-$id" "$@" 2>&1 \
+      | tee "$STAND_DIR/runner-$id.log" >&2 &
+  }
+  start_runner e2e-worker -agent rivet -caps coding
+  start_runner e2e-worker2 -agent rivet -caps coding
+  start_runner e2e-reviewer -agent rivet -caps review
+  start_runner e2e-reviewer2 -agent rivet -caps review
+  # Runner выкатки без агента: окружения e2e исполняют команды локально.
+  start_runner e2e-deployer -caps deploy
   wait
 ) &
 

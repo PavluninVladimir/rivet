@@ -43,7 +43,7 @@ func seedDeploy(t *testing.T, st *store.Store, e *Engine, trigger string) (domai
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpsertRunner(ctx, domain.Runner{ID: "deployer", Agent: "wrap", Capabilities: []string{"deploy"}}); err != nil {
+	if err := st.UpsertRunner(ctx, domain.Runner{ID: "deployer", Capabilities: []string{"deploy"}}); err != nil {
 		t.Fatal(err)
 	}
 	return owner, env
@@ -263,7 +263,7 @@ func TestDeployRunnerLostAndWatchdog(t *testing.T) {
 	if err := st.SetEnvPaused(ctx, env.ID, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpsertRunner(ctx, domain.Runner{ID: "deployer", Agent: "wrap", Capabilities: []string{"deploy"}}); err != nil {
+	if err := st.UpsertRunner(ctx, domain.Runner{ID: "deployer", Capabilities: []string{"deploy"}}); err != nil {
 		t.Fatal(err)
 	}
 	dep2, _ := st.EnqueueDeployment(ctx, env.ID, "sha-2", "vova")
@@ -302,8 +302,8 @@ func TestMergeEnqueuesAutoDeploysCoalesced(t *testing.T) {
 	// Две зависимые задачи доходят до merge по очереди (без deploy-runner'а —
 	// публикации копятся в очереди).
 	epic, _ := st.CreateEpic(ctx, p.ID, "E", "")
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: "wrap", Capabilities: []string{"coding"}})
-	_ = st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: "wrap", Capabilities: []string{"coding", "review"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "worker", Agent: store.AgentRivet, Capabilities: []string{"coding"}})
+	_ = st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: store.AgentRivet, Capabilities: []string{"coding", "review"}})
 	taskA, err := st.CreateTask(ctx, epic.ID, store.NewTask{Title: "A"})
 	if err != nil {
 		t.Fatal(err)
@@ -455,7 +455,7 @@ func TestDeployRunnerReconnectFailsActive(t *testing.T) {
 	if err := e.FailDeploymentNow(ctx, depID, "runner переподключился"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpsertRunner(ctx, domain.Runner{ID: "deployer", Agent: "wrap", Capabilities: []string{"deploy"}}); err != nil {
+	if err := st.UpsertRunner(ctx, domain.Runner{ID: "deployer", Capabilities: []string{"deploy"}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := deploymentStatus(t, st, dep.ID); got != "failed" {

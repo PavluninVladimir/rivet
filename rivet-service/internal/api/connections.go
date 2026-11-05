@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -117,6 +118,14 @@ type headerIn struct {
 	Secret bool    `json:"secret"`
 }
 
+// listPresets — пресеты провайдеров для формы подключения.
+func (s *Server) listPresets(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"presets": llm.Presets()})
+}
+
 // putConnection — создать или изменить подключение, затем проверить его у
 // провайдера (design: сохранение не зависит от доступности провайдера).
 func (s *Server) putConnection(w http.ResponseWriter, r *http.Request) {
@@ -131,10 +140,34 @@ func (s *Server) putConnection(w http.ResponseWriter, r *http.Request) {
 		Key     *string     `json:"key"`
 		Headers *[]headerIn `json:"headers"`
 		Enabled *bool       `json:"enabled"`
+		// Preset — пресет провайдера (add-native-agent): пустые поля
+		// берутся из него, модели пресета — если провайдер не отдаёт список.
+		Preset string `json:"preset"`
 	}
 	if err := decode(r, &in); err != nil {
 		unprocessable(w, "невалидное тело запроса")
 		return
+	}
+	var preset *llm.Preset
+	if in.Preset != "" {
+		p, ok := llm.PresetByID(in.Preset)
+		if !ok {
+			fieldErr(w, "unknown_preset", "preset", "неизвестный пресет "+in.Preset)
+			return
+		}
+		preset = &p
+		if in.Name == "" {
+			in.Name = p.Name
+		}
+		if in.Kind == "" {
+			in.Kind = p.Kind
+		}
+		if in.API == "" {
+			in.API = string(p.API)
+		}
+		if in.BaseURL == "" {
+			in.BaseURL = p.BaseURL
+		}
 	}
 	inp := store.ConnectionInput{ID: r.PathValue("id"), Name: in.Name, Kind: in.Kind, API: in.API, BaseURL: in.BaseURL, Key: in.Key, Enabled: in.Enabled}
 	if in.Headers != nil {
@@ -150,7 +183,11 @@ func (s *Server) putConnection(w http.ResponseWriter, r *http.Request) {
 		s.writeConnErr(w, err)
 		return
 	}
-	c, err = s.checkConnection(r.Context(), c.ID, u.Login)
+	if preset != nil {
+		c, err = s.discoverPreset(r.Context(), c.ID, *preset, u.Login)
+	} else {
+		c, err = s.checkConnection(r.Context(), c.ID, u.Login)
+	}
 	if err != nil {
 		s.writeConnErr(w, err)
 		return
@@ -164,6 +201,67 @@ func (s *Server) putConnection(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, connDTO(c))
+}
+
+// discoverPreset — проверка подключения из пресета и список моделей у
+// провайдера одним запросом (спека model-connections «Пресеты
+// провайдеров»): найденные модели сливаются, как при обнаружении, а окно
+// контекста и пределы ответа из пресета дополняют модели с теми же
+// идентификаторами. Провайдер список не отдал (404, отказ ключа, сеть) —
+// подключение без моделей получает модели пресета с источником preset.
+func (s *Server) discoverPreset(ctx context.Context, id string, p llm.Preset, actor string) (domain.ModelConnection, error) {
+	cl, _, err := s.St.ConnectionClient(ctx, id, s.Secrets)
+	if err != nil {
+		if errors.Is(err, store.ErrSecret) {
+			return s.St.SetConnectionCheck(ctx, id, domain.LLMStateInvalid, err.Error(), actor)
+		}
+		return domain.ModelConnection{}, err
+	}
+	found, perr := listModels(ctx, cl)
+	state, detail := checkState(perr)
+	c, err := s.St.SetConnectionCheck(ctx, id, state, detail, actor)
+	if err != nil {
+		return c, err
+	}
+	models := presetEntries(p)
+	if perr == nil {
+		if c, _, _, err = s.St.MergeDiscoveredModels(ctx, id, found, actor); err != nil || len(models) == 0 {
+			return c, err
+		}
+		return s.St.ApplyPresetModels(ctx, id, models, false, actor)
+	}
+	if len(models) == 0 || len(c.Models) > 0 {
+		return c, nil
+	}
+	return s.St.ApplyPresetModels(ctx, id, models, true, actor)
+}
+
+// presetEntries — модели пресета в форме каталога: окно контекста, предел
+// ответа (он же предельный выход модели), цены в микродолларах за миллион
+// токенов.
+func presetEntries(p llm.Preset) []domain.ModelEntry {
+	out := make([]domain.ModelEntry, 0, len(p.Models))
+	positive := func(v int64) *int64 {
+		if v <= 0 {
+			return nil
+		}
+		return &v
+	}
+	micro := func(usd float64) *int64 {
+		if usd <= 0 {
+			return nil
+		}
+		v := int64(math.Round(usd * 1e6))
+		return &v
+	}
+	for _, m := range p.Models {
+		out = append(out, domain.ModelEntry{
+			ID: m.ID, Label: m.ID, Source: store.ModelSourcePreset,
+			ContextWindow: positive(m.ContextWindow), MaxOutputTokens: positive(m.MaxOutputTokens), ModelMaxOutput: positive(m.MaxOutputTokens),
+			InputPrice: micro(m.InputPrice), OutputPrice: micro(m.OutputPrice),
+		})
+	}
+	return out
 }
 
 // checkConnection проверяет подключение списком моделей и записывает состояние.

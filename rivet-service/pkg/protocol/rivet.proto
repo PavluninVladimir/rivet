@@ -23,13 +23,15 @@ message RegisterRequest {
   string host = 4;
   repeated string capabilities = 5;
   string protocol_version = 6;
-  // Адаптер подключения агента (claude-code, wrap) и глубина данных,
-  // которую он даёт: full | partial | minimal (спека agent-integration
-  // «Уровни глубины данных»). Сессии runner'а создаются с этой глубиной.
+  // Адаптер подключения агента (native у агента Rivet, пусто у runner'а
+  // выкатки; claude-code и wrap только у старых runner'ов) и глубина
+  // данных, которую он даёт: full | partial | minimal (спека
+  // agent-integration «Уровни глубины данных»). Сессии runner'а создаются
+  // с этой глубиной.
   string adapter = 7;
   string depth = 8;
   // Поддерживает ли адаптер обратный канал контекста (PlaneMsg.Context):
-  // нативный адаптер доводит контекст до агента, обёртка — нет, и таким
+  // агент Rivet доводит контекст до модели, старая обёртка — нет, и таким
   // runner'ам control plane контекст не шлёт (спека agent-integration
   // «Обратный канал контекста»).
   bool context_channel = 9;
@@ -56,6 +58,10 @@ message RegisterRequest {
   // доставлены: перезапущенный runner проиграет их, такие запуски control
   // plane не снимает.
   repeated string pending_sessions = 15;
+  // Команды агента идут в песочнице без сети (add-native-agent): runner
+  // объявляет, поднялась ли песочница; консоль показывает runner'ы, чьи
+  // команды идут с доступом в сеть. Номер с запасом под соседние change'ы.
+  bool network_isolated = 40;
 }
 
 message RegisterResponse {
@@ -127,6 +133,11 @@ message Usage {
   optional double cost_usd = 5;
   int32 duration_s = 6;
   optional int32 ctx_pct = 7;
+  // Кешированный вход (чтение из кеша провайдера) и запись в кеш, входят в
+  // tokens_in (add-native-agent, спека native-agent «Наблюдаемость»).
+  // Номера с запасом под соседние change'ы.
+  optional int64 tokens_cached = 40;
+  optional int64 tokens_cache_write = 41;
 }
 
 // StageResult — детерминированный итог этапа конвейера.
@@ -234,13 +245,16 @@ message Assignment {
   // окружения и аргументы по шаблону профиля, команда обёртки, подключение
   // модели. Секреты включены только по режиму профиля и каналу runner'а;
   // runner накладывает окружение поверх своего и маскирует секреты.
-  map<string, string> agent_env = 21;
-  repeated string agent_args = 22;
-  string agent_command = 23;
+  // Поля 21–23 и 26 устарели (add-native-agent): у агента Rivet нет команды,
+  // аргументов и окружения CLI, модель приходит в endpoint. Номера не
+  // переиспользуются.
+  map<string, string> agent_env = 21 [deprecated = true];
+  repeated string agent_args = 22 [deprecated = true];
+  string agent_command = 23 [deprecated = true];
   string connection_id = 24;
   bool secrets_included = 25;
   // Имена переменных с секретами: runner маскирует их значения в транскрипте.
-  repeated string agent_secret_names = 26;
+  repeated string agent_secret_names = 26 [deprecated = true];
   // Роль участника (add-agent-roles, спека agent-roles «Инструкция роли в
   // назначении»): runner ставит блок роли перед заданием стадии. На стадии
   // TESTING роль включает сессию тестировщика перед проверками проекта.
@@ -249,6 +263,41 @@ message Assignment {
   // их, остальные правки откатываются (спека process «Шаг test с
   // тестировщиком»).
   repeated string test_paths = 28;
+  // Модель агента Rivet (add-native-agent, design решение 2): тип API,
+  // адрес, модель, окно и цены из каталога, лимиты сессии из профиля rivet,
+  // ключ — только по режиму секретов. Номер с запасом: соседние change'ы
+  // добавляют поля в те же сообщения.
+  ModelEndpoint endpoint = 40;
+}
+
+// ModelEndpoint — подключение модели для агентского цикла Rivet.
+message ModelEndpoint {
+  // openai (Chat Completions) | anthropic (Messages).
+  string api = 1;
+  string base_url = 2;
+  string model = 3;
+  int32 context_window = 4;
+  // Предел ответа на ход и предельный выход модели (потолок повтора хода
+  // с обрезанным вызовом); 0 — по умолчанию цикла.
+  int32 max_output_tokens = 5;
+  int32 model_max_output = 6;
+  // Цены за миллион токенов, USD; has_prices = false — цен нет.
+  bool has_prices = 7;
+  double input_price = 8;
+  double output_price = 9;
+  double cached_input_price = 10;
+  SessionLimits limits = 11;
+  string connection_id = 12;
+  // Ключ и секретные заголовки — только при secrets_included назначения.
+  string key = 13;
+  map<string, string> headers = 14;
+}
+
+// SessionLimits — лимиты сессии агента; 0 — по умолчанию цикла.
+message SessionLimits {
+  int32 max_turns = 1;
+  int64 max_tokens = 2;
+  int32 max_minutes = 3;
 }
 
 // AgentRole — роль исполнителя стадии: идентификатор и название из каталога,

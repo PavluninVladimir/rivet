@@ -7,6 +7,7 @@ import (
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/policy"
+	"github.com/PavluninVladimir/rivet/internal/store"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
@@ -27,12 +28,12 @@ func TestTesterOnOtherRunnerReturnsRemarks(t *testing.T) {
 	f := newPolicyFixture(t, "diff --git a/x b/x\n")
 	withTester(t, f)
 	// Второй исполнитель с именем: тестировщик предпочтёт его.
-	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "worker2", Agent: "wrap", Capabilities: []string{"coding"},
+	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "worker2", Agent: store.AgentRivet, Capabilities: []string{"coding"},
 		DisplayName: "Ева", Features: []string{domain.FeatureRoles}}); err != nil {
 		t.Fatal(err)
 	}
 	// Ревьюер с coding тоже подошёл бы — заберём его, чтобы выбор был однозначным.
-	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: "wrap", Capabilities: []string{"review"}}); err != nil {
+	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: store.AgentRivet, Capabilities: []string{"review"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.e.Tick(ctx); err != nil {
@@ -106,7 +107,7 @@ func TestTesterReusesSingleRunner(t *testing.T) {
 	f := newPolicyFixture(t, "diff --git a/x b/x\n")
 	withTester(t, f)
 	// Единственный исполнитель: ревьюер без coding.
-	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: "wrap", Capabilities: []string{"review"}}); err != nil {
+	if err := f.st.UpsertRunner(ctx, domain.Runner{ID: "reviewer", Agent: store.AgentRivet, Capabilities: []string{"review"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.e.Tick(ctx); err != nil {

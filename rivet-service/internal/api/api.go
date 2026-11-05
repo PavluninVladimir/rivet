@@ -105,6 +105,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	mux.HandleFunc("GET /api/v1/system/status", s.systemStatus)
 	mux.HandleFunc("GET /api/v1/system/connections", s.listConnections)
+	mux.HandleFunc("GET /api/v1/system/connections/presets", s.listPresets)
 	mux.HandleFunc("PUT /api/v1/system/connections/{id}", s.putConnection)
 	mux.HandleFunc("DELETE /api/v1/system/connections/{id}", s.deleteConnection)
 	mux.HandleFunc("POST /api/v1/system/connections/{id}/check", s.checkConnectionHandler)
@@ -287,6 +288,14 @@ func decodeLarge(r *http.Request, v any) error {
 func unprocessable(w http.ResponseWriter, msg string) {
 	writeJSON(w, http.StatusUnprocessableEntity,
 		map[string]apiError{"error": {Code: "invalid", Message: msg}})
+}
+
+// fieldErr — 422 в общем конверте с полем формы:
+// {"error": {"code", "message"}, "field"}.
+func fieldErr(w http.ResponseWriter, code, field, msg string) {
+	writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+		"error": apiError{Code: code, Message: msg}, "field": field,
+	})
 }
 
 // ─── projects ────────────────────────────────────────────────────────────
@@ -1140,6 +1149,11 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	// Пустая лента — [], а не null: клиенты сразу ищут в списке, пока
+	// событие ещё не появилось.
+	if out == nil {
+		out = []domain.Event{}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
