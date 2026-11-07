@@ -1,17 +1,34 @@
 # rivetd — control plane одним контейнером: бинарник со встроенной веб-консолью
 # (internal/webui/dist, go:embed). Runner'ы в контейнер не входят: они живут
 # рядом с рабочими копиями репозиториев и подключаются к gRPC-порту снаружи.
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.10-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# Версия сборки — в состояние установки (GET /system/status).
+# Сведения о сборке: версия идёт в состояние установки (GET /system/status),
+# версия, коммит и адрес исходников идут в ссылку «Исходный код»
+# (GET /api/v1/about). .git в контекст сборки не входит, поэтому коммит
+# приходит аргументом: make image передаёт git rev-parse HEAD.
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /out/rivetd ./cmd/rivetd
+ARG COMMIT=
+ARG SOURCE_URL=https://github.com/PavluninVladimir/rivet
+RUN CGO_ENABLED=0 go build \
+    -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.sourceURL=${SOURCE_URL}" \
+    -o /out/rivetd ./cmd/rivetd
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S -g 10001 rivet \
+    && adduser -S -D -H -u 10001 -G rivet -h /nonexistent -s /sbin/nologin rivet
 COPY --from=build /out/rivetd /usr/local/bin/rivetd
+# Внутри контейнера rivetd слушает все интерфейсы: снаружи его видно только
+# через опубликованные порты, а docker-compose публикует их на 127.0.0.1.
+# Вне контейнера rivetd по умолчанию слушает только loopback.
+ENV RIVET_HTTP_ADDR=0.0.0.0:8080 \
+    RIVET_GRPC_ADDR=0.0.0.0:8090
 EXPOSE 8080 8090
+# Не root: rivetd ничего не пишет на диск (состояние в Postgres, транскрипты
+# в S3), каталоги данных ему не нужны.
+USER rivet:rivet
 ENTRYPOINT ["rivetd"]

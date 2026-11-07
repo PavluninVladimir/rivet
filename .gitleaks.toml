@@ -1,0 +1,23 @@
+# Сканер секретов (CI, job secrets): правила gitleaks по умолчанию. Тесты
+# маскировки и подключений держат выдуманные ключи и токены. Исключены
+# только эти конкретные строки, а не файлы тестов целиком: настоящий ключ,
+# вставленный в тест, сканер по-прежнему найдёт. Новая фальшивая строка в
+# тесте добавляется сюда точным значением.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "заведомо фальшивые значения тестов"
+regexes = [
+  # generic-api-key и github-pat: выдуманные ключи тестов подключений,
+  # профилей и маскировки
+  '''^(abcd1234efgh(5678)?|abcdef0123456789|b-key-1234567890|bad-key-1234567890|ds-(404|ok)-1234567890|hdr-secret-123456|sk-1234567890abc|sk-(echo|env|secret)-1234567890|ghp_BoundaryLeak0123456789|ghp_0123456789abcdef0123456789abcdef1234)$''',
+  # примеры OAuth 1.0 из публичной документации в корпусе маскировки
+  '''^(ctzMq410TV3wS7upTBcunJTDLEJwMAZuFPfr0mrrA08=|tnnArxj06cWHq44gCs1OSKk/jLY=|xvz1evFS4wEEPTGEFPHBog)$''',
+  # ключ RIVET_SECRET_KEY старого docker-compose.yml: опубликован, в
+  # списке internal/config/published.go, нужен в рецепте перешифровки
+  '''^cml2ZXQtbG9jYWwtZGV2LWtleS0zMi1ieXRlcyEhISE=$''',
+  # обрезанные PEM тестов маскировки: тело из строк-заглушек
+  # MIIEowIBAAKCAQEA и MIIEowIBAAKCAQEB
+  '''-----BEGIN (RSA )?PRIVATE KEY-----\\nMIIEowIBAAKCAQEA\\n(MIIEowIBAAKCAQEB|"\)\)\))''',
+]

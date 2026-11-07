@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -29,6 +30,11 @@ import (
 
 func run(ctx context.Context, cfg config.Config) error {
 	// Конфиг проверяем до миграций и listener'ов, чтобы падать без side effects.
+	// С опубликованными ключом и паролем rivetd не стартует (спека
+	// access-policy «Безопасные умолчания установки»).
+	if err := cfg.CheckServe(); err != nil {
+		return err
+	}
 	// Ключ из окружения — запасной источник планировщика: активный провайдер
 	// в базе имеет приоритет (design add-operations-management).
 	env := api.EnvPlanner{Provider: cfg.LLMProvider}
@@ -57,10 +63,45 @@ func run(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	defer st.Close()
+	// Пока rivetd работает, перешифровка ключа (rivetd -rotate-key) с этой
+	// базой не идёт: он держит прежний ключ в памяти.
+	// Перешифровка, прошедшая в окне без блокировки (обрыв соединения),
+	// оставляет ключ в памяти устаревшим: rivetd завершается с ошибкой, его
+	// перезапускают с новым ключом.
+	rotated := make(chan struct{})
+	var rotatedOnce sync.Once
+	releaseLock, err := st.HoldServeLock(ctx, func() { rotatedOnce.Do(func() { close(rotated) }) })
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
 
+	// Опубликованный RIVET_ADMIN_PASSWORD: отказ, если он станет паролем
+	// первого администратора, иначе предупреждение (спека access-policy
+	// «Безопасные умолчания установки»).
+	users, err := st.CountUsers(ctx)
+	if err != nil {
+		return err
+	}
+	warn, err := config.AdminPasswordCheck(cfg.AdminPassword, users > 0)
+	if err != nil {
+		return err
+	}
+	if warn != "" {
+		slog.Warn(warn)
+	}
 	// Fail-fast до listener'ов: без владельца установка не поднимается.
 	if err := st.Bootstrap(ctx, cfg.AdminLogin, cfg.AdminPassword); err != nil {
 		return err
+	}
+	// Администраторы с паролем из документации (установки по старому
+	// docker-compose.yml с admin-local) при следующем входе меняют пароль.
+	flagged, err := st.FlagPublishedPasswords(ctx)
+	if err != nil {
+		return err
+	}
+	for _, login := range flagged {
+		slog.Warn("у администратора пароль из документации Rivet: при следующем входе консоль потребует сменить пароль", "login", login)
 	}
 
 	bl, err := blob.New(cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket, cfg.S3UseSSL)
@@ -131,10 +172,11 @@ func run(ctx context.Context, cfg config.Config) error {
 		if cfg.GRPCClientCA != "" {
 			slog.Info("протокол runner'ов требует клиентский сертификат (mTLS): CN или DNS SAN сверяется с идентификатором runner'а")
 		}
-	} else {
-		slog.Warn("протокол runner'ов без TLS: порт должен быть закрыт периметром")
 	}
-	if cfg.GRPCClientCA == "" && !runnertls.LoopbackAddr(cfg.GRPCAddr) {
+	for _, w := range cfg.ListenWarnings() {
+		slog.Warn(w)
+	}
+	if cfg.GRPCClientCA == "" && !config.IsLoopbackAddr(cfg.GRPCAddr) {
 		slog.Warn("клиентские сертификаты runner'ов не проверяются (RIVET_GRPC_CLIENT_CA не задан), а протокол слушает не только loopback: "+
 			"runner'ы различаются только токенами регистрации", "addr", cfg.GRPCAddr)
 	}
@@ -148,6 +190,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	apiSrv := &api.Server{
 		St: st, Engine: engine, Hub: hub, Blob: bl,
 		EnvPlanner: env, Version: version, ProtocolVersion: stream.ProtocolVersion,
+		About:     api.NewAbout(version, commit, sourceURL, cfg.SourceURL),
 		StartedAt: time.Now(), GRPCAddr: cfg.GRPCAddr, GRPCTLS: cfg.GRPCTLSCert != "", GRPCClientCert: cfg.GRPCClientCA != "",
 		Secrets: box, PublicURL: cfg.PublicURL, Policy: polEngine,
 		WebhookSecret: cfg.GitHubWebhookSecret,
@@ -170,8 +213,19 @@ func run(ctx context.Context, cfg config.Config) error {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	slog.Info("rivetd started", "http", cfg.HTTPAddr, "grpc", cfg.GRPCAddr)
+	if err := config.CheckSourceURL(sourceURL); err != nil {
+		slog.Warn("адрес исходников из сборки (-X main.sourceURL) отброшен, ссылка ведёт на публичный репозиторий Rivet", "err", err)
+	}
+	logListen(cfg)
 	g, ctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		select {
+		case <-rotated:
+			return errors.New("ключ шифрования сменили, пока rivetd работал: перезапустите rivetd с новым RIVET_SECRET_KEY")
+		case <-ctx.Done():
+			return nil
+		}
+	})
 	g.Go(func() error { return grpcSrv.Serve(grpcLis) })
 	g.Go(func() error {
 		if err := httpSrv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
@@ -195,4 +249,17 @@ func run(ctx context.Context, cfg config.Config) error {
 		return httpSrv.Shutdown(shCtx)
 	})
 	return g.Wait()
+}
+
+// logListen пишет, где слушает rivetd. На loopback подсказывает, как открыть
+// адрес наружу: новые умолчания закрывают установку, запущенную без
+// настроек на сервере.
+func logListen(cfg config.Config) {
+	slog.Info("rivetd started", "http", cfg.HTTPAddr, "grpc", cfg.GRPCAddr, "version", version)
+	if config.IsLoopbackAddr(cfg.HTTPAddr) {
+		slog.Info("API и консоль доступны только с этой машины. Чтобы открыть их в сеть, задайте RIVET_HTTP_ADDR, например 0.0.0.0:8080")
+	}
+	if config.IsLoopbackAddr(cfg.GRPCAddr) {
+		slog.Info("протокол runner'ов доступен только с этой машины. Для runner'ов на других хостах задайте RIVET_GRPC_ADDR и TLS (RIVET_GRPC_TLS_CERT, RIVET_GRPC_TLS_KEY)")
+	}
 }

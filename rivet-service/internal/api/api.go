@@ -57,6 +57,8 @@ type Server struct {
 	// nil — пределы по умолчанию.
 	Analyst *analyst.Runner
 	// Version, ProtocolVersion, StartedAt — для состояния установки.
+	// About: сведения о сборке для ссылки на исходный код (GET /about).
+	About           About
 	Version         string
 	ProtocolVersion string
 	StartedAt       time.Time
@@ -105,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/tokens", s.createToken)
 	mux.HandleFunc("DELETE /api/v1/tokens/{id}", s.deleteToken)
 	mux.HandleFunc("GET /api/v1/health", s.health)
+	mux.HandleFunc("GET /api/v1/about", s.about)
 	mux.HandleFunc("GET /api/v1/system/status", s.systemStatus)
 	mux.HandleFunc("GET /api/v1/system/connections", s.listConnections)
 	mux.HandleFunc("GET /api/v1/system/connections/presets", s.listPresets)
@@ -262,7 +265,7 @@ func writeErr(w http.ResponseWriter, err error) {
 		status, code = http.StatusConflict, "conflict"
 	case errors.Is(err, store.ErrInvalid), errors.Is(err, policy.ErrInvalid):
 		status, code = http.StatusUnprocessableEntity, "invalid"
-	case errors.Is(err, store.ErrWeakPassword), errors.Is(err, store.ErrSamePassword):
+	case errors.Is(err, store.ErrWeakPassword), errors.Is(err, store.ErrSamePassword), errors.Is(err, store.ErrPublishedPassword):
 		status, code = http.StatusUnprocessableEntity, "invalid"
 	case errors.Is(err, store.ErrBadPassword):
 		status, code = http.StatusUnauthorized, "unauthorized"

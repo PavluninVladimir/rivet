@@ -1,3 +1,6 @@
+# Перед первым запуском: cp .env.example .env и заполните пароль
+# администратора и ключ шифрования. Без них стенд не стартует.
+#
 # Runner'ы подключаются с хоста: выпустите токен регистрации в консоли
 # («Управление приложением» → «Runner'ы») для идентификаторов runner'ов,
 # сохраните его в файл с правами 0600 и запустите
@@ -9,6 +12,9 @@ services:
       context: .
       args:
         VERSION: ${RIVET_VERSION:-dev}
+        # Коммит сборки для ссылки на исходники (GET /api/v1/about):
+        # make image передаёт git rev-parse HEAD.
+        COMMIT: ${RIVET_COMMIT:-}
     ports:
       # Только loopback: gRPC без TLS несёт токен runner'а открытым текстом,
       # наружу не публикуем.
@@ -23,18 +29,21 @@ services:
       # По умолчанию fake: с github без RIVET_GITHUB_TOKEN конвейер падает на CreatePR.
       # Для реальных PR задай RIVET_SCM=github и RIVET_GITHUB_TOKEN в окружении/.env.
       RIVET_SCM: ${RIVET_SCM:-fake}
-      # Ключ шифрования учётных данных хостингов (32 байта base64): без него
-      # подключение репозитория с токеном отключено. Дефолт — только для
-      # локального стенда за loopback, как и пароль администратора ниже.
-      RIVET_SECRET_KEY: ${RIVET_SECRET_KEY:-cml2ZXQtbG9jYWwtZGV2LWtleS0zMi1ieXRlcyEhISE=}
+      # Ключ шифрования секретов установки: токенов хостингов и ключей
+      # моделей (32 байта base64). Обязателен и своего значения по
+      # умолчанию не имеет: ключ из примера знал бы любой.
+      RIVET_SECRET_KEY: ${RIVET_SECRET_KEY:?задайте RIVET_SECRET_KEY в .env (см. .env.example), ключ генерирует openssl rand -base64 32}
       # Внешний адрес установки: нужен, чтобы система сама регистрировала
       # webhook на хостинге. Пусто — данные для ручной настройки в консоли.
       RIVET_PUBLIC_URL: ${RIVET_PUBLIC_URL:-}
       # Bootstrap первого администратора (rivetd не стартует без владельца).
-      # Дефолт только для локального стенда за loopback: смени при публикации.
-      # Пароль не короче 8 символов — общее требование ко всем путям задания.
+      # Пароль обязателен, не короче 8 символов, пароли из документации
+      # rivetd не принимает. Когда пользователи уже есть, пароль не читается.
       RIVET_ADMIN_LOGIN: ${RIVET_ADMIN_LOGIN:-admin}
-      RIVET_ADMIN_PASSWORD: ${RIVET_ADMIN_PASSWORD:-admin-local}
+      RIVET_ADMIN_PASSWORD: ${RIVET_ADMIN_PASSWORD:?задайте RIVET_ADMIN_PASSWORD в .env (см. .env.example), не короче 8 символов, например openssl rand -base64 18}
+      # Адрес исходного кода для ссылки «Исходный код» (форк указывает свой
+      # репозиторий). Пусто значит адрес из сборки.
+      RIVET_SOURCE_URL: ${RIVET_SOURCE_URL:-}
       # Ключ модели для декомпозиции из окружения — запасной источник: ключ,
       # заданный в консоли («Управление приложением» → «Модели»), имеет приоритет.
       RIVET_LLM_PROVIDER: ${RIVET_LLM_PROVIDER:-}
@@ -42,6 +51,8 @@ services:
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       # TLS протокола runner'ов (необязательно): PEM-файлы сертификата и ключа,
       # смонтированные в контейнер. Без них порт 8090 держите за периметром.
+      # rivetd в контейнере работает от uid 10001: файл ключа должен читаться
+      # им (chown 10001 или группа и права 0640).
       RIVET_GRPC_TLS_CERT: ${RIVET_GRPC_TLS_CERT:-}
       RIVET_GRPC_TLS_KEY: ${RIVET_GRPC_TLS_KEY:-}
       # mTLS (необязательно, только вместе с TLS): корни клиентских
