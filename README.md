@@ -64,7 +64,7 @@ rivet/
 - `cmd/fake-llm` — детерминированный провайдер моделей для e2e-стенда
   (тестовая инфраструктура, в продукте его нет).
 - `internal/` — хранилище (PostgreSQL), оркестратор, планировщик, политики
-  (OPA/Rego), SCM-адаптеры GitHub и GitLab, маскировка секретов, протокол
+  (OPA/Rego), SCM-адаптеры GitHub, GitLab и Gitea/Forgejo, маскировка секретов, протокол
   runner'ов.
 - `pkg/protocol` — gRPC-протокол между rivetd и runner'ами.
 
@@ -665,6 +665,18 @@ RIVET_DATABASE_URL='postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable'
 make fuzz                           # короткий фаззинг по всем таргетам
 make lint                           # golangci-lint
 ```
+
+Адаптер Gitea/Forgejo проверяется ещё и против настоящего инстанса в
+Docker. В обычный `go test ./...` этот тест не входит, он включается
+build-тегом:
+
+```sh
+go test -tags gitea_integration -run TestGiteaIntegration ./internal/scm/
+RIVET_GITEA_IMAGE=codeberg.org/forgejo/forgejo:15 go test -tags gitea_integration -run TestGiteaIntegration ./internal/scm/
+```
+
+По умолчанию берётся образ `gitea/gitea:28.3`, контейнер удаляется после
+теста.
 
 Сквозные тесты живут в [rivet-e2e](https://github.com/PavluninVladimir/rivet-e2e):
 стенд поднимает `rivet-service/scripts/e2e-stand.sh`. Это тестовая

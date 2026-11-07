@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
@@ -59,8 +60,10 @@ type probeInput struct {
 }
 
 // resolve приводит вход к провайдеру, инстансу и пути репозитория.
-// Провайдер по хосту угадывается только для github.com и gitlab.com,
-// иначе его обязан указать пользователь (design, решение 3).
+// Провайдер по хосту угадывается только для известных облачных инстансов
+// (github.com, gitlab.com, gitea.com, codeberg.org), иначе его обязан
+// указать пользователь (design, решение 3). У Gitea облачного инстанса по
+// умолчанию нет: без URL инстанса подключение не разобрать.
 func (in probeInput) resolve() (provider scm.Provider, baseURL, repoPath string, err error) {
 	if in.RepoURL != "" {
 		ref, perr := scm.ParseRepoURL(in.RepoURL)
@@ -82,7 +85,7 @@ func (in probeInput) resolve() (provider scm.Provider, baseURL, repoPath string,
 		// иначе любой участник создаст проект, у которого проверка доступа
 		// всегда успешна.
 		if !scm.ValidProvider(in.Provider) || in.Provider == string(scm.ProviderFake) {
-			return "", "", "", errors.New("неизвестный провайдер: ожидается github или gitlab")
+			return "", "", "", errors.New("неизвестный провайдер: ожидается github, gitlab или gitea")
 		}
 		provider = scm.Provider(in.Provider)
 	}
@@ -95,11 +98,66 @@ func (in probeInput) resolve() (provider scm.Provider, baseURL, repoPath string,
 			baseURL = "https://github.com"
 		case scm.ProviderGitLab:
 			baseURL = "https://gitlab.com"
+		case scm.ProviderGitea:
+			return "", "", "", errors.New("для Gitea укажите URL инстанса")
 		default:
 			baseURL = "https://fake.local"
 		}
 	}
+	// Gitea: инстанс может жить в подкаталоге — в режиме «создать» он
+	// берётся из адреса инстанса целиком. Подкаталог в адресе репозитория
+	// находит resolveRepo, спросив сам инстанс.
+	if provider == scm.ProviderGitea && in.RepoURL == "" && in.BaseURL != "" {
+		if baseURL, err = scm.NormalizeInstanceURL(in.BaseURL); err != nil {
+			return "", "", "", err
+		}
+	}
 	return provider, baseURL, repoPath, nil
+}
+
+// resolvedRepo — разобранный адрес подключения.
+type resolvedRepo struct {
+	provider scm.Provider
+	baseURL  string
+	repoPath string
+	// hint — пояснение к возможному отказу проверки: инстанс Gitea по
+	// адресу не опознан, взят запасной вариант.
+	hint string
+}
+
+// failed дополняет отказ проверки подключения пояснением разбора адреса.
+func (rr resolvedRepo) failed(res probeView) probeView {
+	if res.OK || rr.hint == "" {
+		return res
+	}
+	if msg := strings.TrimRight(res.Message, ". "); msg != "" {
+		res.Message = msg + ". " + rr.hint
+	} else {
+		res.Message = rr.hint
+	}
+	return res
+}
+
+// resolveRepo — resolve с поиском подкаталога инстанса Gitea: в адресе
+// репозитория он неотличим от owner/name и хвоста страницы, поэтому
+// инстанс спрашивается сам (scm.LocateGitea). Установка без реальных
+// хостингов (fake) наружу не ходит: owner/name — первые два сегмента.
+func (s *Server) resolveRepo(ctx context.Context, in probeInput) (resolvedRepo, error) {
+	provider, baseURL, repoPath, err := in.resolve()
+	rr := resolvedRepo{provider: provider, baseURL: baseURL, repoPath: repoPath}
+	if err != nil || provider != scm.ProviderGitea || repoPath == "" {
+		return rr, err
+	}
+	if s.adapters().Force {
+		rr.repoPath, err = scm.GiteaRepoPath(repoPath)
+		return rr, err
+	}
+	var found bool
+	rr.baseURL, rr.repoPath, found, err = scm.LocateGitea(ctx, baseURL, repoPath)
+	if !found {
+		rr.hint = scm.GiteaNotLocated
+	}
+	return rr, err
 }
 
 // POST /api/v1/scm/probe — проверка подключения до создания проекта.
@@ -113,13 +171,13 @@ func (s *Server) scmProbe(w http.ResponseWriter, r *http.Request) {
 		unprocessable(w, "нужен токен доступа к хостингу")
 		return
 	}
-	provider, baseURL, repoPath, err := in.resolve()
+	rr, err := s.resolveRepo(r.Context(), in)
 	if err != nil {
 		unprocessable(w, err.Error())
 		return
 	}
-	res := s.probe(r, s.effectiveProvider(provider), baseURL, repoPath, in.Token)
-	writeJSON(w, http.StatusOK, res)
+	res := s.probe(r, s.effectiveProvider(rr.provider), rr.baseURL, rr.repoPath, in.Token)
+	writeJSON(w, http.StatusOK, rr.failed(res))
 }
 
 // probe выполняет проверку через адаптер провайдера.

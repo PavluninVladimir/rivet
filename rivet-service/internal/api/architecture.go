@@ -130,8 +130,11 @@ func treeURL(provider, web, branch, dir string) string {
 	if web == "" {
 		return ""
 	}
-	if provider == string(scm.ProviderGitLab) {
+	switch provider {
+	case string(scm.ProviderGitLab):
 		return web + "/-/tree/" + branch + "/" + dir
+	case string(scm.ProviderGitea):
+		return web + "/src/branch/" + branch + "/" + dir
 	}
 	return web + "/tree/" + branch + "/" + dir
 }

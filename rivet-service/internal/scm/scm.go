@@ -219,6 +219,11 @@ func (f *Factory) For(provider Provider, baseURL, token string) (Adapter, error)
 		a = NewGitHubAt(baseURL, token)
 	case ProviderGitLab:
 		a = NewGitLab(baseURL, token)
+	case ProviderGitea:
+		if baseURL == "" {
+			return nil, errors.New("для Gitea нужен URL инстанса")
+		}
+		a = NewGitea(baseURL, token)
 	case ProviderFake:
 		a = NewFake()
 	default:
