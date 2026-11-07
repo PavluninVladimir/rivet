@@ -10,20 +10,31 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/runnertls"
 )
 
 // Аутентификация runner'ов токеном регистрации (спека runners «Токены
 // регистрации runner'ов», design add-operations-management): секрет в
 // метаданных authorization на Register и Channel. Отказ единый — без
-// различения «нет», «неизвестен», «отозван», «просрочен».
+// различения «нет», «неизвестен», «отозван», «просрочен». Привязку токена
+// к идентификатору runner'а проверяют сами Register и Channel
+// (identity.go): идентификатор приходит в теле запроса и в Hello.
 
 type tokenKey struct{}
 
 // errUnauthenticated — единый отказ для всех причин.
 var errUnauthenticated = status.Error(codes.Unauthenticated, "токен регистрации runner'а не принят")
 
+// errNoClientCert: установка требует mTLS, а у соединения нет
+// проверенного клиентского сертификата. При верной сборке TLS сервера
+// такое соединение не проходит рукопожатие: это защита от ошибки опций.
+var errNoClientCert = status.Error(codes.Unauthenticated, "нужен клиентский сертификат runner'а")
+
 // authenticate проверяет секрет из метаданных и возвращает токен.
 func (s *Server) authenticate(ctx context.Context) (domain.RunnerToken, error) {
+	if s.ClientCertRequired && runnertls.PeerCertificate(ctx) == nil {
+		return domain.RunnerToken{}, errNoClientCert
+	}
 	md, _ := metadata.FromIncomingContext(ctx)
 	var secret string
 	for _, v := range md.Get("authorization") {
@@ -54,15 +65,25 @@ func (s *Server) UnaryAuth() grpc.UnaryServerInterceptor {
 }
 
 // StreamAuth — интерцептор Channel: Hello верить нельзя, канал без токена
-// не открывается.
+// не открывается. Токен кладётся в контекст потока: Channel сверяет с ним
+// идентификатор из Hello.
 func (s *Server) StreamAuth() grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, next grpc.StreamHandler) error {
-		if _, err := s.authenticate(ss.Context()); err != nil {
+		t, err := s.authenticate(ss.Context())
+		if err != nil {
 			return err
 		}
-		return next(srv, ss)
+		return next(srv, &authedStream{ServerStream: ss, ctx: context.WithValue(ss.Context(), tokenKey{}, t)})
 	}
 }
+
+// authedStream: поток канала с токеном в контексте.
+type authedStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (a *authedStream) Context() context.Context { return a.ctx }
 
 // tokenFromContext — токен, положенный UnaryAuth; пустой без интерцептора
 // (тесты без аутентификации).

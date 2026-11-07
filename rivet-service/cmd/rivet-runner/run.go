@@ -12,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/runner"
 	"github.com/PavluninVladimir/rivet/internal/runner/native"
+	"github.com/PavluninVladimir/rivet/internal/runnertls"
 )
 
 // run разбирает флаги и запускает runner. secrets — секреты, забранные
@@ -27,6 +29,10 @@ func run(args []string, secrets map[string]string) error {
 		"устарел: токен регистрации виден в списке процессов; передавай его файлом 0600 в "+tokenFileEnv+" (или в "+tokenEnv+")")
 	fs.BoolVar(&cfg.TLS, "tls", os.Getenv("RIVET_PLANE_TLS") == "1", "подключаться к control plane по TLS")
 	fs.StringVar(&cfg.TLSCA, "tls-ca", os.Getenv("RIVET_PLANE_TLS_CA"), "корневой сертификат control plane (пусто — системные корни)")
+	fs.StringVar(&cfg.TLSCert, "tls-cert", os.Getenv("RIVET_PLANE_TLS_CERT"),
+		"клиентский сертификат runner'а для control plane с mTLS: CN или DNS-имя из SAN равно -id; только с -tls и -tls-key")
+	fs.StringVar(&cfg.TLSKey, "tls-key", os.Getenv("RIVET_PLANE_TLS_KEY"),
+		"ключ клиентского сертификата, файл с правами 0600 (скрыт от команд агента в песочнице)")
 	fs.StringVar(&cfg.ID, "id", envDef("RIVET_RUNNER_ID", hostDefault()), "идентификатор runner'а")
 	fs.StringVar(&cfg.Name, "name", os.Getenv("RIVET_RUNNER_NAME"),
 		"отображаемое имя runner'а в консоли (роль + имя: «Разработчик Макс»); имя из консоли важнее")
@@ -53,6 +59,16 @@ func run(args []string, secrets map[string]string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Идентификатор по тем же правилам, что у control plane
+	// (add-runner-identity): недопустимый отклонился бы при регистрации.
+	if p := domain.RunnerIDProblem(cfg.ID); p != "" {
+		// %q показывает пробелы и невидимые символы (\r из env-файла).
+		id := cfg.ID
+		if len(id) > 200 {
+			id = id[:200] + "…"
+		}
+		return fmt.Errorf("-id %q: %s", id, p)
+	}
 	cfg.Unsandboxed = *unsandboxed
 	cfg.Secrets = map[string]string{}
 	for k, v := range secrets {
@@ -64,6 +80,15 @@ func run(args []string, secrets map[string]string) error {
 	// uid, что и runner).
 	if tf := tokenFilePath(); tf != "" {
 		cfg.SecretFiles = append(cfg.SecretFiles, tf)
+	}
+	// Клиентский сертификат (add-runner-identity) проверяется до
+	// подключения. Ключ тоже секрет runner'а и скрывается в песочнице.
+	keyFile, err := checkClientCert(cfg)
+	if err != nil {
+		return err
+	}
+	if keyFile != "" {
+		cfg.SecretFiles = append(cfg.SecretFiles, keyFile)
 	}
 	// Каталоги -sandbox-ro проверяются до подключения: каталог, который
 	// открыл бы песочнице $HOME runner'а, файл токена или рабочие копии
@@ -126,6 +151,33 @@ func run(args []string, secrets map[string]string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return runner.Run(ctx, cfg)
+}
+
+// checkClientCert проверяет флаги клиентского сертификата: только вместе,
+// только с -tls, ключ 0600, сертификат читается. Если сертификат не
+// содержит идентификатор runner'а, пишет предупреждение: control plane с
+// mTLS отклонит регистрацию. Возвращает абсолютный путь ключа (пусто, если
+// сертификата нет).
+func checkClientCert(cfg runner.Config) (string, error) {
+	if cfg.TLSCert == "" && cfg.TLSKey == "" {
+		return "", nil
+	}
+	if !cfg.TLS {
+		return "", fmt.Errorf("клиентский сертификат runner'а требует TLS: добавьте -tls (или RIVET_PLANE_TLS=1)")
+	}
+	_, leaf, err := runnertls.ClientConfig(cfg.TLSCA, cfg.TLSCert, cfg.TLSKey)
+	if err != nil {
+		return "", err
+	}
+	if !runnertls.Matches(leaf, cfg.ID) {
+		slog.Warn("клиентский сертификат не содержит идентификатор runner'а: control plane с mTLS отклонит регистрацию",
+			"runner", cfg.ID, "сертификат", runnertls.Identities(leaf))
+	}
+	key, err := filepath.Abs(cfg.TLSKey)
+	if err != nil {
+		return "", fmt.Errorf("tls-key: %w", err)
+	}
+	return key, nil
 }
 
 // pathList — повторяемый флаг -sandbox-ro. Значение из окружения —

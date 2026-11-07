@@ -827,8 +827,8 @@ type Attention struct {
 }
 
 // RunnerToken — токен регистрации runner'ов (спека runners «Токены
-// регистрации runner'ов»): общий секрет установки, секрет существует
-// только в момент создания.
+// регистрации runner'ов»): секрет существует только в момент создания,
+// токен привязан к идентификаторам runner'ов (add-runner-identity).
 type RunnerToken struct {
 	ID        string
 	Name      string
@@ -838,6 +838,30 @@ type RunnerToken struct {
 	ExpiresAt *time.Time
 	LastUsed  *time.Time
 	RevokedAt *time.Time
+	// Runners: привязки токена. Без привязок токен привяжется к первому runner'у,
+	// который с ним зарегистрируется. Заполняется только в списке и при
+	// выпуске.
+	Runners []RunnerBinding
+}
+
+// RunnerBindingSource: откуда взялась привязка токена к runner'у.
+type RunnerBindingSource string
+
+const (
+	// BindingIssue: runner указан при выпуске токена.
+	BindingIssue RunnerBindingSource = "issue"
+	// BindingFirstUse: токен без списка привязан при первой регистрации.
+	BindingFirstUse RunnerBindingSource = "first_use"
+	// BindingMigration: общий токен привязан при обновлении к runner'ам,
+	// которые уже регистрировались с ним.
+	BindingMigration RunnerBindingSource = "migration"
+)
+
+// RunnerBinding: runner, для которого выпущен токен регистрации.
+type RunnerBinding struct {
+	RunnerID string
+	Source   RunnerBindingSource
+	BoundAt  time.Time
 }
 
 // LLMProviderState — результат последней проверки ключа у провайдера.

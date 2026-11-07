@@ -61,9 +61,11 @@ type Server struct {
 	ProtocolVersion string
 	StartedAt       time.Time
 	// GRPCAddr и GRPCTLS — адрес протокола runner'ов и включён ли на нём TLS:
-	// консоль собирает из них команду запуска runner'а.
-	GRPCAddr string
-	GRPCTLS  bool
+	// консоль собирает из них команду запуска runner'а. GRPCClientCert:
+	// протокол требует клиентский сертификат runner'а (mTLS).
+	GRPCAddr       string
+	GRPCTLS        bool
+	GRPCClientCert bool
 	// Blob — хранилище транскриптов; nil (MinIO отключён) — транскрипты
 	// отвечают 404, остальной API работает.
 	Blob *blob.Store

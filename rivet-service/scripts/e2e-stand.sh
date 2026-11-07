@@ -58,6 +58,9 @@ done
 # CLI/скриптов в $STAND_DIR/token и токен регистрации runner'ов. Runner'ы
 # стартуют только после выпуска токена (протокол v5: без токена
 # регистрация отклоняется), поэтому запускаются из этой же фоновой ветки.
+# Токен привязан к идентификаторам runner'ов стенда (add-runner-identity):
+# другой идентификатор по нему не регистрируется. Список совпадает с
+# start_runner ниже.
 ADMIN_LOGIN="${E2E_ADMIN_LOGIN:-e2e-admin}"
 ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-e2e-password}"
 API="http://localhost:$HTTP_PORT/api/v1"
@@ -74,7 +77,7 @@ LLM_CONN=${E2E_LLM_CONNECTION:-e2e-llm}
     -d '{"name":"e2e-stand"}' "$API/tokens" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])' > "$STAND_DIR/token" \
   && curl -sf -b "$STAND_DIR/cookies" -H 'Content-Type: application/json' \
-    -d '{"name":"e2e-runners"}' "$API/runner-tokens" \
+    -d '{"name":"e2e-runners","runner_ids":["e2e-worker","e2e-worker2","e2e-reviewer","e2e-reviewer2","e2e-deployer"]}' "$API/runner-tokens" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["secret"])' > "$STAND_DIR/runner-token" \
   || { echo "e2e-stand: не удалось выпустить токены" >&2; exit 1; }
   # Автоописание архитектуры на стенде выключено, пока нет e2e-сценариев

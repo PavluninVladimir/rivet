@@ -19,9 +19,15 @@ type Config struct {
 	// или приватная сеть, как в docker-compose).
 	GRPCAddr string
 	// GRPCTLSCert/GRPCTLSKey — PEM-файлы сертификата и ключа: включают TLS
-	// на протоколе runner'ов. Клиентские сертификаты (mTLS) не проверяются.
+	// на протоколе runner'ов.
 	GRPCTLSCert string
 	GRPCTLSKey  string
+	// GRPCClientCA: PEM-файл корней клиентских сертификатов runner'ов:
+	// включает mTLS (add-runner-identity). Runner без сертификата этих
+	// корней не проходит рукопожатие, а CN или DNS SAN сертификата
+	// сверяется с runner_id. Требует GRPCTLSCert/GRPCTLSKey. Без него
+	// клиентские сертификаты не проверяются.
+	GRPCClientCA string
 
 	// S3 — объектное хранилище транскриптов (RustFS в dev).
 	S3Endpoint  string
@@ -84,6 +90,7 @@ func FromEnv() (Config, error) {
 		GRPCAddr:               getenv("RIVET_GRPC_ADDR", ":8090"),
 		GRPCTLSCert:            os.Getenv("RIVET_GRPC_TLS_CERT"),
 		GRPCTLSKey:             os.Getenv("RIVET_GRPC_TLS_KEY"),
+		GRPCClientCA:           os.Getenv("RIVET_GRPC_CLIENT_CA"),
 		S3Endpoint:             getenv("RIVET_S3_ENDPOINT", "localhost:9000"),
 		S3AccessKey:            getenv("RIVET_S3_ACCESS_KEY", "rivet"),
 		S3SecretKey:            getenv("RIVET_S3_SECRET_KEY", "rivetsecret"),
@@ -117,6 +124,9 @@ func FromEnv() (Config, error) {
 	}
 	if (c.GRPCTLSCert == "") != (c.GRPCTLSKey == "") {
 		return c, fmt.Errorf("RIVET_GRPC_TLS_CERT и RIVET_GRPC_TLS_KEY задаются вместе")
+	}
+	if c.GRPCClientCA != "" && c.GRPCTLSCert == "" {
+		return c, fmt.Errorf("RIVET_GRPC_CLIENT_CA требует TLS протокола runner'ов: задайте RIVET_GRPC_TLS_CERT и RIVET_GRPC_TLS_KEY")
 	}
 	if v := os.Getenv("RIVET_POLICY_TIMEOUT"); v != "" {
 		d, err := time.ParseDuration(v)

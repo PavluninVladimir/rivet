@@ -7,7 +7,6 @@ package runner
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,6 +24,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/PavluninVladimir/rivet/internal/runner/native"
+	"github.com/PavluninVladimir/rivet/internal/runnertls"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
 
@@ -67,7 +67,12 @@ type Config struct {
 	// протокола обязан быть закрыт периметром.
 	TLS   bool
 	TLSCA string
-	ID    string
+	// TLSCert/TLSKey: клиентский сертификат runner'а для установки с mTLS
+	// (add-runner-identity): CN или DNS SAN совпадает с ID, ключ в файле
+	// 0600. Только вместе и только с TLS.
+	TLSCert string
+	TLSKey  string
+	ID      string
 	// Name — отображаемое имя runner'а (add-agent-roles): «Разработчик Макс».
 	Name  string
 	Agent string
@@ -151,13 +156,13 @@ func Run(ctx context.Context, cfg Config) error {
 	}
 	creds := insecure.NewCredentials()
 	if cfg.TLS {
-		if cfg.TLSCA != "" {
-			if creds, err = credentials.NewClientTLSFromFile(cfg.TLSCA, ""); err != nil {
-				return fmt.Errorf("tls-ca: %w", err)
-			}
-		} else {
-			creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
+		tlsCfg, _, err := runnertls.ClientConfig(cfg.TLSCA, cfg.TLSCert, cfg.TLSKey)
+		if err != nil {
+			return err
 		}
+		creds = credentials.NewTLS(tlsCfg)
+	} else if cfg.TLSCert != "" || cfg.TLSKey != "" {
+		return errors.New("клиентский сертификат runner'а требует TLS: добавьте -tls")
 	}
 	conn, err := grpc.NewClient(cfg.PlaneAddr, grpc.WithTransportCredentials(creds))
 	if err != nil {
@@ -312,8 +317,9 @@ var errStagesStuck = errors.New("стадии прошлого подключе�
 
 // ErrRegistrationRejected — control plane отклонил регистрацию runner'а
 // (FAILED_PRECONDITION: сторонний агент, runner без агента не только с
-// deploy, старый бинарник без feature native). Причина не уйдёт сама,
-// поэтому runner не переподключается, а завершается с текстом отказа.
+// deploy, старый бинарник без feature native; PERMISSION_DENIED: токен или
+// клиентский сертификат выданы для другого runner'а). Причина не уйдёт
+// сама, поэтому runner не переподключается, а завершается с текстом отказа.
 var ErrRegistrationRejected = errors.New("control plane отклонил регистрацию runner'а")
 
 func (a *agent) stuckLimit() time.Duration {
@@ -558,7 +564,11 @@ func (a *agent) session(ctx context.Context) error {
 		PendingSessions: a.pendingSessions(),
 	})
 	if err != nil {
-		if status.Code(err) == codes.FailedPrecondition {
+		// FAILED_PRECONDITION: агент не допущен. PERMISSION_DENIED: токен
+		// или сертификат выданы не для этого runner'а, INVALID_ARGUMENT:
+		// недопустимый -id (add-runner-identity). Повтор не поможет, нужен
+		// другой токен или другой -id.
+		if c := status.Code(err); c == codes.FailedPrecondition || c == codes.PermissionDenied || c == codes.InvalidArgument {
 			return fmt.Errorf("%w: %s", ErrRegistrationRejected, status.Convert(err).Message())
 		}
 		return err
