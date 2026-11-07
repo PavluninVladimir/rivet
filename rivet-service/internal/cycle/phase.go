@@ -341,8 +341,11 @@ type Material struct {
 	Since time.Time
 }
 
-// LastRun — последняя готовая версия исследования: какие материалы она
-// учла. nil-множество означает, что готовых версий ещё не было.
+// LastRun — последняя готовая версия исследования, то есть последняя
+// версия с результатом анализа (ready, approved или superseded после неё):
+// какие материалы она учла. nil-множество означает, что готовых версий ещё
+// не было. Идущий анализ материалы не учитывает: если он упадёт, они снова
+// ждут анализа.
 type LastRun struct {
 	Included map[string]bool
 }
@@ -360,8 +363,9 @@ func PhaseOfMaterial(m Material, last LastRun) Placement {
 type Analysis struct {
 	ID    string
 	Title string
-	// Status — running (идёт анализ), review (бэклог ждёт утверждения),
-	// остальные значения (ready, failed, approved) в цикл не входят.
+	// Status — статус версии (discovery_runs): running — идёт анализ,
+	// ready — бэклог ждёт утверждения владельцем. Остальные статусы
+	// (failed, approved, superseded) в цикл не входят.
 	Status string
 	Since  time.Time
 }
@@ -371,7 +375,7 @@ func PhaseOfAnalysis(a Analysis) Placement {
 	switch a.Status {
 	case "running":
 		return Placement{Phase: Discovery, State: StateActive}
-	case "review":
+	case "ready":
 		return Placement{Phase: Discovery, State: StateNeedsHuman}
 	}
 	return Placement{}

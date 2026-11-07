@@ -31,6 +31,23 @@ git init -b main -q "$SEED"
   && git -c user.email=e2e@rivet -c user.name=e2e commit -q --allow-empty -m "seed" \
   && git push -q "$BARE" main)
 
+# Репозиторий сценариев архитектуры e2e/arch: README и корректное описание
+# демо-CRM (internal/architecture/testdata/crm) на основной ветке. Для
+# него одного включён git-режim fake SCM (RIVET_FAKE_GIT_REPOS ниже):
+# снимок архитектуры читается из настоящей версии, остальные сценарии
+# работают на e2e/demo в прежнем режиме.
+ARCH_BARE="$STAND_DIR/repos/e2e/arch.git"
+git init --bare -b main -q "$ARCH_BARE"
+ARCH_SEED="$STAND_DIR/seed-arch"
+git init -b main -q "$ARCH_SEED"
+mkdir -p "$ARCH_SEED/docs/architecture"
+cp -R "$SERVICE_DIR/internal/architecture/testdata/crm/." "$ARCH_SEED/docs/architecture/"
+printf '# CRM\n\nУчёт контактов и сделок отдела продаж.\n' > "$ARCH_SEED/README.md"
+(cd "$ARCH_SEED" \
+  && git add -A \
+  && git -c user.email=e2e@rivet -c user.name=e2e commit -q -m "seed" \
+  && git push -q "$ARCH_BARE" main)
+
 # Свежая сборка консоли во встроенную статику, затем бинарники. Путь консоли
 # вычисляется через cd: если rivet-service — символическая ссылка, `..` в
 # пути для cp разворачивался бы от цели ссылки, а не от её каталога.
@@ -154,6 +171,8 @@ exec env \
   RIVET_GRPC_ADDR=":$GRPC_PORT" \
   RIVET_DATABASE_URL="$DB_URL" \
   RIVET_SCM=fake \
+  RIVET_FAKE_GIT_DIR="$STAND_DIR/repos" \
+  RIVET_FAKE_GIT_REPOS=e2e/arch \
   RIVET_ALLOW_PRIVATE_URLS=true \
   RIVET_GITHUB_WEBHOOK_SECRET="${E2E_WEBHOOK_SECRET:-e2e-webhook-secret}" \
   RIVET_ADMIN_LOGIN="$ADMIN_LOGIN" \

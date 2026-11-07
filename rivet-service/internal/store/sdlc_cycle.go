@@ -166,6 +166,12 @@ func (s *Store) LoadCycle(ctx context.Context, projectID, period string, loc *ti
 		if err := loadCycleOps(ctx, tx, projectID, &in); err != nil {
 			return err
 		}
+		if err := loadCycleDiscovery(ctx, tx, projectID, from, &in); err != nil {
+			return err
+		}
+		if err := loadCycleArchitecture(ctx, tx, projectID, from, &in); err != nil {
+			return err
+		}
 		if err := loadCycleAgents(ctx, tx, projectID, busy, &in); err != nil {
 			return err
 		}
@@ -283,8 +289,8 @@ func loadCycleOps(ctx context.Context, tx pgx.Tx, projectID string, in *cycle.In
 		return err
 	}
 	// Сопровождение «есть данные», когда у проекта настроено наблюдение
-	// или были инциденты. Данные исследования (add-product-discovery) и
-	// архитектуры агрегат пока не читает: у этих фаз «нет данных».
+	// или были инциденты. Исследование и архитектуру читают
+	// loadCycleDiscovery и loadCycleArchitecture.
 	var opsAvail bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM environments WHERE project_id=$1 AND COALESCE((config->'monitor'->>'enabled')::boolean, false))
@@ -296,9 +302,14 @@ func loadCycleOps(ctx context.Context, tx pgx.Tx, projectID string, in *cycle.In
 }
 
 // loadCycleAgents — команда с текущей работой: сессии runner'ов из
-// запусков шагов, задания control plane из памяти оркестратора.
+// запусков шагов, задания control plane из памяти оркестратора, идущие
+// анализы Аналитика из версий исследования.
 func loadCycleAgents(ctx context.Context, tx pgx.Tx, projectID string, busy CycleBusy, in *cycle.Input) error {
 	planner, _, err := plannerModelTx(ctx, tx, false)
+	if err != nil {
+		return err
+	}
+	analyses, err := cycleAnalyses(ctx, tx, projectID)
 	if err != nil {
 		return err
 	}
@@ -351,7 +362,10 @@ func loadCycleAgents(ctx context.Context, tx pgx.Tx, projectID string, busy Cycl
 		default:
 			a.RunnerID = ""
 		}
-		if w := busy[a.ID]; w != nil && a.Current == nil {
+		for _, w := range []*cycle.Work{busy[a.ID], analyses[a.ID]} {
+			if w == nil || a.Current != nil {
+				continue
+			}
 			if w.ProjectID == "" || w.ProjectID == projectID {
 				a.Current = w
 			} else {
@@ -406,11 +420,14 @@ func loadCycleArtifacts(ctx context.Context, tx pgx.Tx, projectID string, in *cy
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	// Разработка: PR задач.
+	// Разработка: PR задач. Задача описания архитектуры шла в фазе
+	// «Архитектура»: её PR и вердикты в артефакты разработки, тестирования
+	// и ревью не входят.
 	rows, err = tx.Query(ctx, `
 		SELECT t.id::text, 'task-' || t.num || ' · ' || t.title, t.pr_url, t.updated_at
 		FROM tasks t JOIN epics e ON e.id = t.epic_id
-		WHERE e.project_id=$1 AND COALESCE(t.pr_url, '') <> '' ORDER BY t.updated_at DESC LIMIT 5`, projectID)
+		WHERE e.project_id=$1 AND COALESCE(t.pr_url, '') <> '' AND t.kind <> 'architecture'
+		ORDER BY t.updated_at DESC LIMIT 5`, projectID)
 	if err != nil {
 		return err
 	}
@@ -431,7 +448,8 @@ func loadCycleArtifacts(ctx context.Context, tx pgx.Tx, projectID string, in *cy
 	// Тестирование и ревью: вердикты шагов test и review.
 	rows, err = tx.Query(ctx, `
 		SELECT ev.id::text, ev.type, ev.text, ev.ts, ev.task_id::text
-		FROM events ev WHERE ev.project_id=$1 AND ev.task_id IS NOT NULL
+		FROM events ev JOIN tasks t ON t.id = ev.task_id
+		WHERE ev.project_id=$1 AND t.kind <> 'architecture'
 		  AND ev.type IN ('task.verdict', 'task.review_passed', 'task.review_external', 'task.checks_external')
 		ORDER BY ev.id DESC LIMIT 20`, projectID)
 	if err != nil {
@@ -518,7 +536,7 @@ func loadCyclePeriod(ctx context.Context, tx pgx.Tx, projectID string, from time
 	if err := tx.QueryRow(ctx, `
 		SELECT
 		  (SELECT count(*) FROM tasks t JOIN epics e ON e.id = t.epic_id
-		   WHERE e.project_id=$1 AND t.status='done' AND t.merged_at >= $2),
+		   WHERE e.project_id=$1 AND t.status='done' AND t.kind <> 'architecture' AND t.merged_at >= $2),
 		  (SELECT COALESCE(sum(jsonb_array_length(r.composition)), 0) FROM releases r WHERE r.project_id=$1 AND r.created_at >= $2),
 		  (SELECT count(*) FROM incidents WHERE project_id=$1 AND status='resolved' AND resolved_at >= $2),
 		  (SELECT count(DISTINCT ev.epic_id) FROM events ev WHERE ev.project_id=$1 AND ev.type='epic.status'
@@ -526,7 +544,8 @@ func loadCyclePeriod(ctx context.Context, tx pgx.Tx, projectID string, from time
 		Scan(&devDone, &released, &resolved, &planned); err != nil {
 		return err
 	}
-	// Завершённая задача прошла разработку, тестирование и ревью.
+	// Завершённая задача прошла разработку, тестирование и ревью. Задача
+	// описания архитектуры шла в фазе «Архитектура» и считается там.
 	in.DonePeriod[cycle.Planning] = planned
 	in.DonePeriod[cycle.Development] = devDone
 	in.DonePeriod[cycle.Testing] = devDone
