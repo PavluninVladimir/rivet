@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/PavluninVladimir/rivet/internal/config"
 	"github.com/PavluninVladimir/rivet/internal/domain"
 )
 
@@ -33,6 +34,11 @@ var ErrConflict = errors.New("conflict")
 // чтобы её проходили все пути задания пароля, включая bootstrap.
 var ErrWeakPassword = fmt.Errorf("пароль короче %d символов", domain.MinPasswordLen)
 
+// ErrPublishedPassword: пароль из документации и примеров Rivet
+// (config.PublishedAdminPasswords). Его знает любой, кто читал
+// репозиторий, поэтому задать его нельзя ни одним путём.
+var ErrPublishedPassword = errors.New("этот пароль опубликован в документации Rivet, выберите другой")
+
 // ErrSamePassword — новый пароль совпадает с текущим.
 var ErrSamePassword = errors.New("новый пароль совпадает с текущим")
 
@@ -50,10 +56,13 @@ func scanUser(row pgx.Row) (domain.User, error) {
 	return u, err
 }
 
-// hashPassword проверяет длину и считает bcrypt-хэш.
+// hashPassword проверяет длину и опубликованность и считает bcrypt-хэш.
 func hashPassword(password string) (string, error) {
 	if len([]rune(password)) < domain.MinPasswordLen {
 		return "", ErrWeakPassword
+	}
+	if config.IsPublishedAdminPassword(password) {
+		return "", ErrPublishedPassword
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	return string(hash), err

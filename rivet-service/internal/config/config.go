@@ -11,7 +11,9 @@ import (
 type Config struct {
 	// DatabaseURL — DSN PostgreSQL, например postgres://rivet:rivet@localhost:5432/rivet.
 	DatabaseURL string
-	// HTTPAddr — адрес клиентского API (REST + SSE).
+	// HTTPAddr: адрес клиентского API (REST + SSE). По умолчанию loopback:
+	// установка без настроек закрыта для сети (спека access-policy
+	// «Безопасные умолчания установки»).
 	HTTPAddr string
 	// GRPCAddr — адрес протокола runner'ов. Регистрация аутентифицируется
 	// токеном (спека runners); без TLS токен идёт открытым текстом, поэтому
@@ -47,6 +49,13 @@ type Config struct {
 	SCM string
 	// SecretKey — ключ шифрования учётных данных хостингов (base64, 32 байта).
 	SecretKey string
+	// SecretKeyOld: прежний ключ шифрования: нужен только команде
+	// rivetd -rotate-key, которая перешифровывает секреты новым ключом.
+	SecretKeyOld string
+	// SourceURL: адрес исходного кода установки из RIVET_SOURCE_URL. Он
+	// переопределяет адрес, вшитый при сборке, без пересборки (форки, AGPL
+	// §13). Пусто значит адрес из сборки.
+	SourceURL string
 	// PublicURL — внешний адрес установки; нужен для регистрации webhook.
 	PublicURL string
 	// LLMProvider — провайдер модели декомпозиции: anthropic или deepseek.
@@ -83,11 +92,19 @@ type Config struct {
 	AllowPrivateURLs string
 }
 
+// Адреса по умолчанию только loopback. Открыть API или протокол
+// runner'ов наружу можно только явно: RIVET_HTTP_ADDR=0.0.0.0:8080,
+// RIVET_GRPC_ADDR=0.0.0.0:8090 (так делает Dockerfile внутри контейнера).
+const (
+	DefaultHTTPAddr = "127.0.0.1:8080"
+	DefaultGRPCAddr = "127.0.0.1:8090"
+)
+
 func FromEnv() (Config, error) {
 	c := Config{
 		DatabaseURL:            getenv("RIVET_DATABASE_URL", "postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable"),
-		HTTPAddr:               getenv("RIVET_HTTP_ADDR", ":8080"),
-		GRPCAddr:               getenv("RIVET_GRPC_ADDR", ":8090"),
+		HTTPAddr:               getenv("RIVET_HTTP_ADDR", DefaultHTTPAddr),
+		GRPCAddr:               getenv("RIVET_GRPC_ADDR", DefaultGRPCAddr),
 		GRPCTLSCert:            os.Getenv("RIVET_GRPC_TLS_CERT"),
 		GRPCTLSKey:             os.Getenv("RIVET_GRPC_TLS_KEY"),
 		GRPCClientCA:           os.Getenv("RIVET_GRPC_CLIENT_CA"),
@@ -100,6 +117,8 @@ func FromEnv() (Config, error) {
 		GitHubWebhookSecret:    os.Getenv("RIVET_GITHUB_WEBHOOK_SECRET"),
 		SCM:                    getenv("RIVET_SCM", "github"),
 		SecretKey:              os.Getenv("RIVET_SECRET_KEY"),
+		SecretKeyOld:           os.Getenv("RIVET_SECRET_KEY_OLD"),
+		SourceURL:              strings.TrimSuffix(strings.TrimSpace(os.Getenv("RIVET_SOURCE_URL")), "/"),
 		PublicURL:              strings.TrimSuffix(os.Getenv("RIVET_PUBLIC_URL"), "/"),
 		LLMProvider:            os.Getenv("RIVET_LLM_PROVIDER"),
 		AnthropicAPIKey:        os.Getenv("ANTHROPIC_API_KEY"),

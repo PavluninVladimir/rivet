@@ -10,5 +10,8 @@ data/
 /rivet-ios/
 /rivet-e2e/
 
+# бинарники make build
+/rivet-service/bin/
+
 # скомпилированный fake-llm (тестовая программа, не продукт)
 /rivet-service/cmd/fake-llm/fake-llm

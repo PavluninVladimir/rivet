@@ -73,21 +73,42 @@ S3-совместимом хранилище (RustFS в dev).
 
 ## Сборка и запуск
 
-Нужны Go 1.26.2 или новее, Docker (для Postgres и S3-хранилища RustFS) и, если пересобирать консоль,
+Нужны Go 1.26.10 или новее, Docker (для Postgres и S3-хранилища RustFS) и, если пересобирать консоль,
 Node.js 24.
 
-Проще всего поднять всё в Docker:
+Прежде чем запускать runner'ы, прочитайте [SECURITY.md](SECURITY.md):
+агент Rivet выполняет команды с правами пользователя runner'а, и изоляцию
+даёт только песочница или отдельный пользователь, контейнер, виртуальная
+машина.
+
+Проще всего поднять всё в Docker. Пароль первого администратора и ключ
+шифрования секретов обязательны, своих значений по умолчанию у них нет:
 
 ```sh
 cd rivet-service
-docker compose up -d --build
+cp .env.example .env
+# в .env: RIVET_ADMIN_PASSWORD (openssl rand -base64 18)
+#         RIVET_SECRET_KEY     (openssl rand -base64 32)
+make image            # образ rivetd с версией и коммитом сборки
+docker compose up -d
 ```
 
+Без пароля или ключа `docker compose` не стартует и называет недостающую
+переменную. rivetd не стартует с ключом, который когда-либо был
+опубликован в документации и примерах, и с таким же паролем первого
+администратора на новой установке (список в
+`internal/config/published.go`). Администратору, у которого такой пароль
+уже стоит в базе, консоль при следующем входе предложит его сменить. Первый администратор: `admin` (или
+`RIVET_ADMIN_LOGIN`) с паролем из `.env`.
+
 rivetd слушает `127.0.0.1:8080` (API и веб-консоль) и `127.0.0.1:8090`
-(gRPC для runner'ов). Первый администратор `admin` / `admin-local`. Эти
-значения по умолчанию годятся только для локального стенда, перед
-публикацией задайте `RIVET_ADMIN_LOGIN`, `RIVET_ADMIN_PASSWORD` и
-`RIVET_SECRET_KEY`.
+(gRPC для runner'ов): compose публикует порты только на loopback хоста.
+Бинарник rivetd вне контейнера по умолчанию тоже слушает только loopback.
+Открыть API или протокол runner'ов в сеть можно только явно:
+`RIVET_HTTP_ADDR=0.0.0.0:8080`, `RIVET_GRPC_ADDR=0.0.0.0:8090`. Протокол
+runner'ов вне loopback без TLS rivetd запускает, но пишет в журнал
+предупреждение: токены runner'ов и секреты назначений пойдут открытым
+текстом. Задайте `RIVET_GRPC_TLS_CERT` и `RIVET_GRPC_TLS_KEY`.
 
 Установке нужен хостинг кода: задайте `RIVET_SCM=github` и
 `RIVET_GITHUB_TOKEN` (в окружении или `.env` рядом с `docker-compose.yml`).
@@ -95,18 +116,63 @@ rivetd слушает `127.0.0.1:8080` (API и веб-консоль) и `127.0.
 заглушка хостинга для e2e-стенда: pull request'ы и merge в ней не
 настоящие, для работы она не годится.
 
-Локально без контейнера rivetd:
+Локально без контейнера rivetd (`.env` из `.env.example` нужен и здесь:
+compose читает его для любой команды):
 
 ```sh
 cd rivet-service
 docker compose up -d postgres s3
-make build            # go build ./...
-RIVET_SCM=github RIVET_GITHUB_TOKEN=ghp_... \
-RIVET_ADMIN_LOGIN=admin RIVET_ADMIN_PASSWORD=change-me \
-  go run ./cmd/rivetd
+make build            # бинарники в bin/
+set -a && . ./.env && set +a
+RIVET_SCM=github RIVET_GITHUB_TOKEN=ghp_... go run ./cmd/rivetd
 ```
 
 Миграции базы rivetd применяет сам при старте.
+
+### Смена ключа шифрования
+
+Ключом `RIVET_SECRET_KEY` зашифрованы токены хостингов, ключи и секретные
+заголовки подключений к моделям. Сменить его на работающей установке
+(например, если стенд поднимался со старым `docker-compose.yml`, где ключ
+был прописан в самом файле) можно без повторного ввода секретов:
+
+```sh
+cd rivet-service
+# 1. в .env новый ключ: RIVET_SECRET_KEY=$(openssl rand -base64 32)
+# 2. новый образ: прежний не знает -rotate-key и запустился бы сервером
+make image
+# 3. остановить rivetd и сделать резервную копию базы
+docker compose stop rivetd
+docker compose exec -T postgres pg_dump -U rivet -Fc rivet > rivet-before-rotate.dump
+# 4. перешифровать: прежний ключ только в окружении этой команды. У стенда
+#    по старому docker-compose.yml это ключ, который тот подставлял сам:
+#    cml2ZXQtbG9jYWwtZGV2LWtleS0zMi1ieXRlcyEhISE=
+RIVET_SECRET_KEY_OLD='<прежний ключ>' \
+  docker compose run --rm --no-deps -e RIVET_SECRET_KEY_OLD rivetd -rotate-key
+# в выводе должна быть строка «секреты перешифрованы новым ключом»
+# 5. запустить с новым ключом
+docker compose up -d rivetd
+```
+
+`rivetd -rotate-key` перешифровывает все секреты одной транзакцией и пишет
+в журнал событий `secret_key.rotated` с числом перешифрованных секретов,
+без значений. Если какой-то секрет не читается ни прежним, ни новым
+ключом, не меняется ничего, а ошибка называет эти секреты. Пока с базой
+работает rivetd, перешифровка не идёт и просит его остановить: rivetd
+держит advisory-блокировку на соединении с `application_name` `rivetd
+serve-lock` и берёт её заново после обрыва. Если перешифровка всё же
+прошла в такой момент, rivetd замечает это и завершается с ошибкой:
+перезапустите его с новым ключом. rivetd прежних версий блокировки не
+держит, поэтому при первом переходе остановите его сами. Перешифровка
+ждёт таблицы секретов за чужой транзакцией не дольше 30 секунд, а
+остановленная на полпути (Ctrl+Z, пропавшая сеть) через минуту
+откатывается сама и не держит старт rivetd.
+Повторный запуск безопасен: секреты, которые уже читаются новым ключом,
+остаются как есть.
+
+Ключ старого `docker-compose.yml` из рецепта опубликован
+(`internal/config/published.go`): с ним rivetd больше не стартует, но как
+прежний ключ для `-rotate-key` он годится.
 
 ### Подключение моделей
 
@@ -460,18 +526,47 @@ control plane.
 | Переменная | Назначение |
 |---|---|
 | `RIVET_DATABASE_URL` | DSN PostgreSQL |
-| `RIVET_HTTP_ADDR`, `RIVET_GRPC_ADDR` | адреса API (`:8080`) и протокола runner'ов (`:8090`) |
-| `RIVET_GRPC_TLS_CERT`, `RIVET_GRPC_TLS_KEY` | TLS протокола runner'ов |
-| `RIVET_GRPC_CLIENT_CA` | корни клиентских сертификатов runner'ов: включает mTLS |
+| `RIVET_HTTP_ADDR`, `RIVET_GRPC_ADDR` | адреса API (`127.0.0.1:8080`) и протокола runner'ов (`127.0.0.1:8090`), в контейнере `0.0.0.0` |
+| `RIVET_GRPC_TLS_CERT`, `RIVET_GRPC_TLS_KEY` | TLS протокола runner'ов. В контейнере rivetd работает от uid 10001, файл ключа должен читаться им |
+| `RIVET_GRPC_CLIENT_CA` | корни клиентских сертификатов runner'ов: включает mTLS. В контейнере файл должен читаться uid 10001 |
 | `RIVET_S3_ENDPOINT`, `RIVET_S3_ACCESS_KEY`, `RIVET_S3_SECRET_KEY`, `RIVET_S3_BUCKET` | хранилище транскриптов |
 | `RIVET_SCM`, `RIVET_GITHUB_TOKEN`, `RIVET_GITHUB_WEBHOOK_SECRET` | хостинг кода и webhook'и |
-| `RIVET_SECRET_KEY` | ключ шифрования учётных данных хостингов (32 байта, base64) |
+| `RIVET_SECRET_KEY` | ключ шифрования секретов: токенов хостингов, ключей и секретных заголовков подключений (32 байта, base64, `openssl rand -base64 32`) |
+| `RIVET_SECRET_KEY_OLD` | прежний ключ, только для `rivetd -rotate-key` |
 | `RIVET_PUBLIC_URL` | внешний адрес установки для регистрации webhook'ов |
-| `RIVET_ADMIN_LOGIN`, `RIVET_ADMIN_PASSWORD` | первый администратор |
+| `RIVET_ADMIN_LOGIN`, `RIVET_ADMIN_PASSWORD` | первый администратор, пароли из документации rivetd не принимает |
+| `RIVET_SOURCE_URL` | адрес исходного кода для ссылки «Исходный код» и `GET /api/v1/about`: форк указывает свой репозиторий |
 | `RIVET_POLICY_MODE`, `RIVET_POLICY_URL` | встроенный движок политик или внешний OPA |
 | `RIVET_ALLOW_PRIVATE_URLS` | адреса во внутренней сети для проверок URL control plane'ом: `true` — любые (и прокси окружения), список CIDR через запятую — только эти диапазоны |
 
 ### Обновление
+
+**Безопасные умолчания (BREAKING).** rivetd без настроек слушает только
+loopback (`127.0.0.1:8080` и `127.0.0.1:8090`). Если rivetd запущен
+бинарником на сервере без `RIVET_HTTP_ADDR` и `RIVET_GRPC_ADDR`, после
+обновления задайте их явно. Порядок обновления стенда из
+`docker-compose.yml`:
+
+1. Заведите `.env` из `.env.example`: `docker-compose.yml` больше не
+   подставляет пароль администратора и ключ шифрования. Пароль нужен
+   compose, даже если пользователи уже есть.
+2. Пересоберите образ (`make image`) до перешифровки и до `up`: прежний
+   образ не знает `-rotate-key`.
+3. Если стенд работал на ключе из старого `docker-compose.yml`, с ним
+   rivetd больше не стартует. Перешифруйте секреты новым ключом (раздел
+   «Смена ключа шифрования»).
+4. Смените пароль администратора, если он был `admin-local` или другим
+   паролем из документации. rivetd сам находит таких администраторов при
+   старте: при следующем входе консоль потребует сменить пароль, в журнале
+   событий появится `user.password_published`. До смены пароля API под
+   этим администратором отвечает 403 `password_change_required`, в том
+   числе на его personal access tokens: CLI и скрипты с его токеном
+   встанут, пока он не войдёт в консоль и не сменит пароль. Runner'ы
+   работают как прежде.
+5. Если протокол runner'ов работает с TLS, проверьте права на файл ключа:
+   rivetd в контейнере теперь работает от uid 10001, а не от root, и ключ
+   с правами 0600 владельца хоста не прочитает. Подойдёт `chown 10001` или
+   группа и 0640.
 
 **Токены runner'ов привязаны к идентификаторам.** При обновлении каждый
 ранее выпущенный токен привязывается к runner'ам, которые уже
@@ -565,7 +660,7 @@ make ui
 ```sh
 cd rivet-service
 go test ./...                       # без базы тесты хранилища пропускаются
-docker compose up -d postgres
+docker compose up -d postgres      # нужен .env из .env.example
 RIVET_DATABASE_URL='postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable' go test ./...
 make fuzz                           # короткий фаззинг по всем таргетам
 make lint                           # golangci-lint
@@ -576,8 +671,35 @@ make lint                           # golangci-lint
 инфраструктура: модель там `cmd/fake-llm`, хостинг `RIVET_SCM=fake`, а
 runner'ы стартуют с `RIVET_RUNNER_UNSANDBOXED=1`.
 
+### Исходный код работающей версии
+
+Rivet распространяется под AGPL-3.0: каждый, кто работает с установкой по
+сети, может получить исходники ровно той версии, что у него работает.
+`GET /api/v1/about` без входа отдаёт версию, коммит, адрес исходников и
+лицензию, а консоль показывает ссылку «Исходный код · версия» на странице
+входа и в профиле. Версию и коммит вшивает сборка (`make build` кладёт
+бинарники в `bin/`, `make image` собирает образ). Форк указывает свой
+репозиторий настройкой `RIVET_SOURCE_URL` без пересборки или при сборке:
+`make build SOURCE_URL=https://github.com/<вы>/rivet` (или `make image
+SOURCE_URL=…`). Адрес с логином, паролем или токеном rivetd не принимает:
+его увидел бы любой на странице входа.
+
+## Участие и безопасность
+
+Как предложить правку и зачем нужен CLA, описано в [CONTRIBUTING.md](CONTRIBUTING.md).
+Об уязвимостях сообщайте приватно, как описано в [SECURITY.md](SECURITY.md).
+
 ## License
 
-Copyright (C) 2026 Vladimir Pavlunin. Licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only).
+Copyright (C) 2026 Vladimir Pavlunin. Licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only),
+with an additional permission under section 7 ([LICENSE-EXCEPTION](LICENSE-EXCEPTION)).
+The runner protocol in `rivet-service/pkg/protocol` is licensed under the Apache License 2.0.
 
-Полный текст лицензии — в файле [LICENSE](LICENSE).
+Полный текст лицензии в файле [LICENSE](LICENSE). Дополнительное
+разрешение по разделу 7 ([LICENSE-EXCEPTION](LICENSE-EXCEPTION)): политики,
+процессы, профили и промпты пользователей, программы, которые работают с
+Rivet только через API, поток событий и протокол runner'ов, и код, который
+агенты пишут в репозиториях пользователя, под AGPL не попадают. Описание
+протокола runner'ов (`rivet-service/pkg/protocol`) выходит под Apache-2.0, чтобы
+runner'ы и клиенты можно было писать под любой лицензией. Сторонние
+компоненты и их лицензии перечислены в [NOTICE](NOTICE) и [THIRD_PARTY](THIRD_PARTY).

@@ -1,0 +1,60 @@
+Rivet: orchestrator for autonomous software development
+Copyright (C) 2026 Vladimir Pavlunin
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, version 3 only (AGPL-3.0-only). See LICENSE.
+
+This file applies to all repositories of the Rivet project: rivet, rivet-web,
+rivet-e2e, rivet-android and rivet-ios.
+
+Additional permission under GNU AGPL version 3 section 7
+
+The following are not covered works or modifications of Rivet and may be
+distributed under any terms, whoever wrote them:
+
+(a) policies, process definitions, agent profiles, agent role templates,
+    prompts and other configuration created by users of Rivet;
+(b) programs that interact with Rivet only through its HTTP API, its event
+    stream or the runner protocol, including runners, adapters and clients;
+(c) any code, text or other output produced by coding agents in
+    repositories orchestrated by Rivet.
+
+The built-in policy modules in `rivet-service/internal/policy/rego/` and the
+preinstalled agent profiles and agent role templates (their names,
+descriptions and instructions, seeded by the migrations in
+`rivet-service/internal/store/migrations/`) are additionally released under
+CC0 1.0 Universal (https://creativecommons.org/publicdomain/zero/1.0/), so
+that copies and edits of them may be used under any terms.
+
+The runner protocol in `rivet-service/pkg/protocol/` (rivet.proto and the Go
+code generated from it) is licensed under the Apache License 2.0, see
+`rivet-service/pkg/protocol/LICENSE`.
+
+---
+
+Дополнительное разрешение по разделу 7 GNU AGPL версии 3
+
+Файл относится ко всем репозиториям проекта Rivet: rivet, rivet-web,
+rivet-e2e, rivet-android и rivet-ios.
+
+Следующее не является охватываемыми произведениями или изменениями Rivet и
+может распространяться на любых условиях, кто бы это ни написал:
+
+(а) политики, описания процессов, профили агентов, шаблоны ролей агентов,
+    промпты и другая конфигурация, созданная пользователями Rivet;
+(б) программы, которые работают с Rivet только через его HTTP API, поток
+    событий или протокол runner'ов, в том числе runner'ы, адаптеры и
+    клиенты;
+(в) любой код, текст и другой результат работы coding-агентов в
+    репозиториях, которыми управляет Rivet.
+
+Встроенные модули политик в `rivet-service/internal/policy/rego/` и
+предустановленные профили агентов и шаблоны ролей (их названия, описания и
+инструкции из миграций `rivet-service/internal/store/migrations/`)
+дополнительно отдаются под CC0 1.0: их копии и правки можно использовать на
+любых условиях.
+
+Описание протокола runner'ов в `rivet-service/pkg/protocol/` (rivet.proto и
+сгенерированный из него код Go) распространяется под Apache License 2.0, см.
+`rivet-service/pkg/protocol/LICENSE`.

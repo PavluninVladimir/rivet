@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+// Протокол runner'ов выходит под Apache-2.0, а не под AGPL остального Rivet:
+// runner'ы и клиенты протокола можно писать под любой лицензией (LICENSE в
+// этом каталоге).
+//
 // Протокол runner ↔ control plane (см. design и api-contract изменения
 // define-rivet-architecture). Соединение всегда исходящее от runner'а.
 // Доставка at-least-once: каждое сообщение несёт msg_id, приём подтверждается

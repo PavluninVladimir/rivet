@@ -1,12 +1,23 @@
-.PHONY: build test lint fuzz up down migrate proto ui e2e-stand
+.PHONY: build test lint fuzz up down image migrate proto ui e2e-stand third-party
 
-# Версия сборки — в бинарники через ldflags (состояние установки).
+# Сведения о сборке попадают в бинарники через ldflags: версия для состояния
+# установки, версия, коммит и адрес исходников для ссылки «Исходный код»
+# (GET /api/v1/about). SOURCE_URL задаёт форк, пусто значит адрес по умолчанию
+# из cmd/rivetd.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS = -X main.version=$(VERSION)
+COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null)
+SOURCE_URL ?=
+LDFLAGS = -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+ifneq ($(SOURCE_URL),)
+LDFLAGS += -X main.sourceURL=$(SOURCE_URL)
+endif
 GO ?= go
 
+# Бинарники rivetd, rivet-runner и rivet (и тестовый fake-llm) в bin/ со
+# сведениями о сборке. go build ./... с несколькими main-пакетами только
+# проверяет сборку и выбрасывает результат.
 build:
-	go build -ldflags "$(LDFLAGS)" ./...
+	go build -ldflags "$(LDFLAGS)" -o bin/ ./cmd/...
 
 test:
 	go test ./...
@@ -57,6 +68,12 @@ lint:
 up:
 	docker compose up -d
 
+# Образ rivetd с версией и коммитом сборки: в контекст Docker .git не
+# входит, поэтому они передаются аргументами.
+image:
+	docker compose build --build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
+		$(if $(SOURCE_URL),--build-arg SOURCE_URL=$(SOURCE_URL)) rivetd
+
 down:
 	docker compose down
 
@@ -68,9 +85,17 @@ proto:
 		--go-grpc_out=. --go-grpc_opt=module=github.com/PavluninVladimir/rivet \
 		pkg/protocol/rivet.proto
 
+# После make ui выполните make third-party: раздел консоли в NOTICE и
+# THIRD_PARTY берётся из встроенной сборки, CI сверяет их.
 ui:
 	cd ../rivet-web && npm run build
 	rm -rf internal/webui/dist && cp -r ../rivet-web/dist internal/webui/dist
 
 e2e-stand:
 	sh scripts/e2e-stand.sh
+
+# NOTICE и THIRD_PARTY в корне репозитория: лицензии Go-зависимостей
+# (go-licenses) и пакетов встроенной консоли (rivet-web/dist после
+# npm run build). CI сверяет файлы тем же скриптом с --check.
+third-party:
+	python3 scripts/third_party.py

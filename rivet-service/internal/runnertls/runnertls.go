@@ -168,20 +168,6 @@ func PeerCertificate(ctx context.Context) *x509.Certificate {
 	return ti.State.VerifiedChains[0][0]
 }
 
-// LoopbackAddr: адрес прослушивания доступен только с этой машины,
-// localhost или loopback-IP. Пустой хост, 0.0.0.0 и :: означают все интерфейсы.
-func LoopbackAddr(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = addr
-	}
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
 // LogHandshakeFailures оборачивает учётные данные сервера: неудачное
 // TLS-рукопожатие (нет клиентского сертификата, чужой корень, истёк)
 // пишется в журнал rivetd не чаще раза в handshakeLogWindow на адрес.

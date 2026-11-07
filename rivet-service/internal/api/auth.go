@@ -38,11 +38,12 @@ func forbidden(w http.ResponseWriter, msg string) {
 	writeJSON(w, http.StatusForbidden, map[string]apiError{"error": {Code: "forbidden", Message: msg}})
 }
 
-// authExempt — endpoints, живущие до идентичности: health, вход и webhook
-// (у него собственная HMAC-подпись, спека scm-integration).
+// authExempt отбирает endpoints, живущие до идентичности: health, сведения о
+// сборке (ссылка на исходники видна до входа, спека source-availability),
+// вход и webhook (у него собственная HMAC-подпись, спека scm-integration).
 func authExempt(r *http.Request) bool {
 	switch r.URL.Path {
-	case "/api/v1/health", "/api/v1/auth/login",
+	case "/api/v1/health", "/api/v1/about", "/api/v1/auth/login",
 		// Webhook'и аутентифицируются подписью хостинга, а не сессией.
 		"/api/v1/webhooks/github", "/api/v1/webhooks/gitlab":
 		return true
@@ -91,7 +92,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		if u.MustChangePassword && !passwordChangeExempt(r) {
 			writeJSON(w, http.StatusForbidden, map[string]apiError{"error": {
 				Code:    "password_change_required",
-				Message: "пароль сброшен администратором: смените его, чтобы продолжить"}})
+				Message: "нужно сменить пароль, чтобы продолжить: его сбросил администратор или он совпадает с паролем из документации Rivet"}})
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))

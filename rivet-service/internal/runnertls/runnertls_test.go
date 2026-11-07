@@ -12,17 +12,6 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/runnertls/tlstest"
 )
 
-func TestLoopbackAddr(t *testing.T) {
-	for addr, want := range map[string]bool{
-		"127.0.0.1:8090": true, "localhost:8090": true, "[::1]:8090": true, "127.0.0.2:8090": true,
-		":8090": false, "0.0.0.0:8090": false, "[::]:8090": false, "10.0.0.5:8090": false, "rivet.example:8090": false,
-	} {
-		if got := LoopbackAddr(addr); got != want {
-			t.Errorf("LoopbackAddr(%q) = %v, ждём %v", addr, got, want)
-		}
-	}
-}
-
 func TestIdentities(t *testing.T) {
 	ca := tlstest.NewCA(t, "runners")
 	certFile, keyFile := ca.Issue(t, "host", tlstest.Leaf{CN: "host-a", DNS: []string{"local-worker", "local-reviewer", "host-a"}})

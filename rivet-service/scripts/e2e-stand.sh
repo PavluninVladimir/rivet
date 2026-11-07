@@ -65,7 +65,7 @@ trap cleanup EXIT INT TERM
 # Fake-провайдер моделей (add-model-connections): консоль создаёт к нему
 # подключение с ключом fake-key, планировщик декомпозирует его планом.
 LLM_PORT=${E2E_LLM_PORT:-8283}
-"$STAND_DIR/fake-llm" -addr ":$LLM_PORT" &
+"$STAND_DIR/fake-llm" -addr "127.0.0.1:$LLM_PORT" &
 for _ in $(seq 1 50); do
   curl -s "http://localhost:$LLM_PORT/v1/models" >/dev/null 2>&1 && break
   sleep 0.1
@@ -78,8 +78,15 @@ done
 # Токен привязан к идентификаторам runner'ов стенда (add-runner-identity):
 # другой идентификатор по нему не регистрируется. Список совпадает с
 # start_runner ниже.
+#
+# Пароль и ключ стенда свои на каждый прогон: rivetd не стартует с
+# паролем или ключом, опубликованными в репозитории (спека access-policy
+# «Безопасные умолчания установки»). Playwright передаёт свой пароль в
+# E2E_ADMIN_PASSWORD (rivet-e2e, e2e/stand.ts), без него пароль
+# генерируется здесь и лежит в $STAND_DIR/admin-password для входа руками.
 ADMIN_LOGIN="${E2E_ADMIN_LOGIN:-e2e-admin}"
-ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-e2e-password}"
+ADMIN_PASSWORD="${E2E_ADMIN_PASSWORD:-$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)}"
+(umask 077 && printf '%s\n' "$ADMIN_PASSWORD" > "$STAND_DIR/admin-password")
 API="http://localhost:$HTTP_PORT/api/v1"
 LLM_CONN=${E2E_LLM_CONNECTION:-e2e-llm}
 (
@@ -163,12 +170,15 @@ print(json.dumps({"models": models}))' > "$STAND_DIR/llm-models.json" \
 # Control plane на переднем плане.
 # Ключ шифрования учётных данных хостингов: без него подключение
 # репозитория с токеном отключено (fail-closed), и мастер не создаст проект.
+# Генерируется на каждый прогон, как и пароль администратора.
 SECRET_KEY=${E2E_SECRET_KEY:-$(head -c 32 /dev/urandom | base64)}
 
+# Только loopback: у стенда известный секрет webhook и разрешены проверки
+# URL во внутренней сети, наружу его открывать нельзя.
 exec env \
-  RIVET_HTTP_ADDR=":$HTTP_PORT" \
+  RIVET_HTTP_ADDR="127.0.0.1:$HTTP_PORT" \
   RIVET_SECRET_KEY="$SECRET_KEY" \
-  RIVET_GRPC_ADDR=":$GRPC_PORT" \
+  RIVET_GRPC_ADDR="127.0.0.1:$GRPC_PORT" \
   RIVET_DATABASE_URL="$DB_URL" \
   RIVET_SCM=fake \
   RIVET_FAKE_GIT_DIR="$STAND_DIR/repos" \

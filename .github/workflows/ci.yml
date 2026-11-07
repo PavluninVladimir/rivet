@@ -7,6 +7,10 @@ on:
   # Ручной перезапуск: прогон после сбоя GitHub Actions иначе не повторить.
   workflow_dispatch:
 
+# Токену workflow хватает чтения: прогон ничего не публикует.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -28,6 +32,8 @@ jobs:
           --health-retries 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
           go-version-file: rivet-service/go.mod
@@ -49,7 +55,68 @@ jobs:
         working-directory: rivet-service
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v7
         with:
           go-version-file: rivet-service/go.mod
       - run: make fuzz FUZZ_TIME=15s
+
+  # Сканер секретов по всей истории: в репозитории не должно быть настоящих
+  # ключей и токенов. Выдуманные значения тестов исключены в .gitleaks.toml.
+  secrets:
+    runs-on: ubuntu-latest
+    # gitleaks-action на pull_request читает список коммитов PR через API:
+    # в приватном репозитории без pull-requests: read запрос получит 403.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Версия, на которой проверены исключения .gitleaks.toml.
+          GITLEAKS_VERSION: 8.30.1
+
+  # Лицензии зависимостей: копилефт, запрещённые лицензии и пакеты без
+  # лицензии роняют сборку; NOTICE и THIRD_PARTY должны совпадать с go.mod
+  # (make third-party в rivet-service).
+  licenses:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rivet-service
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: rivet-service/go.mod
+      - run: go install github.com/google/go-licenses/v2@v2.0.1
+      - run: >-
+          go-licenses check ./...
+          --ignore github.com/PavluninVladimir/rivet
+          --disallowed_types=forbidden,restricted,reciprocal,unknown
+      - run: python3 scripts/third_party.py --check
+
+  # Известные уязвимости в зависимостях и стандартной библиотеке, которые
+  # достижимы из кода Rivet.
+  vulncheck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rivet-service
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: rivet-service/go.mod
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.2.0
+      - run: govulncheck ./...

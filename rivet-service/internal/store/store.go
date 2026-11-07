@@ -20,7 +20,20 @@ type Store struct {
 }
 
 func New(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+	return NewNamed(ctx, databaseURL, "")
+}
+
+// NewNamed: то же с application_name у соединений пула (пусто: как в
+// DSN). По нему в pg_stat_activity видно, кто держит блокировки.
+func NewNamed(ctx context.Context, databaseURL, appName string) (*Store, error) {
+	cfg, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, err
+	}
+	if appName != "" {
+		cfg.ConnConfig.RuntimeParams["application_name"] = appName
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
