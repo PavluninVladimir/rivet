@@ -112,12 +112,20 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	promptVerdict := ""
 	result := func(ok bool, detail string) {
 		emitUsage()
+		// Ошибка провайдера или агента в итоге может нести эхо ключа
+		// (прокси): итог маскируется, как транскрипт.
+		detail = masker.maskString(detail)
+		if promptVerdict == verdictModelConnection {
+			// Первая строка — ошибка агента: по ней control plane читает код
+			// отказа провайдера, длинный текст агента её не вытесняет.
+			detail = headTail(detail, 8000)
+		} else {
+			detail = tail(detail, 8000)
+		}
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_StageResult{
 			StageResult: &pb.StageResult{TaskId: as.TaskId, SessionId: as.SessionId,
 				StepId: as.StepId, Participant: as.Participant, Verdict: promptVerdict,
-				// Ошибка провайдера или агента в итоге может нести эхо
-				// ключа (прокси): итог маскируется, как транскрипт.
-				Stage: as.Stage, Ok: ok, Detail: tail(masker.maskString(detail), 8000),
+				Stage: as.Stage, Ok: ok, Detail: detail,
 				// Эхо доставленной версии: итог стадии привязан к политике,
 				// по которой работал агент (спека access-policy).
 				PolicyHash: as.GetPolicy().GetHash()}}})
@@ -176,6 +184,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			return
 		}
 		if err != nil {
+			if isConnectionError(err) {
+				promptVerdict = verdictModelConnection
+			}
 			result(false, fmt.Sprintf("агент завершился с ошибкой: %v\n%s", err, out))
 			return
 		}
@@ -263,6 +274,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			return
 		}
 		if err != nil {
+			if isConnectionError(err) {
+				promptVerdict = verdictModelConnection
+			}
 			result(false, fmt.Sprintf("ревьюер завершился с ошибкой: %v", err))
 			return
 		}
@@ -287,6 +301,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			return
 		}
 		if err != nil {
+			if isConnectionError(err) {
+				promptVerdict = verdictModelConnection
+			}
 			result(false, fmt.Sprintf("агент завершился с ошибкой: %v\n%s", err, out))
 			return
 		}
@@ -775,6 +792,35 @@ func tail(s string, n int) string {
 		cut++
 	}
 	return "…" + s[cut:]
+}
+
+// headTail — текст не длиннее n байт с сохранённой первой строкой (не
+// длиннее четверти предела): режется остальной текст, с начала, как в tail.
+// Однострочный текст режется с конца: начало и есть ошибка.
+func headTail(s string, n int) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if len(s) <= n {
+		return s
+	}
+	first, rest, ok := strings.Cut(s, "\n")
+	first = headBytes(first, n/4)
+	if !ok {
+		return headBytes(s, n)
+	}
+	// tail ставит в начало «…»: место под него тоже из предела.
+	return first + "\n" + tail(rest, n-len(first)-1-len("…"))
+}
+
+// headBytes — начало s не длиннее n байт по границе руны.
+func headBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // guardResults — итог стадии (StageResult, Blocked), отменённой не control

@@ -59,6 +59,11 @@ type StepRun struct {
 	// AssignedModel — модель, с которой стадия ушла runner'у; Model — только
 	// явная модель участника (требование к runner'у).
 	AssignedModel string
+	// AssignedConnection — подключение модели в назначении агенту Rivet;
+	// CatalogKey — ключ или секретные заголовки каталога ушли runner'у в
+	// назначении (иначе runner брал ключ из своего окружения).
+	AssignedConnection string
+	CatalogKey         bool
 }
 
 // DisplayModel — модель запуска для людей: назначенная, иначе явная.
@@ -78,14 +83,15 @@ func (r StepRun) Open() bool { return r.Verdict == "" }
 const runCols = `r.id, r.task_id::text, r.step_id, r.step_kind, r.pass, r.participant, r.agent_kind, r.model,
 	r.capabilities, r.user_login, r.user_role, COALESCE(r.runner_id,''), COALESCE(r.session_id::text,''), COALESCE(r.verdict,''),
 	r.verdict_by, r.detail, r.created_at, r.finished_at, r.role, r.pref_model, COALESCE(r.agent_id, ''),
-	COALESCE((SELECT ta.name FROM team_agents ta WHERE ta.id = r.agent_id), ''), r.role_agent, r.pref_agent, r.agent_verdict, r.assigned_model`
+	COALESCE((SELECT ta.name FROM team_agents ta WHERE ta.id = r.agent_id), ''), r.role_agent, r.pref_agent, r.agent_verdict, r.assigned_model,
+	r.assigned_connection, r.catalog_key`
 
 func scanRun(row pgx.Row) (StepRun, error) {
 	var r StepRun
 	err := row.Scan(&r.ID, &r.TaskID, &r.StepID, &r.StepKind, &r.Pass, &r.Participant, &r.AgentKind, &r.Model,
 		&r.Capabilities, &r.UserLogin, &r.UserRole, &r.RunnerID, &r.SessionID, &r.Verdict, &r.VerdictBy,
 		&r.Detail, &r.CreatedAt, &r.FinishedAt, &r.Role, &r.PrefModel, &r.AgentID, &r.AgentName,
-		&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel)
+		&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel, &r.AssignedConnection, &r.CatalogKey)
 	return r, err
 }
 
@@ -466,7 +472,7 @@ func (s *Store) SetRunSession(ctx context.Context, runID int64, sessionID string
 // (Assignment не доставлен — планировщик назначит заново).
 func (s *Store) UnbindRun(ctx context.Context, runID int64) error {
 	_, err := s.Pool.Exec(ctx,
-		`UPDATE task_step_runs SET runner_id=NULL, session_id=NULL, agent_id=NULL, assigned_model='' WHERE id=$1 AND verdict IS NULL`, runID)
+		`UPDATE task_step_runs SET runner_id=NULL, session_id=NULL, agent_id=NULL, assigned_model='', assigned_connection='', catalog_key=false WHERE id=$1 AND verdict IS NULL`, runID)
 	return err
 }
 
@@ -590,13 +596,14 @@ type PendingAssign struct {
 // Задача в ready получает статус-проекцию шага и ветку. ok=false —
 // назначать нечего.
 func (s *Store) AssignRun(ctx context.Context, excludedProjects, excludedEpics []string) (RunAssignment, bool, error) {
-	return s.AssignRunExcept(ctx, excludedProjects, excludedEpics, nil, nil)
+	return s.AssignRunExcept(ctx, excludedProjects, excludedEpics, nil, nil, nil)
 }
 
-// AssignRunExcept — AssignRun без указанных runner'ов и запусков: тик
-// планировщика исключает те, чья стадия в этом тике не стартовала, и
-// продолжает назначать остальные (add-agent-roles).
-func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedEpics, excludedRunners []string, excludedRuns []int64) (RunAssignment, bool, error) {
+// AssignRunExcept — AssignRun без указанных runner'ов, запусков и агентов
+// команды: тик планировщика исключает те, чья стадия в этом тике не
+// стартовала, и агентов, у модели которых нет рабочего подключения
+// (fix-agent-without-connection), и продолжает назначать остальные.
+func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedEpics, excludedRunners []string, excludedRuns []int64, excludedAgents []string) (RunAssignment, bool, error) {
 	var a RunAssignment
 	assigned := false
 	if excludedProjects == nil {
@@ -610,6 +617,9 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 	}
 	if excludedRuns == nil {
 		excludedRuns = []int64{}
+	}
+	if excludedAgents == nil {
+		excludedAgents = []string{}
 	}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var runID int64
@@ -636,6 +646,9 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 				LEFT JOIN team_agents ag ON r.role <> '' AND ag.role_id = r.role AND ag.enabled
 					AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)
 					AND (ag.model = '' OR ag.model = ANY(x.models) OR x.model = ag.model)
+					-- агенты без рабочей модели исключаются только там, где
+					-- модель задаёт агент: у явной модели участника она своя
+					AND (r.model <> '' OR ag.id <> ALL($5::text[]))
 				WHERE x.status = 'idle' AND NOT x.draining AND x.task_id IS NULL AND x.id <> ALL($3::text[]) AND `+agentRunner("x")+`
 				  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)
 				  AND (r.agent_kind = '' OR x.agent = r.agent_kind)
@@ -678,7 +691,7 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 			  AND (r.not_before IS NULL OR r.not_before <= now())
 			ORDER BY (t.kind = 'bug') DESC, t.num, r.id
 			FOR UPDATE OF t, r SKIP LOCKED
-			LIMIT 1`, excludedProjects, excludedEpics, excludedRunners, excludedRuns).
+			LIMIT 1`, excludedProjects, excludedEpics, excludedRunners, excludedRuns, excludedAgents).
 			Scan(&runID, &taskID, &epicID, &projectID, &runnerID, &kind, &entry, &from, &num, &branch, &role, &roleTitle, &runnerName, &rolesFeature,
 				&agentID, &agentName, &seen)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -782,6 +795,33 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 	// отличает мёртвый runner от переподключившегося (MarkRunnerOffline).
 	a.Runner.LastSeen = seen
 	return a, true, nil
+}
+
+// PendingAgentRuns — запуски участников-агентов, которые планировщик может
+// назначить в этом проходе: без runner'а и вердикта, пауза откладывания
+// прошла, задача в работе, Epic выполняется и не исключён. По ним control
+// plane до назначения проверяет подключение модели
+// (fix-agent-without-connection).
+func (s *Store) PendingAgentRuns(ctx context.Context, excludedProjects, excludedEpics []string) ([]StepRun, error) {
+	if excludedProjects == nil {
+		excludedProjects = []string{}
+	}
+	if excludedEpics == nil {
+		excludedEpics = []string{}
+	}
+	rows, err := s.Pool.Query(ctx, `
+		SELECT `+runCols+` FROM task_step_runs r
+		JOIN tasks t ON t.id = r.task_id
+		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+			AND e.project_id <> ALL($1::uuid[]) AND e.id <> ALL($2::uuid[])
+		WHERE r.runner_id IS NULL AND r.verdict IS NULL AND `+agentRunsOnly+`
+		  AND t.status IN ('ready','running','fixing','testing','review')
+		  AND (r.not_before IS NULL OR r.not_before <= now())
+		ORDER BY r.id`, excludedProjects, excludedEpics)
+	if err != nil {
+		return nil, err
+	}
+	return collectRuns(rows)
 }
 
 // GetRunner — runner по идентификатору.
@@ -1110,7 +1150,7 @@ func (s *Store) MySteps(ctx context.Context, userID, login string) ([]StepItem, 
 		if err := rows.Scan(&r.ID, &r.TaskID, &r.StepID, &r.StepKind, &r.Pass, &r.Participant, &r.AgentKind, &r.Model,
 			&r.Capabilities, &r.UserLogin, &r.UserRole, &r.RunnerID, &r.SessionID, &r.Verdict, &r.VerdictBy,
 			&r.Detail, &r.CreatedAt, &r.FinishedAt, &r.Role, &r.PrefModel, &r.AgentID, &r.AgentName,
-			&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel,
+			&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel, &r.AssignedConnection, &r.CatalogKey,
 			&t.ID, &t.EpicID, &t.Num, &t.Title, &t.Description, &t.Status, &t.Estimate,
 			&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit, &t.ReviewRejections,
 			&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,

@@ -374,6 +374,11 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 		return
 	}
 	if runErr != nil {
+		if isConnectionError(runErr) {
+			setVerdict(verdictModelConnection)
+			finish(false, fmt.Sprintf("тестировщик не запустился: %v", runErr))
+			return
+		}
 		infra(fmt.Sprintf("тестировщик завершился с ошибкой: %v", runErr))
 		return
 	}
@@ -464,6 +469,12 @@ const settleTimeout = 20 * time.Second
 // verdictInfraError — вердикт стадии TESTING при сбое инфраструктуры
 // (тестировщик или проверки проекта): не замечания разработчику.
 const verdictInfraError = "error"
+
+// verdictModelConnection — вердикт любой агентской стадии, если агент не
+// запустился из-за подключения модели (нет ключа, адреса): это ошибка
+// настройки, control plane эскалирует её кодом MODEL_CONNECTION, а не
+// как провал проверок (fix-agent-without-connection).
+const verdictModelConnection = "connection"
 
 // originBranchSHA — коммит ветки задачи на origin после fetch в workspace.
 func originBranchSHA(ctx context.Context, dir, branch string) (string, error) {

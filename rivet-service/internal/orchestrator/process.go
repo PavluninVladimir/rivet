@@ -153,7 +153,7 @@ func (e *Engine) enterStep(ctx context.Context, task domain.Task, proc *policy.R
 	// тогда запуск ждёт планировщика.
 	if reuseRunner != "" && len(runs) > 0 && runs[0].RunnerID == reuseRunner {
 		task.StepID, task.StepEntry = step.ID, entry
-		e.dispatchOrRelease(ctx, task, runs[0], domain.Runner{ID: reuseRunner}, step, entry, nil)
+		_, _ = e.dispatchOrRelease(ctx, task, runs[0], domain.Runner{ID: reuseRunner}, step, entry, nil)
 	}
 	return nil
 }
@@ -175,9 +175,11 @@ type connChecker interface{ Connected(runnerID string) bool }
 // открытый запуск держал бы агента занятым навсегда. Причина до отправки
 // откладывает повтор с причиной ожидания; недоставка на отключённый runner
 // переводит его в offline (признак жизни вернёт). false — стадия не
-// стартовала.
+// стартовала; mc — не стартовала из-за подключения модели: runner тут ни
+// при чём, а при неработающей модели агента команды запуск возьмёт другой
+// агент роли.
 func (e *Engine) dispatchOrRelease(ctx context.Context, task domain.Task, run store.StepRun, runner domain.Runner,
-	step policy.ResolvedStep, entry string, assigned *store.PendingAssign) bool {
+	step policy.ResolvedStep, entry string, assigned *store.PendingAssign) (bool, *ModelConnectionError) {
 	// Снимок last_seen до отправки: по нему недоставка отличает мёртвый
 	// runner от переподключившегося. Назначение планировщика несёт снимок
 	// из своей транзакции, переиспользование runner'а — только его id.
@@ -191,7 +193,7 @@ func (e *Engine) dispatchOrRelease(ctx context.Context, task domain.Task, run st
 		if err := e.St.RunDelivered(ctx, run.ID, assigned); err != nil {
 			slog.Error("dispatch: delivered", "run", run.ID, "err", err)
 		}
-		return true
+		return true, nil
 	}
 	if sessionID != "" {
 		if _, err := e.St.EndSession(ctx, sessionID, "", "стадия не запущена: runner недоступен"); err != nil {
@@ -203,8 +205,27 @@ func (e *Engine) dispatchOrRelease(ctx context.Context, task domain.Task, run st
 		slog.Error("dispatch: undo assign", "task", task.ID, "err", err)
 	}
 	if startErr != nil {
+		// Нет рабочего подключения к модели: задача ждёт его с причиной,
+		// проверка повторяется без роста паузы (fix-agent-without-connection).
+		var mc *ModelConnectionError
+		if errors.As(startErr, &mc) {
+			if mc.Agent != "" {
+				// Модель агента команды не работает: запуск свободен для
+				// другого агента роли в этом же проходе.
+				if err := e.St.UnbindRun(ctx, run.ID); err != nil {
+					slog.Error("dispatch: unbind run", "run", run.ID, "err", err)
+				}
+				if err := e.St.FreeRunnerFor(ctx, runner.ID, task.ID); err != nil {
+					slog.Error("dispatch: free runner", "runner", runner.ID, "err", err)
+				}
+				return false, mc
+			}
+			e.deferRunWith(ctx, task, run, runner.ID, mc.Reason, connRetryPause, connRetryPause,
+				map[string]any{"wait": "model_connection", "connection": mc.ConnectionID, "model": mc.Model})
+			return false, mc
+		}
 		e.deferRun(ctx, task, run, runner.ID, "стадия не запустилась: "+startErr.Error())
-		return false
+		return false, nil
 	}
 	if err := e.St.UnbindRun(ctx, run.ID); err != nil {
 		slog.Error("dispatch: unbind run", "run", run.ID, "err", err)
@@ -219,12 +240,18 @@ func (e *Engine) dispatchOrRelease(ctx context.Context, task domain.Task, run st
 			slog.Warn("runner не подключён: назначения до признака жизни не идут", "runner", runner.ID)
 		}
 	}
-	return false
+	return false, nil
 }
 
 // deferRun — запуск откладывается с причиной ожидания, runner свободен.
 func (e *Engine) deferRun(ctx context.Context, task domain.Task, run store.StepRun, runnerID, reason string) {
-	first, pause, err := e.St.DeferRun(ctx, run.ID, task.ID, startRetryPause, startRetryMax, reason)
+	e.deferRunWith(ctx, task, run, runnerID, reason, startRetryPause, startRetryMax, nil)
+}
+
+// deferRunWith — deferRun с паузой повтора и полями события ожидания.
+func (e *Engine) deferRunWith(ctx context.Context, task domain.Task, run store.StepRun, runnerID, reason string,
+	base, maxPause time.Duration, extra map[string]any) {
+	first, pause, err := e.St.DeferRun(ctx, run.ID, task.ID, base, maxPause, reason)
 	if err != nil {
 		slog.Error("dispatch: defer run", "run", run.ID, "err", err)
 	}
@@ -234,31 +261,41 @@ func (e *Engine) deferRun(ctx context.Context, task domain.Task, run store.StepR
 	if !first {
 		return
 	}
-	projectID, epicID, err := e.St.TaskRefs(ctx, task.ID)
+	e.waitEvent(ctx, task.ID, run, reason, pause, extra)
+}
+
+// waitEvent — событие task.wait об откладывании запуска (одно на серию).
+func (e *Engine) waitEvent(ctx context.Context, taskID string, run store.StepRun, reason string, pause time.Duration, extra map[string]any) {
+	projectID, epicID, err := e.St.TaskRefs(ctx, taskID)
 	if err != nil {
-		slog.Error("dispatch: task refs", "task", task.ID, "err", err)
+		slog.Error("dispatch: task refs", "task", taskID, "err", err)
 		return
+	}
+	payload := map[string]any{"step": run.StepID, "participant": run.Participant, "role": run.Role,
+		"reason": reason, "deferred": true, "retry_in_s": int(pause.Seconds())}
+	for k, v := range extra {
+		payload[k] = v
 	}
 	if _, err := e.St.AppendEvent(ctx, store.EventInput{
 		ActorKind: domain.ActorScheduler, Type: "task.wait",
-		ProjectID: projectID, EpicID: epicID, TaskID: task.ID,
-		Text: "ожидание: " + reason + " (шаг " + run.StepID + ")",
-		Payload: map[string]any{"step": run.StepID, "participant": run.Participant, "role": run.Role,
-			"reason": reason, "deferred": true, "retry_in_s": int(pause.Seconds())},
+		ProjectID: projectID, EpicID: epicID, TaskID: taskID,
+		Text:    "ожидание: " + reason + " (шаг " + run.StepID + ")",
+		Payload: payload,
 	}); err != nil {
-		slog.Error("dispatch: wait event", "task", task.ID, "err", err)
+		slog.Error("dispatch: wait event", "task", taskID, "err", err)
 	}
 }
 
 // dispatchAssigned — запуск, назначенный планировщиком: стадия по шагу
-// снимка. false — стадия не стартовала (запуск отвязан, runner свободен).
-func (e *Engine) dispatchAssigned(ctx context.Context, a store.RunAssignment) bool {
-	deferAssigned := func(reason string) bool {
+// снимка. false — стадия не стартовала (запуск отвязан, runner свободен),
+// mc — из-за подключения модели.
+func (e *Engine) dispatchAssigned(ctx context.Context, a store.RunAssignment) (bool, *ModelConnectionError) {
+	deferAssigned := func(reason string) (bool, *ModelConnectionError) {
 		if err := e.St.UndoAssign(ctx, a.Task.ID, a.Pending); err != nil {
 			slog.Error("dispatch: undo assign", "task", a.Task.ID, "err", err)
 		}
 		e.deferRun(ctx, a.Task, a.Run, a.Runner.ID, reason)
-		return false
+		return false, nil
 	}
 	proc, _, err := e.processFor(ctx, a.Task)
 	if err != nil {
@@ -315,6 +352,11 @@ func (e *Engine) setStageContext(taskID, text string) {
 // (changes); у шага prompt вердикт называет runner (маркер агента), без
 // него — по признаку успеха.
 func verdictOf(kind string, ok bool, explicit string) string {
+	// Агент не запустился из-за подключения модели: это не замечания
+	// разработчику ни на одном шаге, а сбой настройки (переход fail).
+	if explicit == verdictModelConnection {
+		return policy.OutcomeFail
+	}
 	if kind == policy.StepPrompt {
 		switch explicit {
 		case policy.OutcomeOk, policy.OutcomeChanges, policy.OutcomeFail:
@@ -504,6 +546,12 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 	if !claimed {
 		return nil
 	}
+	// Исход закреплён, а взятые исходы никто не дожимает: применение идёт
+	// до конца, даже если канал runner'а оборвался или клиент ушёл, пока
+	// шли внешние вызовы (проверка ключа, хостинг). Свой предел времени
+	// вместо контекста вызывающего.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outcomeTimeout)
+	defer cancel()
 	// any: остальные участники прерываются только владельцем исхода, иначе
 	// опоздавший обработчик отменил бы запуски уже следующего шага.
 	if step.Require == policy.RequireAny && outcome == policy.OutcomeOk && open > 0 {
@@ -623,6 +671,11 @@ func (e *Engine) cancelRuns(ctx context.Context, task domain.Task, except int64,
 // applyOutcome — переход по исходу шага: событие task.step, затем ok →
 // следующий шаг, changes → отказ шага с лимитами и исправление, fail →
 // переход fail (по умолчанию эскалация).
+// outcomeTimeout — предел применения закреплённого исхода шага: переход,
+// эскалация и внешние вызовы по пути (проверка ключа подключения,
+// создание PR).
+const outcomeTimeout = 2 * time.Minute
+
 func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *policy.Resolved, hash string,
 	step policy.ResolvedStep, outcome, detail string, verdicts []map[string]any, lastRunner, policyHash, prURL string) error {
 	p, epic, err := e.projectOf(ctx, task)
@@ -630,6 +683,16 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 		return err
 	}
 	target := step.Target(outcome)
+	// Агент не запустился из-за подключения модели: эскалация кодом
+	// MODEL_CONNECTION или возврат на тот же шаг (подключение уже invalid)
+	// без перехода fail процесса и без расхода попытки, другой шаг
+	// настройку не исправит. Событие task.step пишет фактический переход.
+	connFailed := outcome == policy.OutcomeFail && modelConnectionFailed(verdicts)
+	var cf connFailure
+	if connFailed {
+		cf = e.resolveConnectionFailure(ctx, task, step)
+		target = cf.target(step.ID)
+	}
 	payload := map[string]any{
 		"step": step.ID, "kind": step.Kind, "outcome": outcome, "next": target,
 		"verdicts": verdicts, "process_hash": hash,
@@ -719,6 +782,11 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 		return e.gotoTarget(ctx, task, proc, hash, target, policy.OutcomeChanges, lastRunner, paused, evPayload, "", ev)
 
 	case policy.OutcomeFail:
+		if connFailed {
+			// Контекст стадии не сбрасывается: шаг повторится с ним.
+			e.cancelOpenRuns(ctx, task, 0)
+			return e.onModelConnectionFailure(ctx, task, proc, hash, step, cf, lastRunner, paused, evPayload)
+		}
 		e.setStageContext(task.ID, "")
 		if target == policy.TargetEscalate || target == "" {
 			detailText := detail
@@ -953,12 +1021,14 @@ func nearestCodeBefore(proc *policy.Resolved, stepID string) string {
 // нужным агентом и моделью»). excluded и excludedEpics — исключённые из
 // назначений этого прохода (бюджет, зависимости Epic'а): причину про
 // агентов им не пишем, а записанную раньше снимаем.
-func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []string) error {
+// bad — агенты команды без рабочей модели в этом проходе с причиной.
+func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []string, bad map[string]string) error {
 	runs, err := e.St.WaitingRuns(ctx)
 	if err != nil {
 		return err
 	}
 	seen := map[string]bool{}
+	av := &modelAvailability{e: e}
 	for _, r := range runs {
 		if seen[r.TaskID] {
 			continue
@@ -973,6 +1043,14 @@ func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []stri
 			reason += " со стадией PROMPT"
 		}
 		reason = e.architectureWaitReason(ctx, r.Capabilities, reason)
+		// Runner'ы агента Rivet есть, а модели участника нет среди доступных
+		// моделей каталога: дело в подключении, а не в runner'ах
+		// (fix-agent-without-connection).
+		if r.Model != "" && (r.AgentKind == "" || r.AgentKind == store.AgentRivet) {
+			if why := av.reason(ctx, r.Model); why != "" {
+				reason = why
+			}
+		}
 		if err := e.St.SetTaskWaitReason(ctx, r.TaskID, reason); err != nil {
 			return err
 		}
@@ -989,7 +1067,7 @@ func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []stri
 			return err
 		}
 	}
-	return e.markTeamWaiting(ctx, seen, excluded, excludedEpics)
+	return e.markTeamWaiting(ctx, seen, excluded, excludedEpics, bad)
 }
 
 // markTeamWaiting — причина ожидания запусков ролей с командой (add-agent-roles):
@@ -1001,14 +1079,19 @@ func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []stri
 // причину, записанную до исключения, планировщик снимает: иначе она
 // держалась бы и после того, как агенты освободились. После снятия
 // исключения причина пишется заново, если задача всё ещё ждёт агента.
-func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool, excluded, excludedEpics []string) error {
+func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool, excluded, excludedEpics []string, bad map[string]string) error {
 	if _, err := e.St.ClearTeamWaits(ctx, excluded, excludedEpics); err != nil {
 		return err
 	}
-	waits, err := e.St.WaitingTeamRuns(ctx, excluded, excludedEpics)
+	badIDs := make([]string, 0, len(bad))
+	for id := range bad {
+		badIDs = append(badIDs, id)
+	}
+	waits, err := e.St.WaitingTeamRuns(ctx, excluded, excludedEpics, badIDs)
 	if err != nil {
 		return err
 	}
+	av := &modelAvailability{e: e}
 	for _, w := range waits {
 		if seen[w.Run.TaskID] {
 			continue
@@ -1017,6 +1100,13 @@ func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool, excl
 		reason := e.architectureWaitReason(ctx, w.Run.Capabilities, "нет runner'а для свободных агентов роли «"+w.RoleTitle+"»")
 		if w.Busy {
 			reason = "нет свободного агента роли «" + w.RoleTitle + "»: все заняты"
+			// Часть агентов роли без рабочей модели (исключены в проходе),
+			// остальные заняты.
+			if why := av.badTeamReason(ctx, w.Run, bad); why != "" {
+				reason = "нет свободного агента роли «" + w.RoleTitle + "» с рабочим подключением к модели: агенты с рабочей моделью заняты, у остальных " + why
+			}
+		} else if why := av.teamReason(ctx, w.Run.Role); why != "" {
+			reason = "нет агента роли «" + w.RoleTitle + "» с рабочим подключением к модели: " + why
 		}
 		if err := e.St.SetTaskTeamWait(ctx, w.Run.TaskID, reason); err != nil {
 			return err

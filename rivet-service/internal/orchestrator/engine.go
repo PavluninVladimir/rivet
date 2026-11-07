@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/PavluninVladimir/rivet/internal/blob"
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/llm"
 	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/scm"
@@ -108,6 +108,9 @@ type Engine struct {
 	opsOnce sync.Once
 	// OpsComplete подменяет вызов модели в тестах (connID, model, prompt).
 	OpsComplete func(ctx context.Context, connID, model, prompt string) (string, error)
+	// CheckKey подменяет в тестах проверку ключа подключения control
+	// plane'ом после отказа провайдера во время стадии (список моделей).
+	CheckKey func(ctx context.Context, cl llm.Client) error
 	// URLPolicy — какие адреса доступны проверкам URL control plane'ом
 	// (RIVET_ALLOW_PRIVATE_URLS). Задаётся до первой проверки.
 	URLPolicy URLPolicy
@@ -213,22 +216,51 @@ func (e *Engine) Tick(ctx context.Context) error {
 	// Runner'ы и запуски, чья стадия в этом тике не стартовала, исключаются
 	// до конца тика: остальные назначения идут дальше, а цикл не крутится
 	// на недоступном runner'е.
+	// Подключения моделей до назначений (fix-agent-without-connection):
+	// запуски без рабочего подключения ждут, не занимая runner'ов, агенты
+	// команды без рабочей модели в этом проходе не назначаются.
+	bad := e.screenConnections(ctx, excluded, excludedEpics)
+	if bad == nil {
+		bad = map[string]string{}
+	}
+	badAgents := make([]string, 0, len(bad))
+	for id := range bad {
+		badAgents = append(badAgents, id)
+	}
 	var badRunners []string
 	var badRuns []int64
+	misses := map[int64]agentMiss{}
 	for {
-		a, ok, err := e.St.AssignRunExcept(ctx, excluded, excludedEpics, badRunners, badRuns)
+		a, ok, err := e.St.AssignRunExcept(ctx, excluded, excludedEpics, badRunners, badRuns, badAgents)
 		if err != nil {
 			return err
 		}
 		if !ok {
 			break
 		}
-		if !e.dispatchAssigned(ctx, a) {
+		started, mc := e.dispatchAssigned(ctx, a)
+		// Отказ по модели агента откладывается после прохода, только если
+		// он последний исход запуска: стартовавший запуск или запуск, не
+		// стартовавший по другой причине, свою причину уже получил.
+		delete(misses, a.Run.ID)
+		switch {
+		case started:
+		case mc != nil && mc.Agent != "":
+			// Модель агента не работает: запуск возьмёт другой агент роли,
+			// а если не возьмёт — подождёт с причиной после прохода.
+			badAgents = append(badAgents, mc.Agent)
+			bad[mc.Agent] = mc.Reason
+			misses[a.Run.ID] = agentMiss{run: a.Run, err: mc}
+		case mc != nil:
+			// Запуск ждёт подключения, runner свободен для других задач.
+			badRuns = append(badRuns, a.Run.ID)
+		default:
 			badRunners = append(badRunners, a.Runner.ID)
 			badRuns = append(badRuns, a.Run.ID)
 		}
 	}
-	if err := e.markWaiting(ctx, excluded, excludedEpics); err != nil {
+	e.deferAgentMisses(ctx, misses)
+	if err := e.markWaiting(ctx, excluded, excludedEpics, bad); err != nil {
 		return err
 	}
 	if err := e.reconcileSteps(ctx); err != nil {
@@ -420,6 +452,40 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 			runner = r
 		}
 	}
+	// Политика проекта едет вместе с назначением: у runner'а нет другого
+	// источника, рабочая копия на исполнение не влияет (спека access-policy
+	// «Доставка политик runner'ам»). Ошибка чтения не валит стадию — агент
+	// работает как прежде, гейты на plane никуда не делись.
+	var assignPolicy *pb.Policy
+	var agentModels map[string]policy.AgentModel
+	testPaths := append([]string{}, policy.DefaultTestPaths...)
+	if eff, err := e.St.EffectivePolicy(ctx, p.ID); err != nil {
+		slog.Error("dispatch: политика проекта", "project", p.ID, "err", err)
+	} else {
+		assignPolicy = &pb.Policy{
+			Hash: eff.Hash, HumanReviewPaths: eff.Presets.HumanReviewPaths,
+			PolicyDir: policy.PolicyDir,
+		}
+		agentModels = eff.Presets.AgentModels
+		testPaths = eff.Presets.EffectiveTestPaths()
+	}
+	// Исполнитель (add-agent-roles): шаблон роли и агент команды —
+	// инструкция и имя; отключённый или пропавший шаблон — без роли.
+	perf := e.runPerformer(ctx, run)
+	// Профиль агента из каталога (add-agent-profiles, спека agents «Доставка
+	// модели и учётных данных runner'у»): модель участника, иначе
+	// переопределение проекта, иначе модель по умолчанию; окружение и
+	// аргументы по шаблону, секреты по режиму профиля и каналу runner'а.
+	model := stageModel(run, perf, runner)
+	// Агенту Rivet (feature native) уходит endpoint модели: подключение,
+	// окно, пределы ответа, цены, лимиты, ключ по режиму секретов и каналу
+	// runner'а. Без рабочего подключения стадия не назначается: сессии ещё
+	// нет, задача ждёт с причиной (fix-agent-without-connection). Проверка
+	// идёт раньше обращений к хостингу (задача описания архитектуры).
+	endpoint, model, err := e.stageEndpoint(ctx, run, perf, runner, agentModels, model, stage)
+	if err != nil {
+		return "", false, err
+	}
 	criteria := make([]string, 0, len(task.Criteria))
 	for _, c := range task.Criteria {
 		criteria = append(criteria, c.Text)
@@ -448,83 +514,17 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	case step.Kind == policy.StepCode && entry == policy.OutcomeChanges:
 		extra = e.peekStageContext(task.ID)
 	}
-	// Политика проекта едет вместе с назначением: у runner'а нет другого
-	// источника, рабочая копия на исполнение не влияет (спека access-policy
-	// «Доставка политик runner'ам»). Ошибка чтения не валит стадию — агент
-	// работает как прежде, гейты на plane никуда не делись.
-	var assignPolicy *pb.Policy
-	var agentModels map[string]policy.AgentModel
-	testPaths := append([]string{}, policy.DefaultTestPaths...)
-	if eff, err := e.St.EffectivePolicy(ctx, p.ID); err != nil {
-		slog.Error("dispatch: политика проекта", "project", p.ID, "err", err)
-	} else {
-		assignPolicy = &pb.Policy{
-			Hash: eff.Hash, HumanReviewPaths: eff.Presets.HumanReviewPaths,
-			PolicyDir: policy.PolicyDir,
-		}
-		agentModels = eff.Presets.AgentModels
-		testPaths = eff.Presets.EffectiveTestPaths()
-	}
-	// Исполнитель (add-agent-roles): шаблон роли и агент команды —
-	// инструкция и имя; отключённый или пропавший шаблон — без роли.
-	perf := e.runPerformer(ctx, run)
-	// Профиль агента из каталога (add-agent-profiles, спека agents «Доставка
-	// модели и учётных данных runner'у»): модель участника, иначе
-	// переопределение проекта, иначе модель по умолчанию; окружение и
-	// аргументы по шаблону, секреты по режиму профиля и каналу runner'а.
-	model := run.Model
-	// Модель агента команды обязательна (планировщик подобрал runner с ней);
-	// модель шаблона или переопределение проекта — предпочтение: берётся,
-	// если runner её поддерживает.
-	switch {
-	case model != "":
-	case perf.agent != nil && perf.agent.Model != "":
-		model = perf.agent.Model
-	case run.PrefModel != "" && (contains(runner.Models, run.PrefModel) || runner.Model == run.PrefModel):
-		model = run.PrefModel
-	}
-	var endpoint *store.ModelEndpoint
-	// Агенту Rivet (feature native) уходит endpoint модели: подключение,
-	// окно, пределы ответа, цены, лимиты, ключ по режиму секретов и каналу
-	// runner'а.
-	if slices.Contains(runner.Features, featureNative) {
-		agentID := store.AgentRivet
-		var override *policy.AgentModel
-		if am, ok := agentModels[agentID]; ok {
-			override = &am
-		}
-		explicit := model
-		// Модель агента команды — пара с подключением: привязка ищется по
-		// паре, а не по одному имени модели (одна модель может быть у двух
-		// подключений).
-		if perf.agent != nil && perf.agent.ConnectionID != "" && perf.agent.Model != "" && run.Model == "" {
-			override = &policy.AgentModel{ConnectionID: perf.agent.ConnectionID, Model: perf.agent.Model}
-			explicit = ""
-		}
-		prof, binding, ok, rerr := e.St.ResolveAgentModel(ctx, agentID, explicit, override)
-		if rerr == nil && ok && explicit == "" && perf.agent != nil && perf.agent.Model != "" && binding.Model != perf.agent.Model {
-			// Пары нет в привязках профиля runner'а: модель — по имени.
-			prof, binding, ok, rerr = e.St.ResolveAgentModel(ctx, agentID, perf.agent.Model, nil)
-		}
-		if rerr != nil {
-			slog.Error("dispatch: профиль агента", "agent", agentID, "err", rerr)
-		} else if ok {
-			include := prof.Secrets == "always" || (prof.Secrets == "secure" && runner.Secure)
-			ep, berr := e.St.BuildModelEndpoint(ctx, prof, binding, e.Box, include)
-			if berr != nil {
-				slog.Error("dispatch: подключение модели", "agent", agentID, "err", berr)
-			} else {
-				endpoint = &ep
-				if binding.Model != "" {
-					model = binding.Model
-				}
-			}
-		}
-	}
 	// Модель назначения пишется отдельно от явной модели участника: при
-	// повторном назначении она не станет требованием к runner'у.
-	if model != "" {
-		if err := e.St.SetRunModel(ctx, run.ID, model); err != nil {
+	// повторном назначении она не станет требованием к runner'у. Вместе с
+	// ней — подключение и признак передачи ключа каталога: по ним
+	// разбирается отказ провайдера во время стадии.
+	var connID string
+	var catalogKey bool
+	if endpoint != nil {
+		connID, catalogKey = endpoint.ConnectionID, endpoint.SecretsIncluded
+	}
+	if model != "" || connID != "" {
+		if err := e.St.SetRunAssignment(ctx, run.ID, model, connID, catalogKey); err != nil {
 			slog.Error("dispatch: модель запуска", "run", run.ID, "err", err)
 		}
 	}
@@ -882,6 +882,12 @@ func (e *Engine) failTask(ctx context.Context, task domain.Task, msg, runnerID s
 // failTaskBy — failTask с явным автором события (система для отказов
 // control plane, например границы задачи описания архитектуры).
 func (e *Engine) failTaskBy(ctx context.Context, task domain.Task, actor domain.ActorKind, actorID, msg string, extra ...map[string]any) error {
+	return e.failTaskWith(ctx, task, domain.AttTestFailed, actor, actorID, msg, extra...)
+}
+
+// failTaskWith — failed + эскалация с указанной причиной (ошибка настройки
+// подключения модели — MODEL_CONNECTION, остальное — TEST_FAILED).
+func (e *Engine) failTaskWith(ctx context.Context, task domain.Task, reason domain.AttentionReason, actor domain.ActorKind, actorID, msg string, extra ...map[string]any) error {
 	failPayload := map[string]any{"status": "failed"}
 	for _, m := range extra {
 		for k, v := range m {
@@ -902,7 +908,7 @@ func (e *Engine) failTaskBy(ctx context.Context, task domain.Task, actor domain.
 			}
 			_, err = tx.Exec(ctx, `
 				INSERT INTO attention (project_id, task_id, reason, message)
-				VALUES ($1,$2,'TEST_FAILED',$3)`, epic.ProjectID, task.ID, msg)
+				VALUES ($1,$2,$3,$4)`, epic.ProjectID, task.ID, string(reason), msg)
 			return err
 		})
 }
@@ -952,7 +958,14 @@ func (e *Engine) OnBlocked(ctx context.Context, runnerID string, b *pb.BlockedQu
 // review переводится в fixing на свободном runner'е, агент получает промпт
 // человека, результат идёт обычным конвейером. Попытка не расходуется.
 func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login string, private bool) (string, error) {
-	a, err := e.St.StartUserSession(ctx, taskID, login, private)
+	// Подключение модели проверяется по выбранному runner'у до изменений
+	// задачи: отказ по нему не закрывает эскалацию и не переводит задачу в
+	// fixing (fix-agent-without-connection).
+	var check func(string) error
+	if task, err := e.St.GetTask(ctx, taskID); err == nil {
+		check = e.sessionRunnerCheck(ctx, task)
+	}
+	a, err := e.St.StartUserSession(ctx, taskID, login, private, check)
 	if err != nil {
 		return "", err
 	}
@@ -982,7 +995,7 @@ func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login str
 		return "", fmt.Errorf("сессию не удалось запустить: %v", err)
 	}
 	a.Task.StepID, a.Task.StepEntry = step.ID, policy.OutcomeChanges
-	sessionID, delivered, _ := e.dispatchRun(ctx, a.Task, runs[0], a.Runner, step, policy.OutcomeChanges, &sessionSpec{
+	sessionID, delivered, startErr := e.dispatchRun(ctx, a.Task, runs[0], a.Runner, step, policy.OutcomeChanges, &sessionSpec{
 		driverKind: "user", driverID: login, prompt: prompt,
 		userPrompt: prompt, private: private,
 	})
@@ -1004,6 +1017,12 @@ func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login str
 		}
 		if rerr := e.St.ReleaseTaskRunner(ctx, taskID); rerr != nil {
 			slog.Error("user session: release after dispatch failure", "task", taskID, "err", rerr)
+		}
+		// Нет рабочего подключения к модели: человеку — причина и где её
+		// исправить (fix-agent-without-connection).
+		var mc *ModelConnectionError
+		if errors.As(startErr, &mc) {
+			return "", &ModelConnectionError{Reason: "сессию не удалось запустить: " + mc.Reason, ConnectionID: mc.ConnectionID, Model: mc.Model}
 		}
 		return "", fmt.Errorf("сессию не удалось запустить: runner недоступен или стадия не собралась, подробности в логе rivetd")
 	}

@@ -285,7 +285,7 @@ var ErrNoRunner = errors.New("нет свободного runner'а с нужн�
 // (SKIP LOCKED), для blocked/failed счётчики сбрасываются и эскалации
 // закрываются (вмешательство человека, семантика ResolveTask), событие
 // пишется от пользователя. Возвращает назначение для dispatch.
-func (s *Store) StartUserSession(ctx context.Context, taskID, login string, private bool) (Assignment, error) {
+func (s *Store) StartUserSession(ctx context.Context, taskID, login string, private bool, check func(runnerID string) error) (Assignment, error) {
 	var a Assignment
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var from domain.TaskStatus
@@ -314,6 +314,13 @@ func (s *Store) StartUserSession(ctx context.Context, taskID, login string, priv
 		}
 		if err != nil {
 			return err
+		}
+		// Проверка вызывающего по выбранному runner'у (подключение модели,
+		// fix-agent-without-connection): отказ — без изменений задачи.
+		if check != nil {
+			if err := check(runnerID); err != nil {
+				return err
+			}
 		}
 		if err := endOpenSessions(ctx, tx, taskID); err != nil {
 			return err

@@ -273,7 +273,7 @@ func anthropicChatErr(err error) error {
 	case moderationRefused(status, body):
 		return fmt.Errorf("%w: HTTP %d: %s", ErrRefused, status, body)
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return fmt.Errorf("%w: HTTP %d", ErrUnauthorized, status)
+		return authError(status)
 	case contextWindowExceeded(status, body):
 		return fmt.Errorf("%w: HTTP %d: %s", ErrContextWindow, status, body)
 	case modelRejected(status, body):

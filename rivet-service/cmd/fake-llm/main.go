@@ -2,6 +2,9 @@
 // chat completions с готовым планом декомпозиции и сценарии вызовов
 // инструментов для агентского цикла Rivet (native.go). Ключ «fake-key»
 // принимается, любой другой отклоняется 401 (сценарий «неверный ключ»).
+// Ключи вида «fake-key-<суффикс>» тоже принимаются, пока сценарий не
+// отзовёт ключ запросом POST /_e2e/revoke (сценарий «провайдер отозвал
+// ключ, а подключение в каталоге ещё рабочее»).
 // Задания агентов control plane (Аналитик add-product-discovery, Релиз-инженер
 // и Инженер сопровождения add-sdlc-cycle) узнаются по маркеру в первой
 // строке промпта и получают фиксированные корректные ответы.
@@ -16,6 +19,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,9 +33,20 @@ func main() {
 // newMux — маршруты провайдера (вынесены для тестов).
 func newMux() *http.ServeMux {
 	mux := http.NewServeMux()
+	var mu sync.Mutex
+	revoked := map[string]bool{}
+	valid := func(header string) bool {
+		key, ok := strings.CutPrefix(header, "Bearer ")
+		if !ok || (key != "fake-key" && !strings.HasPrefix(key, "fake-key-")) {
+			return false
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return !revoked[key]
+	}
 	auth := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != "Bearer fake-key" {
+			if !valid(r.Header.Get("Authorization")) {
 				w.WriteHeader(http.StatusUnauthorized)
 				_, _ = w.Write([]byte(`{"error":{"message":"invalid api key"}}`))
 				return
@@ -112,6 +127,21 @@ func newMux() *http.ServeMux {
 	for _, p := range []string{"/chat/completions", "/v1/chat/completions"} {
 		mux.HandleFunc("POST "+p, complete)
 	}
+	// Отзыв ключа на стороне провайдера (только стенд): основной ключ
+	// стенда «fake-key» не отзывается.
+	mux.HandleFunc("POST /_e2e/revoke", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Key string `json:"key"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in); err != nil || !strings.HasPrefix(in.Key, "fake-key-") {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		revoked[in.Key] = true
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
 	return mux
 }
 

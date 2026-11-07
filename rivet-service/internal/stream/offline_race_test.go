@@ -35,6 +35,7 @@ func TestOfflineAfterReconnectRace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	withLocalModel(t, st, admin)
 	reg := NewRegistry()
 	e := orchestrator.New(st, nil, nil, reg, 90*time.Second)
 	rs := &Server{St: st, Engine: e, Reg: reg, Hub: NewHub(), HeartbeatInterval: 30 * time.Second}

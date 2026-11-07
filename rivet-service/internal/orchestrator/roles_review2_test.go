@@ -117,7 +117,7 @@ func TestStartErrorDefersRun(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("назначение: %v %v", ok, err)
 	}
-	if f.e.dispatchAssigned(ctx, a) {
+	if started, _ := f.e.dispatchAssigned(ctx, a); started {
 		t.Fatal("стадия без шага не стартует")
 	}
 	// «Назначен исполнитель» пишется только после доставки (круг 3, P3-6).

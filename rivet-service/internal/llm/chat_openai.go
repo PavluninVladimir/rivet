@@ -188,7 +188,7 @@ func statusError(status int, h http.Header, raw []byte) error {
 	case moderationRefused(status, msg):
 		return fmt.Errorf("%w: HTTP %d: %s", ErrRefused, status, msg)
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
-		return fmt.Errorf("%w: HTTP %d", ErrUnauthorized, status)
+		return authError(status)
 	case contextWindowExceeded(status, msg):
 		return fmt.Errorf("%w: HTTP %d: %s", ErrContextWindow, status, msg)
 	case modelRejected(status, msg):

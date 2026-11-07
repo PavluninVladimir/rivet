@@ -42,6 +42,7 @@ func newLifecycleFixture(t *testing.T) *lifecycleFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	withLocalModel(t, st, admin)
 	reg := NewRegistry()
 	e := orchestrator.New(st, nil, nil, reg, 90*time.Second)
 	rs := &Server{St: st, Engine: e, Reg: reg, Hub: NewHub(), HeartbeatInterval: 30 * time.Second}
@@ -83,6 +84,21 @@ func (f *lifecycleFixture) open(t *testing.T) pb.RunnerService_ChannelClient {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return s
+}
+
+// withLocalModel — подключение к локальному серверу модели в каталоге:
+// стадия агента Rivet назначается только при рабочем подключении модели
+// (fix-agent-without-connection), локальному серверу ключ не нужен.
+func withLocalModel(t *testing.T, st *store.Store, admin domain.User) {
+	t.Helper()
+	ctx := context.Background()
+	if _, _, err := st.UpsertConnection(ctx, store.ConnectionInput{ID: "local", Name: "Local", Kind: "local", API: "openai",
+		BaseURL: "http://localhost:11434/v1"}, nil, admin.ID, admin.Login); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SetConnectionModels(ctx, "local", []domain.ModelEntry{{ID: "m"}}, admin.ID, admin.Login); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // task — задача Epic'а в работе.

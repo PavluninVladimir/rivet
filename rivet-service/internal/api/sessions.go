@@ -2,12 +2,14 @@
 package api
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
 
@@ -134,6 +136,13 @@ func (s *Server) startTaskSession(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID, err := s.Engine.StartUserSession(r.Context(), r.PathValue("id"), strings.TrimSpace(in.Prompt), user(r), in.Private)
 	if err != nil {
+		// Нет рабочего подключения к модели: задача не тронута, причина и
+		// где её исправить — в ответе (fix-agent-without-connection).
+		var mc *orchestrator.ModelConnectionError
+		if errors.As(err, &mc) {
+			writeJSON(w, http.StatusConflict, map[string]apiError{"error": {Code: "model_connection", Message: mc.Error()}})
+			return
+		}
 		writeErr(w, err)
 		return
 	}

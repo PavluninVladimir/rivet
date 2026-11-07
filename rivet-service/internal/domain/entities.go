@@ -810,6 +810,11 @@ const (
 	// записываются без задач-багов до решения человека (add-sdlc-cycle).
 	// Эскалация уровня проекта, одна открытая на проект.
 	AttOpsLimit AttentionReason = "OPS_LIMIT"
+	// AttModelConnection — агентская стадия не запустилась: у модели нет
+	// рабочего подключения (нет подключения, оно выключено, без ключа или
+	// ключ не дошёл до runner'а). Ошибка настройки, а не провал проверок
+	// (fix-agent-without-connection).
+	AttModelConnection AttentionReason = "MODEL_CONNECTION"
 )
 
 type Attention struct {

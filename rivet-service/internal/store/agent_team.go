@@ -425,16 +425,23 @@ type TeamWait struct {
 // недоступный движок политик, ожидание зависимостей Epic'а), пропускаются:
 // их задачи стоят не из-за агентов, а свою причину консоль показывает на
 // Epic'е и проекте.
-func (s *Store) WaitingTeamRuns(ctx context.Context, excludedProjects, excludedEpics []string) ([]TeamWait, error) {
+// excludedAgents — агенты без рабочей модели в этом проходе
+// (fix-agent-without-connection): для запусков без явной модели они не
+// считаются свободными.
+func (s *Store) WaitingTeamRuns(ctx context.Context, excludedProjects, excludedEpics, excludedAgents []string) ([]TeamWait, error) {
 	if excludedProjects == nil {
 		excludedProjects = []string{}
 	}
 	if excludedEpics == nil {
 		excludedEpics = []string{}
 	}
+	if excludedAgents == nil {
+		excludedAgents = []string{}
+	}
 	rows, err := s.Pool.Query(ctx, `
 		SELECT `+runCols+`, ar.title,
 			NOT EXISTS (SELECT 1 FROM team_agents ag WHERE ag.role_id = r.role AND ag.enabled
+				AND (r.model <> '' OR ag.id <> ALL($3::text[]))
 				AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)) AS busy
 		FROM task_step_runs r
 		JOIN tasks t ON t.id = r.task_id
@@ -448,6 +455,7 @@ func (s *Store) WaitingTeamRuns(ctx context.Context, excludedProjects, excludedE
 		  AND NOT EXISTS (
 			SELECT 1 FROM team_agents ag JOIN runners x ON x.status <> 'offline' AND NOT x.draining AND `+agentRunner("x")+`
 			WHERE ag.role_id = r.role AND ag.enabled
+			  AND (r.model <> '' OR ag.id <> ALL($3::text[]))
 			  AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)
 			  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)
 			  AND x.agent = COALESCE(NULLIF(ag.agent, ''), NULLIF(r.role_agent, ''), x.agent)
@@ -455,7 +463,7 @@ func (s *Store) WaitingTeamRuns(ctx context.Context, excludedProjects, excludedE
 			  AND (r.agent_kind = '' OR x.agent = r.agent_kind)
 			  AND (r.model = '' OR r.model = ANY(x.models))
 			  AND (r.step_kind <> 'prompt' OR 'PROMPT' = ANY(x.stages)))
-		ORDER BY r.id`, excludedProjects, excludedEpics)
+		ORDER BY r.id`, excludedProjects, excludedEpics, excludedAgents)
 	if err != nil {
 		return nil, err
 	}
@@ -467,7 +475,7 @@ func (s *Store) WaitingTeamRuns(ctx context.Context, excludedProjects, excludedE
 		if err := rows.Scan(&r.ID, &r.TaskID, &r.StepID, &r.StepKind, &r.Pass, &r.Participant, &r.AgentKind, &r.Model,
 			&r.Capabilities, &r.UserLogin, &r.UserRole, &r.RunnerID, &r.SessionID, &r.Verdict, &r.VerdictBy,
 			&r.Detail, &r.CreatedAt, &r.FinishedAt, &r.Role, &r.PrefModel, &r.AgentID, &r.AgentName,
-			&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel,
+			&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel, &r.AssignedConnection, &r.CatalogKey,
 			&w.RoleTitle, &w.Busy); err != nil {
 			return nil, err
 		}
