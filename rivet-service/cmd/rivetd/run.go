@@ -18,6 +18,7 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/config"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/policy"
+	"github.com/PavluninVladimir/rivet/internal/runnertls"
 	"github.com/PavluninVladimir/rivet/internal/scm"
 	"github.com/PavluninVladimir/rivet/internal/secretbox"
 	"github.com/PavluninVladimir/rivet/internal/store"
@@ -110,23 +111,32 @@ func run(ctx context.Context, cfg config.Config) error {
 	engine.Adapters.Force = cfg.SCM == "fake"
 
 	// Протокол runner'ов: регистрация аутентифицируется токеном на обоих
-	// RPC; TLS включается парой PEM-файлов (спека runners).
+	// RPC, токен привязан к идентификаторам runner'ов; TLS включается парой
+	// PEM-файлов, mTLS включают корни клиентских сертификатов (спека runners).
 	rs := &stream.Server{
 		St: st, Engine: engine, Reg: reg, Hub: hub,
-		HeartbeatInterval: cfg.RunnerHeartbeatTimeout / 3,
+		HeartbeatInterval:  cfg.RunnerHeartbeatTimeout / 3,
+		ClientCertRequired: cfg.GRPCClientCA != "",
 	}
 	grpcOpts := []grpc.ServerOption{
 		grpc.UnaryInterceptor(rs.UnaryAuth()),
 		grpc.StreamInterceptor(rs.StreamAuth()),
 	}
 	if cfg.GRPCTLSCert != "" {
-		creds, err := credentials.NewServerTLSFromFile(cfg.GRPCTLSCert, cfg.GRPCTLSKey)
+		tlsCfg, err := runnertls.ServerConfig(cfg.GRPCTLSCert, cfg.GRPCTLSKey, cfg.GRPCClientCA)
 		if err != nil {
 			return fmt.Errorf("TLS протокола runner'ов: %w", err)
 		}
-		grpcOpts = append(grpcOpts, grpc.Creds(creds))
+		grpcOpts = append(grpcOpts, grpc.Creds(runnertls.LogHandshakeFailures(credentials.NewTLS(tlsCfg))))
+		if cfg.GRPCClientCA != "" {
+			slog.Info("протокол runner'ов требует клиентский сертификат (mTLS): CN или DNS SAN сверяется с идентификатором runner'а")
+		}
 	} else {
 		slog.Warn("протокол runner'ов без TLS: порт должен быть закрыт периметром")
+	}
+	if cfg.GRPCClientCA == "" && !runnertls.LoopbackAddr(cfg.GRPCAddr) {
+		slog.Warn("клиентские сертификаты runner'ов не проверяются (RIVET_GRPC_CLIENT_CA не задан), а протокол слушает не только loopback: "+
+			"runner'ы различаются только токенами регистрации", "addr", cfg.GRPCAddr)
 	}
 	grpcSrv := grpc.NewServer(grpcOpts...)
 	pb.RegisterRunnerServiceServer(grpcSrv, rs)
@@ -138,7 +148,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	apiSrv := &api.Server{
 		St: st, Engine: engine, Hub: hub, Blob: bl,
 		EnvPlanner: env, Version: version, ProtocolVersion: stream.ProtocolVersion,
-		StartedAt: time.Now(), GRPCAddr: cfg.GRPCAddr, GRPCTLS: cfg.GRPCTLSCert != "",
+		StartedAt: time.Now(), GRPCAddr: cfg.GRPCAddr, GRPCTLS: cfg.GRPCTLSCert != "", GRPCClientCert: cfg.GRPCClientCA != "",
 		Secrets: box, PublicURL: cfg.PublicURL, Policy: polEngine,
 		WebhookSecret: cfg.GitHubWebhookSecret,
 		TrustProxy:    cfg.TrustProxy,

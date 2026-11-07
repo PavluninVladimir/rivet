@@ -52,6 +52,11 @@ type Server struct {
 
 	HeartbeatInterval time.Duration
 
+	// ClientCertRequired: установка требует клиентский сертификат runner'а
+	// (mTLS, RIVET_GRPC_CLIENT_CA): соединение без проверенного сертификата
+	// не аутентифицируется, а его идентичность сверяется с runner_id.
+	ClientCertRequired bool
+
 	// Построчные редакторы секретов по задачам: наружу (Hub, Engine) уходит
 	// только замаскированный текст (спека team-visibility, design решение 3).
 	redMu sync.Mutex
@@ -74,11 +79,24 @@ type Server struct {
 	// сутки (ревью add-native-agent P2-2).
 	rejMu   sync.Mutex
 	rejSeen map[string]rejection
+	// rejFullUntil: раньше этого момента о переполнении карты окна в
+	// журнале не предупреждают повторно (одно предупреждение на окно).
+	rejFullUntil time.Time
+	// invalidLogAt: последняя строка журнала о недопустимом запросе
+	// регистрации (logInvalidRequest).
+	invalidLogAt time.Time
 }
 
 // rejectedEventWindow — не чаще одного события runner.rejected на runner и
 // причину за это время. Повтор после рестарта rivetd допустим.
 const rejectedEventWindow = time.Hour
+
+// rejectedKeysMax: потолок карты окна. Держатель действующего токена
+// может перебирать идентификаторы, и без потолка росли бы и карта, и event
+// log. Сверх потолка новые отказы до истечения окна не пишутся (сами
+// запросы по-прежнему отклоняются), а журнал rivetd один раз
+// предупреждает, до какого момента события теряются.
+const rejectedKeysMax = 1024
 
 type rejection struct {
 	at         time.Time
@@ -105,6 +123,17 @@ func (s *Server) noteRejection(runnerID, reason string, now time.Time) (bool, in
 		if k != key && now.Sub(o.at) >= rejectedEventWindow {
 			delete(s.rejSeen, k)
 		}
+	}
+	if !seen && len(s.rejSeen) >= rejectedKeysMax {
+		if !now.Before(s.rejFullUntil) {
+			// Под затяжным перебором слоты освобождаются по одному, поэтому
+			// следующее предупреждение не раньше чем через окно, а не к
+			// истечению самой старой записи.
+			s.rejFullUntil = now.Add(rejectedEventWindow)
+			slog.Warn("окно отказов регистрации переполнено: часть новых отказов не пишется в event log и журнал, следующее предупреждение не раньше "+
+				s.rejFullUntil.Format("15:04"), "ключей", len(s.rejSeen), "runner", clip(runnerID, 128))
+		}
+		return false, 0
 	}
 	s.rejSeen[key] = rejection{at: now}
 	return true, r.suppressed
@@ -225,6 +254,13 @@ func (s *Server) flushRedactor(ctx context.Context, taskID, sessionID string) {
 }
 
 func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
+	// Идентичность проверяется первой (add-runner-identity): чужой идентификатор не
+	// должен ни провалить публикацию runner'а, ни снять его проверки и
+	// запуски, ни переписать его запись. Токен без привязки здесь же
+	// привязывается к этому runner'у.
+	if err := s.checkIdentity(ctx, identityCheck{runnerID: req.RunnerId, host: req.Host, agent: req.Agent, register: true}); err != nil {
+		return nil, err
+	}
 	if req.ProtocolVersion != protocolVersion && req.ProtocolVersion != compatProtocolVersion {
 		// Несовместимая версия — понятная ошибка, не разрыв (api-contract).
 		return &pb.RegisterResponse{
@@ -368,6 +404,12 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 		return errMissingHello
 	}
 	runnerID := hello.RunnerId
+	// Hello верить нельзя (add-runner-identity): канал подключается к
+	// очереди назначений runner'а, только если токен и сертификат
+	// соединения выданы для него.
+	if err := s.checkIdentity(ctx, identityCheck{runnerID: runnerID}); err != nil {
+		return err
+	}
 	sendCh := s.Reg.Attach(runnerID)
 	defer s.Reg.Detach(runnerID, sendCh)
 	slog.Info("runner connected", "runner", runnerID)

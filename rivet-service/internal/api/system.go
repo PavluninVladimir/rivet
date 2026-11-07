@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/planner"
@@ -171,7 +173,7 @@ func (s *Server) systemStatus(w http.ResponseWriter, r *http.Request) {
 				online++
 			}
 		}
-		rn.Data = map[string]any{"online": online, "total": len(runners), "grpc_addr": s.GRPCAddr, "tls": s.GRPCTLS}
+		rn.Data = map[string]any{"online": online, "total": len(runners), "grpc_addr": s.GRPCAddr, "tls": s.GRPCTLS, "client_cert": s.GRPCClientCert}
 		switch {
 		case len(runners) == 0:
 			rn.Status, rn.Detail = "degraded", "ни один runner не зарегистрирован"
@@ -210,21 +212,61 @@ func (s *Server) plannerStatus() (*planner.Planner, planner.Status) {
 // ─── runner tokens ────────────────────────────────────────────────────────
 
 type runnerTokenView struct {
-	ID         string     `json:"id"`
-	Name       string     `json:"name"`
-	Prefix     string     `json:"prefix"`
-	CreatedAt  time.Time  `json:"created_at"`
-	CreatedBy  string     `json:"created_by"`
-	ExpiresAt  *time.Time `json:"expires_at"`
-	LastUsedAt *time.Time `json:"last_used_at"`
-	RevokedAt  *time.Time `json:"revoked_at"`
+	ID         string              `json:"id"`
+	Name       string              `json:"name"`
+	Prefix     string              `json:"prefix"`
+	CreatedAt  time.Time           `json:"created_at"`
+	CreatedBy  string              `json:"created_by"`
+	ExpiresAt  *time.Time          `json:"expires_at"`
+	LastUsedAt *time.Time          `json:"last_used_at"`
+	RevokedAt  *time.Time          `json:"revoked_at"`
+	Runners    []runnerBindingView `json:"runners"`
+}
+
+// runnerBindingView: runner, для которого выпущен токен, и откуда
+// привязка: issue, first_use, migration (add-runner-identity).
+type runnerBindingView struct {
+	RunnerID string    `json:"runner_id"`
+	Source   string    `json:"source"`
+	BoundAt  time.Time `json:"bound_at"`
 }
 
 func runnerTokenDTO(t domain.RunnerToken) runnerTokenView {
-	return runnerTokenView{
+	v := runnerTokenView{
 		ID: t.ID, Name: t.Name, Prefix: t.Prefix, CreatedAt: t.Created, CreatedBy: t.CreatedBy,
 		ExpiresAt: t.ExpiresAt, LastUsedAt: t.LastUsed, RevokedAt: t.RevokedAt,
+		Runners: make([]runnerBindingView, 0, len(t.Runners)),
 	}
+	for _, b := range t.Runners {
+		v.Runners = append(v.Runners, runnerBindingView{RunnerID: b.RunnerID, Source: string(b.Source), BoundAt: b.BoundAt})
+	}
+	return v
+}
+
+// maxTokenRunners: сколько runner'ов можно указать при выпуске токена.
+// Правила самого идентификатора общие с протоколом (domain.RunnerIDProblem).
+const maxTokenRunners = 32
+
+// checkRunnerIDs: ошибка списка идентификаторов runner'ов при выпуске
+// токена или пустая строка.
+func checkRunnerIDs(ids []string) string {
+	if len(ids) > maxTokenRunners {
+		return fmt.Sprintf("не больше %d runner'ов на токен", maxTokenRunners)
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if p := domain.RunnerIDProblem(id); p != "" {
+			if utf8.RuneCountInString(id) <= domain.MaxRunnerIDLen {
+				p += ": «" + id + "»"
+			}
+			return p
+		}
+		if seen[id] {
+			return "runner «" + id + "» указан дважды"
+		}
+		seen[id] = true
+	}
+	return ""
 }
 
 func (s *Server) listRunnerTokens(w http.ResponseWriter, r *http.Request) {
@@ -250,6 +292,9 @@ func (s *Server) createRunnerToken(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name      string     `json:"name"`
 		ExpiresAt *time.Time `json:"expires_at"`
+		// RunnerIDs: для каких runner'ов выпущен токен. С пустым списком
+		// токен привяжется к первому зарегистрированному (add-runner-identity).
+		RunnerIDs []string `json:"runner_ids"`
 	}
 	if err := decode(r, &in); err != nil || in.Name == "" {
 		unprocessable(w, "нужно имя токена")
@@ -259,8 +304,12 @@ func (s *Server) createRunnerToken(w http.ResponseWriter, r *http.Request) {
 		unprocessable(w, "срок действия уже истёк")
 		return
 	}
+	if msg := checkRunnerIDs(in.RunnerIDs); msg != "" {
+		fieldErr(w, "invalid", "runner_ids", msg)
+		return
+	}
 	u := currentUser(r)
-	t, secret, err := s.St.CreateRunnerToken(r.Context(), in.Name, in.ExpiresAt, u.ID, u.Login)
+	t, secret, err := s.St.CreateRunnerToken(r.Context(), in.Name, in.ExpiresAt, in.RunnerIDs, u.ID, u.Login)
 	if err != nil {
 		writeErr(w, err)
 		return

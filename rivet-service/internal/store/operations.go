@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,10 +34,12 @@ func scanRunnerToken(row pgx.Row) (domain.RunnerToken, error) {
 	return t, err
 }
 
-// CreateRunnerToken выпускает токен регистрации; секрет возвращается один
-// раз, в базе остаётся хэш. Событие runner_token.created — в той же
-// транзакции.
-func (s *Store) CreateRunnerToken(ctx context.Context, name string, expires *time.Time, creatorID, creatorLogin string) (domain.RunnerToken, string, error) {
+// CreateRunnerToken выпускает токен регистрации для runner'ов runnerIDs
+// (add-runner-identity). С пустым списком токен привяжется к первому
+// runner'у, который с ним зарегистрируется. Секрет возвращается один раз,
+// в базе остаётся хэш. Событие runner_token.created пишется в той же транзакции.
+// Идентификаторы проверяет вызывающий (API), повторы схлопываются.
+func (s *Store) CreateRunnerToken(ctx context.Context, name string, expires *time.Time, runnerIDs []string, creatorID, creatorLogin string) (domain.RunnerToken, string, error) {
 	secret, hash := newSecret("rrt_")
 	var t domain.RunnerToken
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -50,10 +53,31 @@ func (s *Store) CreateRunnerToken(ctx context.Context, name string, expires *tim
 		if err != nil {
 			return err
 		}
+		ids := []string{}
+		for _, id := range runnerIDs {
+			if !slices.Contains(ids, id) {
+				ids = append(ids, id)
+			}
+		}
+		for _, id := range ids {
+			var b domain.RunnerBinding
+			if err := tx.QueryRow(ctx, `
+				INSERT INTO runner_token_bindings (token_id, runner_id, source) VALUES ($1,$2,'issue')
+				RETURNING runner_id, source, bound_at`, t.ID, id).Scan(&b.RunnerID, &b.Source, &b.BoundAt); err != nil {
+				return err
+			}
+			t.Runners = append(t.Runners, b)
+		}
+		text := "создан токен регистрации runner'ов «" + name + "»"
+		if len(ids) > 0 {
+			text += " для " + strings.Join(ids, ", ")
+		} else {
+			text += " с привязкой при первой регистрации"
+		}
 		_, err = appendEvent(ctx, tx, EventInput{
 			ActorKind: domain.ActorUser, ActorID: creatorLogin, Type: "runner_token.created",
-			Text:    "создан токен регистрации runner'ов «" + name + "»",
-			Payload: map[string]any{"token_id": t.ID, "name": name},
+			Text:    text,
+			Payload: map[string]any{"token_id": t.ID, "name": name, "runner_ids": ids},
 		})
 		return err
 	})
@@ -77,6 +101,7 @@ func (s *Store) RunnerTokenBySecret(ctx context.Context, secret string) (domain.
 	return t, nf(err)
 }
 
+// ListRunnerTokens: токены с привязками, новые первыми.
 func (s *Store) ListRunnerTokens(ctx context.Context) ([]domain.RunnerToken, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT `+runnerTokenCols+` FROM runner_tokens t JOIN users u ON u.id = t.created_by
@@ -86,14 +111,36 @@ func (s *Store) ListRunnerTokens(ctx context.Context) ([]domain.RunnerToken, err
 	}
 	defer rows.Close()
 	var out []domain.RunnerToken
+	idx := map[string]int{}
 	for rows.Next() {
 		t, err := scanRunnerToken(rows)
 		if err != nil {
 			return nil, err
 		}
+		idx[t.ID] = len(out)
 		out = append(out, t)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	brows, err := s.Pool.Query(ctx, `
+		SELECT token_id, runner_id, source, bound_at FROM runner_token_bindings
+		ORDER BY bound_at, runner_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer brows.Close()
+	for brows.Next() {
+		var tokenID string
+		var b domain.RunnerBinding
+		if err := brows.Scan(&tokenID, &b.RunnerID, &b.Source, &b.BoundAt); err != nil {
+			return nil, err
+		}
+		if i, ok := idx[tokenID]; ok {
+			out[i].Runners = append(out[i].Runners, b)
+		}
+	}
+	return out, brows.Err()
 }
 
 // RevokeRunnerToken отзывает токен: новые регистрации и переподключения по

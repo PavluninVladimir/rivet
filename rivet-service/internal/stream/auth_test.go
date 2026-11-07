@@ -62,7 +62,13 @@ func testStore(t *testing.T) *store.Store {
 
 func dialAuthServer(t *testing.T, st *store.Store) pb.RunnerServiceClient {
 	t.Helper()
-	rs := &Server{St: st, Reg: NewRegistry(), Hub: NewHub(), HeartbeatInterval: 30 * time.Second}
+	return dialAuthServerWith(t, &Server{St: st, Reg: NewRegistry(), Hub: NewHub(), HeartbeatInterval: 30 * time.Second})
+}
+
+// dialAuthServerWith: bufconn-клиент к серверу rs с интерцепторами
+// аутентификации.
+func dialAuthServerWith(t *testing.T, rs *Server) pb.RunnerServiceClient {
+	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer(grpc.UnaryInterceptor(rs.UnaryAuth()), grpc.StreamInterceptor(rs.StreamAuth()))
 	pb.RegisterRunnerServiceServer(srv, rs)
@@ -88,7 +94,7 @@ func TestRunnerRegistrationRequiresToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok, secret, err := st.CreateRunnerToken(ctx, "fleet", nil, admin.ID, admin.Login)
+	tok, secret, err := st.CreateRunnerToken(ctx, "fleet", nil, []string{"r1"}, admin.ID, admin.Login)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +152,7 @@ func TestRunnerRegistrationRequiresToken(t *testing.T) {
 
 	// Просроченный токен — тот же отказ.
 	past := time.Now().Add(-time.Hour)
-	_, expired, err := st.CreateRunnerToken(ctx, "old", &past, admin.ID, admin.Login)
+	_, expired, err := st.CreateRunnerToken(ctx, "old", &past, nil, admin.ID, admin.Login)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +169,7 @@ func TestRegisterRejectsOldProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, secret, err := st.CreateRunnerToken(ctx, "fleet", nil, admin.ID, admin.Login)
+	_, secret, err := st.CreateRunnerToken(ctx, "fleet", nil, []string{"old", "odd", "fresh"}, admin.ID, admin.Login)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +219,7 @@ func TestRegisterRejectsNonRivetAgents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, secret, err := st.CreateRunnerToken(ctx, "fleet", nil, admin.ID, admin.Login)
+	_, secret, err := st.CreateRunnerToken(ctx, "fleet", nil, []string{"cc", "nofeat", "noagent", "dep"}, admin.ID, admin.Login)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -31,7 +31,7 @@ func TestOfflineAfterReconnectRace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, secret, err := st.CreateRunnerToken(ctx, "fleet", nil, admin.ID, admin.Login)
+	_, secret, err := st.CreateRunnerToken(ctx, "fleet", nil, []string{"r1"}, admin.ID, admin.Login)
 	if err != nil {
 		t.Fatal(err)
 	}

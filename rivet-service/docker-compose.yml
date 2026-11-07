@@ -1,6 +1,8 @@
 # Runner'ы подключаются с хоста: выпустите токен регистрации в консоли
-# («Управление приложением» → «Runner'ы») и запустите
-#   RIVET_RUNNER_TOKEN=rrt_... rivet-runner -plane localhost:8090 [-tls -tls-ca ca.pem]
+# («Управление приложением» → «Runner'ы») для идентификаторов runner'ов,
+# сохраните его в файл с правами 0600 и запустите
+#   RIVET_RUNNER_TOKEN_FILE=~/.rivet/runner.token rivet-runner -plane localhost:8090 -id <идентификатор> \
+#     [-tls -tls-ca ca.pem [-tls-cert runner.pem -tls-key runner-key.pem]]
 services:
   rivetd:
     build:
@@ -42,6 +44,11 @@ services:
       # смонтированные в контейнер. Без них порт 8090 держите за периметром.
       RIVET_GRPC_TLS_CERT: ${RIVET_GRPC_TLS_CERT:-}
       RIVET_GRPC_TLS_KEY: ${RIVET_GRPC_TLS_KEY:-}
+      # mTLS (необязательно, только вместе с TLS): корни клиентских
+      # сертификатов runner'ов. CN или DNS SAN сертификата должен совпадать
+      # с идентификатором runner'а. Пусто: клиентские сертификаты не
+      # проверяются, rivetd предупреждает об этом в журнале.
+      RIVET_GRPC_CLIENT_CA: ${RIVET_GRPC_CLIENT_CA:-}
     depends_on:
       postgres:
         condition: service_healthy
