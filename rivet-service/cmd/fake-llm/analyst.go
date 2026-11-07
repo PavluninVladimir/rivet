@@ -72,9 +72,18 @@ type finding struct {
 	Quotes     []quote `json:"quotes"`
 }
 
+// feedbackHeader — заголовок задания конспекта отзыва пользователя
+// (add-user-feedback): реплик «**Р:**» в отзыве нет.
+const feedbackHeader = "# Отзыв пользователя"
+
 // summaryReply — по находке на каждую из первых трёх реплик респондента:
 // цитата — первые 60 символов реплики после префикса, строка — из задания.
+// В отзыве пользователя репликой считается каждая непустая строка текста,
+// и короткая строка тоже даёт находку: так ведёт себя настоящая модель на
+// отзыве «Ужас», а проверка цитат его отбрасывает. Конспект отзыва — только
+// находки, без описания респондента (задание его не просит).
 func summaryReply(prompt string) string {
+	feedback := strings.Contains(prompt, "\n"+feedbackHeader+"\n")
 	role := ""
 	var findings []finding
 	for _, line := range strings.Split(prompt, "\n") {
@@ -87,6 +96,9 @@ func summaryReply(prompt string) string {
 			continue
 		}
 		text, ok := strings.CutPrefix(strings.TrimSpace(m[2]), "**Р:**")
+		if feedback {
+			text, ok = m[2], true
+		}
 		if !ok {
 			continue
 		}
@@ -95,18 +107,26 @@ func summaryReply(prompt string) string {
 			q = q[:quoteRunes]
 		}
 		quoteText := strings.TrimSpace(string(q))
-		if len([]rune(quoteText)) < 10 {
+		if quoteText == "" || (!feedback && len([]rune(quoteText)) < 10) {
 			continue
 		}
 		n, _ := strconv.Atoi(m[1])
+		who := "Респондент говорит: "
+		if feedback {
+			who = "Пользователь пишет: "
+		}
 		findings = append(findings, finding{
 			Kind: "need", Importance: "high",
-			Text:   "Респондент говорит: " + quoteText,
+			Text:   who + quoteText,
 			Quotes: []quote{{Text: quoteText, Line: n}},
 		})
 	}
 	if findings == nil {
 		findings = []finding{}
+	}
+	if feedback {
+		out, _ := json.Marshal(map[string]any{"findings": findings})
+		return string(out)
 	}
 	if role == "" {
 		role = "респондент"

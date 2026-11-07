@@ -39,7 +39,10 @@ const StatusArchived = "archived"
 // InterviewInput — интервью версии исследования: нормализованный текст и
 // принятый конспект (после CheckSummary и MergeSummaries).
 type InterviewInput struct {
-	ID             string
+	ID string
+	// Kind — вид материала: пусто или MaterialInterview у интервью,
+	// MaterialFeedback у отзыва пользователя.
+	Kind           string
 	Title          string
 	RespondentRole string
 	Text           string
@@ -72,8 +75,11 @@ type QuoteRef struct {
 	Interview      string `json:"interview"`
 	InterviewTitle string `json:"interview_title"`
 	RespondentRole string `json:"respondent_role"`
-	Line           int    `json:"line"`
-	Text           string `json:"text"`
+	// Kind — feedback у цитаты из отзыва пользователя, у интервью пусто
+	// (add-user-feedback): консоль подписывает источник цитаты.
+	Kind string `json:"kind,omitempty"`
+	Line int    `json:"line"`
+	Text string `json:"text"`
 }
 
 // Need — принятая потребность с подтверждёнными цитатами.
@@ -246,8 +252,17 @@ func CheckSynthesis(interviews []InterviewInput, existing []ExistingEpic, raw st
 			}
 			loc, why, ok := locate(iv.Text, e.Quote, hintFor(iv, e))
 			if !ok {
+				why = materialReason(why, iv.Kind)
+				where := "интервью"
+				if iv.Kind == MaterialFeedback {
+					where = "отзыве"
+				}
 				out.Dropped = append(out.Dropped, Dropped{Kind: "quote", Ref: qref, Reason: why})
-				out.Defects = append(out.Defects, fmt.Sprintf("потребность %s: цитата «%s» не найдена дословно в интервью %s", n.ID, short(e.Quote), e.Interview))
+				if why == ReasonQuoteTooShort {
+					out.Defects = append(out.Defects, fmt.Sprintf("потребность %s: цитата «%s» из %s короче %d символов", n.ID, short(e.Quote), e.Interview, MinQuoteRunes))
+				} else {
+					out.Defects = append(out.Defects, fmt.Sprintf("потребность %s: цитата «%s» не найдена дословно в %s %s", n.ID, short(e.Quote), where, e.Interview))
+				}
 				continue
 			}
 			dup := false
@@ -273,7 +288,11 @@ func CheckSynthesis(interviews []InterviewInput, existing []ExistingEpic, raw st
 				out.Dropped = append(out.Dropped, Dropped{Kind: "quote", Ref: n.ID + ": «" + short(h.loc.Text) + "»", Reason: ReasonQuoteLimit})
 				continue
 			}
-			ev = append(ev, QuoteRef{Interview: h.iv.ID, InterviewTitle: h.iv.Title, RespondentRole: h.iv.RespondentRole, Line: h.loc.Line, Text: h.loc.Text})
+			ref := QuoteRef{Interview: h.iv.ID, InterviewTitle: h.iv.Title, RespondentRole: h.iv.RespondentRole, Line: h.loc.Line, Text: h.loc.Text}
+			if h.iv.Kind == MaterialFeedback {
+				ref.Kind = MaterialFeedback
+			}
+			ev = append(ev, ref)
 		}
 		if len(ev) == 0 {
 			out.Dropped = append(out.Dropped, Dropped{Kind: "need", Ref: ref + ": " + short(n.Title), Reason: ReasonNoQuotes})

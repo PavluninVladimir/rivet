@@ -426,3 +426,17 @@ func TestAnalysisTimeout(t *testing.T) {
 		t.Fatalf("таймаут: %s %q", run.Status, run.Error)
 	}
 }
+
+// Таймаут анализа растёт с числом материалов (add-user-feedback): 550
+// материалов при параллельности 3 не упираются в 45 минут.
+func TestAnalysisTimeoutByMaterials(t *testing.T) {
+	if got := AnalysisTimeout(0, 0); got != DefaultTotalTimeout {
+		t.Fatalf("без материалов: %s", got)
+	}
+	if got := AnalysisTimeout(5, 3); got <= DefaultTotalTimeout || got > DefaultTotalTimeout+time.Minute {
+		t.Fatalf("пять интервью: %s", got)
+	}
+	if got := AnalysisTimeout(550, 3); got < 105*time.Minute {
+		t.Fatalf("550 материалов: %s", got)
+	}
+}

@@ -23,6 +23,10 @@ import (
 
 var fakeLineRe = regexp.MustCompile(`^(\d+)\| \*\*Р:\*\* (.*)$`)
 
+// fakeFeedbackLineRe — строка отзыва пользователя: реплик в нём нет,
+// находка на каждую строку (add-user-feedback).
+var fakeFeedbackLineRe = regexp.MustCompile(`^(\d+)\| (.+)$`)
+
 // fakeAnalystLLM — OpenAI-совместимый сервер с ответами Аналитика по
 // содержимому задания: находка на реплику респондента, потребность на
 // находку, Epic'и e1 и e2 (e2 зависит от e1). gate держит первый запрос.
@@ -43,8 +47,12 @@ func fakeAnalystLLM(t *testing.T, gate chan struct{}) *httptest.Server {
 		switch first, _, _ := strings.Cut(prompt, "\n"); first {
 		case discovery.MarkerSummary:
 			var findings []map[string]any
+			re := fakeLineRe
+			if strings.Contains(prompt, "\n# Отзыв пользователя\n") {
+				re = fakeFeedbackLineRe
+			}
 			for _, line := range strings.Split(prompt, "\n") {
-				if m := fakeLineRe.FindStringSubmatch(line); m != nil {
+				if m := re.FindStringSubmatch(line); m != nil {
 					n, _ := strconv.Atoi(m[1])
 					findings = append(findings, map[string]any{"kind": "pain", "text": "боль: " + m[2], "importance": "high",
 						"quotes": []map[string]any{{"text": m[2], "line": n}}})

@@ -305,7 +305,7 @@ func TestLoadCycleAnalysisElsewhere(t *testing.T) {
 	}
 	a := vera(f.project)
 	if a == nil || a.State != cycle.AgentWorking || a.Current == nil || a.Current.Kind != "other" || a.Current.ID != "" ||
-		a.Current.Action != "анализирует интервью" {
+		a.Current.Action != "анализирует материалы исследования" {
 		t.Fatalf("Аналитик в другом проекте: %+v %+v", a, a.Current)
 	}
 
@@ -313,7 +313,7 @@ func TestLoadCycleAnalysisElsewhere(t *testing.T) {
 	own := seedDiscoveryRun(t, s, f.project, 1, "running", []string{"a"}, nil, false)
 	for i := 0; i < 5; i++ {
 		if a := vera(f.project); a.Current == nil || a.Current.Kind != "analysis" || a.Current.ID != own ||
-			a.Current.Action != "конспектирует интервью 1 из 1" {
+			a.Current.Action != "конспектирует материалы: 1 из 1" {
 			t.Fatalf("свой анализ: %+v", a.Current)
 		}
 		if a := vera(other.ProjectID); a.Current == nil || a.Current.ID != otherRun {

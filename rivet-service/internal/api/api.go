@@ -164,6 +164,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/projects/{id}/discovery/interviews", s.addInterview)
 	mux.HandleFunc("GET /api/v1/projects/{id}/discovery/interviews/{iid}", s.getInterview)
 	mux.HandleFunc("DELETE /api/v1/projects/{id}/discovery/interviews/{iid}", s.deleteInterview)
+	mux.HandleFunc("POST /api/v1/projects/{id}/discovery/feedback", s.addFeedback)
 	mux.HandleFunc("POST /api/v1/projects/{id}/discovery/analyses", s.startAnalysis)
 	mux.HandleFunc("GET /api/v1/projects/{id}/discovery/analyses/{rid}", s.getAnalysis)
 	mux.HandleFunc("PUT /api/v1/projects/{id}/discovery/analyses/{rid}/backlog", s.putBacklog)

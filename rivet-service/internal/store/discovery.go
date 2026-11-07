@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -25,6 +26,20 @@ import (
 const (
 	MaxInterviews     = 50
 	MaxInterviewChars = 200000
+)
+
+// Лимиты отзывов пользователей (спека «Обратная связь пользователей»): свой
+// лимит на проект, в лимит интервью отзывы не входят.
+const (
+	MaxFeedback       = 500
+	MaxFeedbackChars  = 2000
+	MaxFeedbackSource = 200
+)
+
+// Виды материалов исследования (discovery_interviews.kind).
+const (
+	MaterialInterview = discovery.MaterialInterview
+	MaterialFeedback  = discovery.MaterialFeedback
 )
 
 // Статусы версии исследования.
@@ -47,7 +62,8 @@ const (
 var (
 	ErrInterviewTooLarge = fmt.Errorf("интервью длиннее %d символов", MaxInterviewChars)
 	ErrInterviewsLimit   = fmt.Errorf("в проекте уже %d интервью", MaxInterviews)
-	ErrNoInterviews      = errors.New("в проекте нет интервью для анализа")
+	ErrNoInterviews      = errors.New("в проекте нет интервью и отзывов для анализа")
+	ErrFeedbackLimit     = fmt.Errorf("в проекте уже %d отзывов", MaxFeedback)
 	ErrRunNotEditable    = errors.New("бэклог можно править только у версии в статусе ready")
 	ErrRunNotApprovable  = errors.New("утвердить можно только актуальную версию в статусе ready")
 	ErrEpicClosed        = errors.New("зависимости завершённого или архивированного Epic'а не меняются")
@@ -76,20 +92,26 @@ func (e *DiscoveryFieldError) Unwrap() error { return ErrInvalid }
 
 // ─── интервью ────────────────────────────────────────────────────────────
 
-// DiscoveryInterview — интервью проекта (форма Interview в api-contract).
+// DiscoveryInterview — материал исследования: интервью или отзыв
+// пользователя (форма Interview в api-contract). У отзыва источник лежит в
+// RespondentRole и повторяется в Source.
 type DiscoveryInterview struct {
-	ID             string    `json:"id"`
-	ProjectID      string    `json:"-"`
-	Title          string    `json:"title"`
-	RespondentRole string    `json:"respondent_role"`
-	HeldAt         *string   `json:"held_at,omitempty"`
-	Chars          int       `json:"chars"`
-	Lines          int       `json:"lines"`
-	CreatedBy      string    `json:"created_by"`
-	CreatedAt      time.Time `json:"created_at"`
-	Deleted        bool      `json:"deleted,omitempty"`
-	SHA256         string    `json:"-"`
-	Text           string    `json:"text,omitempty"`
+	ID             string `json:"id"`
+	ProjectID      string `json:"-"`
+	Kind           string `json:"kind"`
+	Title          string `json:"title"`
+	RespondentRole string `json:"respondent_role"`
+	Source         string `json:"source,omitempty"`
+	// Excerpt — начало текста отзыва в списке отзывов (ListFeedback).
+	Excerpt   string    `json:"excerpt,omitempty"`
+	HeldAt    *string   `json:"held_at,omitempty"`
+	Chars     int       `json:"chars"`
+	Lines     int       `json:"lines"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+	Deleted   bool      `json:"deleted,omitempty"`
+	SHA256    string    `json:"-"`
+	Text      string    `json:"text,omitempty"`
 }
 
 // NewInterview — добавляемое интервью. HeldAt — дата YYYY-MM-DD или пусто.
@@ -100,17 +122,20 @@ type NewInterview struct {
 	Text           string
 }
 
-const interviewCols = `i.id, i.project_id, i.title, i.respondent_role, to_char(i.held_at, 'YYYY-MM-DD'),
+const interviewCols = `i.id, i.project_id, i.kind, i.title, i.respondent_role, to_char(i.held_at, 'YYYY-MM-DD'),
 	i.chars, i.lines, COALESCE(u.login,''), i.created_at, i.deleted_at IS NOT NULL, i.sha256`
 
 func scanInterview(row pgx.Row, withText bool) (DiscoveryInterview, error) {
 	var iv DiscoveryInterview
-	dest := []any{&iv.ID, &iv.ProjectID, &iv.Title, &iv.RespondentRole, &iv.HeldAt,
+	dest := []any{&iv.ID, &iv.ProjectID, &iv.Kind, &iv.Title, &iv.RespondentRole, &iv.HeldAt,
 		&iv.Chars, &iv.Lines, &iv.CreatedBy, &iv.CreatedAt, &iv.Deleted, &iv.SHA256}
 	if withText {
 		dest = append(dest, &iv.Text)
 	}
 	err := row.Scan(dest...)
+	if iv.Kind == MaterialFeedback {
+		iv.Source = iv.RespondentRole
+	}
 	return iv, err
 }
 
@@ -159,7 +184,7 @@ func (s *Store) AddInterview(ctx context.Context, projectID, userID string, in N
 			return err
 		}
 		var n int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM discovery_interviews WHERE project_id=$1 AND deleted_at IS NULL`, projectID).Scan(&n); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM discovery_interviews WHERE project_id=$1 AND deleted_at IS NULL AND kind='interview'`, projectID).Scan(&n); err != nil {
 			return err
 		}
 		if n >= MaxInterviews {
@@ -180,11 +205,11 @@ func (s *Store) AddInterview(ctx context.Context, projectID, userID string, in N
 	return out, err
 }
 
-// ListInterviews — интервью проекта без удалённых, без текста.
+// ListInterviews — интервью проекта без удалённых и без отзывов, без текста.
 func (s *Store) ListInterviews(ctx context.Context, projectID string) ([]DiscoveryInterview, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT `+interviewCols+` FROM discovery_interviews i
 		LEFT JOIN users u ON u.id = i.created_by
-		WHERE i.project_id=$1 AND i.deleted_at IS NULL ORDER BY i.created_at, i.id`, projectID)
+		WHERE i.project_id=$1 AND i.deleted_at IS NULL AND i.kind='interview' ORDER BY i.created_at, i.id`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -200,6 +225,31 @@ func (s *Store) ListInterviews(ctx context.Context, projectID string) ([]Discove
 	return out, rows.Err()
 }
 
+// FeedbackExcerptChars — длина начала текста отзыва в списке.
+const FeedbackExcerptChars = 200
+
+// ListFeedback — отзывы проекта без удалённых, новые первыми, с началом
+// текста: список не тянет 500 полных отзывов на каждое перечитывание.
+func (s *Store) ListFeedback(ctx context.Context, projectID string) ([]DiscoveryInterview, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT `+interviewCols+`, left(i.text, `+strconv.Itoa(FeedbackExcerptChars)+`) FROM discovery_interviews i
+		LEFT JOIN users u ON u.id = i.created_by
+		WHERE i.project_id=$1 AND i.deleted_at IS NULL AND i.kind='feedback' ORDER BY i.created_at DESC, i.id DESC`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DiscoveryInterview{}
+	for rows.Next() {
+		iv, err := scanInterview(rows, true)
+		if err != nil {
+			return nil, err
+		}
+		iv.Excerpt, iv.Text = iv.Text, ""
+		out = append(out, iv)
+	}
+	return out, rows.Err()
+}
+
 // GetInterview — интервью проекта с текстом. Удалённое тоже отдаётся
 // (Deleted): цитаты прошлых версий открываются в контексте.
 func (s *Store) GetInterview(ctx context.Context, projectID, id string) (DiscoveryInterview, error) {
@@ -208,7 +258,8 @@ func (s *Store) GetInterview(ctx context.Context, projectID, id string) (Discove
 	return iv, nf(err)
 }
 
-// interviewsForAnalysis — интервью проекта с текстом для анализа.
+// InterviewsForAnalysis — материалы проекта (интервью и отзывы) с текстом
+// для анализа.
 func (s *Store) InterviewsForAnalysis(ctx context.Context, projectID string) ([]DiscoveryInterview, error) {
 	rows, err := s.Pool.Query(ctx, `SELECT `+interviewCols+`, i.text FROM discovery_interviews i
 		LEFT JOIN users u ON u.id = i.created_by

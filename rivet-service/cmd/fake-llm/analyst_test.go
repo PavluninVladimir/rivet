@@ -155,3 +155,61 @@ func TestAnalystDelay(t *testing.T) {
 		t.Fatalf("задание планировщика не задерживается: %v", d)
 	}
 }
+
+// Отзыв пользователя (add-user-feedback): конспект fake-llm цитирует
+// строки отзыва, синтез вместе с интервью даёт потребность с цитатой из
+// отзыва, и всё проходит настоящую проверку цитат.
+func TestAnalystFeedbackRoundTrip(t *testing.T) {
+	text := discovery.NormalizeText("После импорта Excel пропали телефоны у половины контактов.\nПриходится вводить их заново вручную.\n")
+	chunk := discovery.SplitInterview(text, discovery.SummaryChunkChars, discovery.ChunkOverlapLines)[0]
+	prompt := discovery.SummaryPrompt(discovery.SummaryTask{Kind: discovery.MaterialFeedback, InterviewID: "fb-1",
+		Title: "Отзыв · менеджер Анна", RespondentRole: "менеджер Анна", Chunk: chunk, Part: 1, Parts: 1})
+	reply, ok := analystReply(prompt)
+	if !ok {
+		t.Fatal("задание конспекта отзыва не распознано")
+	}
+	if strings.Contains(prompt, "менеджер Анна") || strings.Contains(reply, "respondent") {
+		t.Fatalf("источник или описание респондента в конспекте отзыва: %s", reply)
+	}
+	sc := discovery.CheckMaterialSummary("fb-1", discovery.MaterialFeedback, text, reply)
+	if sc.Retry || len(sc.Dropped) != 0 || len(sc.Summary.Findings) != 2 {
+		t.Fatalf("конспект отзыва: %+v", sc)
+	}
+	if q := sc.Summary.Findings[0].Quotes[0]; q.Line != 1 || !strings.HasPrefix(text, q.Text) {
+		t.Fatalf("цитата отзыва: %+v", q)
+	}
+	ivs := []discovery.InterviewInput{{ID: "fb-1", Kind: discovery.MaterialFeedback, Title: "Отзыв · менеджер Анна",
+		RespondentRole: "менеджер Анна", Text: text, Summary: sc.Summary}}
+	sp, _ := discovery.SynthesisPrompt(discovery.SynthesisTask{Interviews: ivs})
+	reply, ok = analystReply(sp)
+	if !ok {
+		t.Fatal("задание синтеза не распознано")
+	}
+	c := discovery.CheckSynthesis(ivs, nil, reply)
+	if c.Retry || !c.Usable || len(c.Dropped) != 0 || len(c.Result.Needs) != 2 {
+		t.Fatalf("синтез с отзывом: %+v", c)
+	}
+	if e := c.Result.Needs[0].Evidence[0]; e.Interview != "fb-1" || e.Line != 1 || e.Kind != discovery.MaterialFeedback {
+		t.Fatalf("цитата потребности из отзыва: %+v", e)
+	}
+}
+
+// Короткий отзыв (P1 ревью add-user-feedback): fake-llm цитирует его
+// целиком, как настоящая модель, проверка отбрасывает цитату короче 10
+// символов с понятной причиной и советом для повтора.
+func TestAnalystShortFeedback(t *testing.T) {
+	text := discovery.NormalizeText("Ужас\n")
+	chunk := discovery.SplitInterview(text, discovery.SummaryChunkChars, discovery.ChunkOverlapLines)[0]
+	prompt := discovery.SummaryPrompt(discovery.SummaryTask{Kind: discovery.MaterialFeedback, InterviewID: "fb-1", Chunk: chunk, Part: 1, Parts: 1})
+	reply, ok := analystReply(prompt)
+	if !ok {
+		t.Fatal("задание не распознано")
+	}
+	sc := discovery.CheckMaterialSummary("fb-1", discovery.MaterialFeedback, text, reply)
+	if sc.Usable || !sc.Retry || len(sc.Dropped) != 2 || sc.Dropped[0].Reason != discovery.ReasonQuoteTooShort {
+		t.Fatalf("короткий отзыв: %+v", sc)
+	}
+	if len(sc.Defects) == 0 || !strings.Contains(sc.Defects[0], "короче 10 символов") || !strings.Contains(sc.Defects[0], "текста отзыва") {
+		t.Fatalf("дефект повтора: %v", sc.Defects)
+	}
+}

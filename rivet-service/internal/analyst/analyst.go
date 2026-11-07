@@ -31,6 +31,10 @@ const (
 	DefaultParallel       = 3
 	DefaultRequestTimeout = 15 * time.Minute
 	DefaultTotalTimeout   = 45 * time.Minute
+	// MaterialTimeout — добавка к таймауту анализа на каждый материал при
+	// параллельности DefaultParallel: с сотнями отзывов первый анализ
+	// конспектирует сотни материалов, и 45 минут ему мало.
+	MaterialTimeout = 20 * time.Second
 	// Лимиты ответа: конспект одного интервью и синтез по всем.
 	SummaryMaxTokens   = 32000
 	SynthesisMaxTokens = 64000
@@ -82,12 +86,36 @@ type failure struct {
 
 func (f *failure) Error() string { return f.reason }
 
+// NoFindingsReason — причина сбоя версии, когда в конспектах нет ни одной
+// подтверждённой находки (например, в проекте только короткие отзывы).
+const NoFindingsReason = "в материалах нет подтверждённых находок: добавьте интервью или более подробные отзывы"
+
+func anyFindings(ivs []discovery.InterviewInput) bool {
+	for _, iv := range ivs {
+		if len(iv.Summary.Findings) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// AnalysisTimeout — таймаут анализа n материалов: 45 минут и по
+// MaterialTimeout на материал, поделённые на параллельность конспектов.
+// Кэш конспектов делает повторный анализ быстрее, таймаут считается с
+// запасом на худший случай.
+func AnalysisTimeout(n, parallel int) time.Duration {
+	if parallel <= 0 {
+		parallel = DefaultParallel
+	}
+	return DefaultTotalTimeout + time.Duration(n)*MaterialTimeout/time.Duration(parallel)
+}
+
 // Run выполняет анализ до конца и переводит версию в ready или failed.
 // Паника внутри анализа тоже завершает версию failed: running не залипает.
 func (r *Runner) Run(ctx context.Context, job Job) {
 	total := r.TotalTimeout
 	if total <= 0 {
-		total = DefaultTotalTimeout
+		total = AnalysisTimeout(len(job.Interviews), r.Parallel)
 	}
 	ctx, cancel := context.WithTimeout(ctx, total)
 	defer cancel()
@@ -152,7 +180,7 @@ func (a *analysis) run(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			inputs[i] = discovery.InterviewInput{ID: iv.ID, Title: iv.Title, RespondentRole: iv.RespondentRole, Text: iv.Text, Summary: sum}
+			inputs[i] = discovery.InterviewInput{ID: iv.ID, Kind: iv.Kind, Title: iv.Title, RespondentRole: iv.RespondentRole, Text: iv.Text, Summary: sum}
 			a.progressMu.Lock()
 			defer a.progressMu.Unlock()
 			a.mu.Lock()
@@ -166,6 +194,11 @@ func (a *analysis) run(ctx context.Context) error {
 	if err := g.Wait(); err != nil {
 		return err
 	}
+	// Без единой подтверждённой находки синтезу не из чего строить
+	// потребности: версия завершается сразу, без запросов к модели.
+	if !anyFindings(inputs) {
+		return &failure{reason: NoFindingsReason}
+	}
 	a.progress(ctx, store.StageSynthesis, total, total)
 
 	existing, err := a.st().ExistingEpicsForDiscovery(ctx, a.job.Run.ProjectID)
@@ -176,12 +209,21 @@ func (a *analysis) run(ctx context.Context) error {
 	pc.Epics = existing
 	var defects []string
 	for attempt := 0; attempt < 2; attempt++ {
-		prompt, removed := discovery.SynthesisPrompt(discovery.SynthesisTask{
+		prompt, trim := discovery.SynthesisPromptTrim(discovery.SynthesisTask{
 			Analyst: a.job.Analyst, Interviews: inputs, Context: pc, Defects: defects,
 		})
-		trimmed := ""
-		if removed > 0 {
-			trimmed = fmt.Sprintf("вход синтеза сокращён до порога задания: убрано находок %d, сначала с важностью low, затем medium", removed)
+		var trimmed []string
+		if trim.Removed > 0 {
+			trimmed = append(trimmed, "вход синтеза сокращён до порога задания: "+trim.Text())
+		}
+		// Отзыв в наборе версии ещё не значит, что Аналитик его читал:
+		// версия называет, сколько отзывов вошло в синтез.
+		if t := trim.FeedbackText(); t != "" {
+			trimmed = append(trimmed, t)
+		}
+		// Сводная цифра не на критическом пути: сбой записи только в лог.
+		if err := a.st().SetRunFeedbackCoverage(ctx, a.job.Run.ID, trim.FeedbackTotal, trim.FeedbackSynthesized, trim.FeedbackWithoutFindings); err != nil {
+			slog.Warn("отзывы во входе синтеза не записаны", "run", a.job.Run.ID, "err", err)
 		}
 		raw, err := a.complete(ctx, prompt, SynthesisMaxTokens)
 		if errors.Is(err, llm.ErrTruncated) {
@@ -206,9 +248,7 @@ func (a *analysis) run(ctx context.Context) error {
 		a.addDropped(check.Dropped)
 		a.mu.Lock()
 		warnings := append(append([]string{}, a.warnings...), check.Defects...)
-		if trimmed != "" {
-			warnings = append(warnings, trimmed)
-		}
+		warnings = append(warnings, trimmed...)
 		dropped := append([]discovery.Dropped{}, a.dropped...)
 		a.mu.Unlock()
 		a.recordDuration(context.WithoutCancel(ctx))
@@ -272,43 +312,65 @@ func retryWrite(fn func() error) error {
 	return err
 }
 
-// summary — конспект интервью: из кэша или по частям с проверкой и одним
-// повтором на часть.
+// summary — конспект материала (интервью или отзыва): из кэша или по
+// частям с проверкой и одним повтором на часть.
 func (a *analysis) summary(ctx context.Context, iv store.DiscoveryInterview) (discovery.Summary, error) {
-	instr := a.job.Analyst.InstructionSHA()
+	instr := a.job.Analyst.SummaryInstructionSHA(iv.Kind)
 	title := "«" + iv.Title + "»"
 	if sum, dropped, ok, err := a.st().CachedSummary(ctx, iv.SHA256, a.job.Model.Model, instr); err != nil {
 		return discovery.Summary{}, err
 	} else if ok {
 		a.addDropped(withRef(dropped, title))
-		return sum, nil
+		return withSource(iv, sum), nil
 	}
 	chunks := discovery.SplitInterview(iv.Text, discovery.SummaryChunkChars, discovery.ChunkOverlapLines)
 	parts := make([]discovery.Summary, 0, len(chunks))
 	var dropped []discovery.Dropped
+	cacheable := true
 	for i, ch := range chunks {
-		part, d, err := a.summaryPart(ctx, iv, ch, i+1, len(chunks))
+		part, d, ok, err := a.summaryPart(ctx, iv, ch, i+1, len(chunks))
 		if err != nil {
 			return discovery.Summary{}, err
 		}
+		cacheable = cacheable && ok
 		parts = append(parts, part)
 		dropped = append(dropped, d...)
 	}
 	sum, merged := discovery.MergeSummaries(refPlaceholder, parts)
 	dropped = append(dropped, merged...)
-	if err := a.st().PutSummary(ctx, iv.SHA256, a.job.Model.Model, instr, sum, dropped); err != nil {
-		return discovery.Summary{}, err
+	if iv.Kind == store.MaterialFeedback {
+		// Конспект отзыва кэшируется без описания респондента: кэш общий
+		// для установки, а одинаковый текст бывает у разных людей.
+		sum.Respondent = discovery.Respondent{}
+	}
+	// Неразобранный ответ модели в кэш не идёт: следующий анализ спросит
+	// модель снова.
+	if cacheable {
+		if err := a.st().PutSummary(ctx, iv.SHA256, a.job.Model.Model, instr, sum, dropped); err != nil {
+			return discovery.Summary{}, err
+		}
 	}
 	a.addDropped(withRef(dropped, title))
-	return sum, nil
+	return withSource(iv, sum), nil
 }
 
-func (a *analysis) summaryPart(ctx context.Context, iv store.DiscoveryInterview, ch discovery.Chunk, part, parts int) (discovery.Summary, []discovery.Dropped, error) {
+// withSource — конспект отзыва с источником из материала: модель источника
+// не видит, его подставляет код.
+func withSource(iv store.DiscoveryInterview, sum discovery.Summary) discovery.Summary {
+	if iv.Kind == store.MaterialFeedback {
+		sum.Respondent = discovery.Respondent{Role: iv.RespondentRole}
+	}
+	return sum
+}
+
+// summaryPart — конспект части материала. cacheable=false — ответ модели
+// не разобрался, конспект нельзя класть в общий кэш.
+func (a *analysis) summaryPart(ctx context.Context, iv store.DiscoveryInterview, ch discovery.Chunk, part, parts int) (sum discovery.Summary, dropped []discovery.Dropped, cacheable bool, err error) {
 	ref := "«" + iv.Title + "»"
 	var defects []string
 	for attempt := 0; attempt < 2; attempt++ {
 		prompt := discovery.SummaryPrompt(discovery.SummaryTask{
-			Analyst: a.job.Analyst, InterviewID: iv.ID, Title: iv.Title, RespondentRole: iv.RespondentRole,
+			Analyst: a.job.Analyst, Kind: iv.Kind, InterviewID: iv.ID, Title: iv.Title, RespondentRole: iv.RespondentRole,
 			Chunk: ch, Part: part, Parts: parts, Defects: defects,
 		})
 		raw, err := a.complete(ctx, prompt, SummaryMaxTokens)
@@ -317,26 +379,38 @@ func (a *analysis) summaryPart(ctx context.Context, iv store.DiscoveryInterview,
 			if attempt == 0 {
 				continue
 			}
-			return discovery.Summary{}, nil, &failure{reason: "конспект " + ref + ": ответ модели оборван лимитом токенов", defects: defects}
+			return discovery.Summary{}, nil, false, &failure{reason: "конспект " + ref + ": ответ модели оборван лимитом токенов", defects: defects}
 		}
 		if err != nil {
-			return discovery.Summary{}, nil, &failure{reason: "конспект " + ref + ": модель не ответила: " + err.Error()}
+			return discovery.Summary{}, nil, false, &failure{reason: "конспект " + ref + ": модель не ответила: " + err.Error()}
 		}
 		// Проверка с подписью-заглушкой: отброшенное уходит в общий кэш.
-		check := discovery.CheckSummary(refPlaceholder, iv.Text, raw)
+		check := discovery.CheckMaterialSummary(refPlaceholder, iv.Kind, iv.Text, raw)
 		if check.Retry && attempt == 0 {
 			defects = defectsWithRef(check.Defects, ref)
 			continue
 		}
+		if !check.Usable && iv.Kind == store.MaterialFeedback {
+			// Отзыв без подтверждённых находок (короткий текст, исправленная
+			// моделью цитата) не валит анализ: он уходит в отброшенное с
+			// причиной, пустой конспект кэшируется. Неразобранный ответ
+			// модели о самом отзыве ничего не говорит: причина своя, в кэш
+			// он не идёт.
+			if !check.Parsed {
+				return discovery.Summary{}, []discovery.Dropped{{Kind: "finding", Ref: refPlaceholder, Reason: discovery.ReasonFeedbackUnparsed}}, false, nil
+			}
+			dropped := append(check.Dropped, discovery.Dropped{Kind: "finding", Ref: refPlaceholder, Reason: discovery.ReasonFeedbackNoFinding})
+			return discovery.Summary{}, dropped, true, nil
+		}
 		if !check.Usable {
-			return discovery.Summary{}, check.Dropped, &failure{reason: "конспект " + ref + " не прошёл проверку", defects: defectsWithRef(check.Defects, ref)}
+			return discovery.Summary{}, check.Dropped, false, &failure{reason: "конспект " + ref + " не прошёл проверку", defects: defectsWithRef(check.Defects, ref)}
 		}
 		a.mu.Lock()
 		a.warnings = append(a.warnings, defectsWithRef(check.Defects, ref)...)
 		a.mu.Unlock()
-		return check.Summary, check.Dropped, nil
+		return check.Summary, check.Dropped, true, nil
 	}
-	return discovery.Summary{}, nil, &failure{reason: "конспект " + ref + " не прошёл проверку", defects: defects}
+	return discovery.Summary{}, nil, false, &failure{reason: "конспект " + ref + " не прошёл проверку", defects: defects}
 }
 
 // complete — запрос Аналитика с таймаутом и учётом usage (роль analyst,

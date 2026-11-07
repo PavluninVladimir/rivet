@@ -246,16 +246,19 @@ type AgentView struct {
 
 // PhaseView — фаза в агрегате.
 type PhaseView struct {
-	ID           Phase       `json:"id"`
-	Title        string      `json:"title"`
-	Role         string      `json:"role"`
-	NoData       bool        `json:"no_data"`
-	Hint         string      `json:"hint,omitempty"`
-	Counters     Counters    `json:"counters"`
-	TemplateOnly bool        `json:"template_only"`
-	Agents       []AgentView `json:"agents"`
-	Items        []Item      `json:"items"`
-	Artifacts    []Artifact  `json:"artifacts"`
+	ID       Phase    `json:"id"`
+	Title    string   `json:"title"`
+	Role     string   `json:"role"`
+	NoData   bool     `json:"no_data"`
+	Hint     string   `json:"hint,omitempty"`
+	Counters Counters `json:"counters"`
+	// FeedbackUnaccounted — неучтённые отзывы пользователей, только у фазы
+	// «Исследование» (add-user-feedback).
+	FeedbackUnaccounted int         `json:"feedback_unaccounted,omitempty"`
+	TemplateOnly        bool        `json:"template_only"`
+	Agents              []AgentView `json:"agents"`
+	Items               []Item      `json:"items"`
+	Artifacts           []Artifact  `json:"artifacts"`
 }
 
 // Summary — сводка в центре кольца. AgentsTotal — все агенты команды,
@@ -329,8 +332,13 @@ func Build(in Input) View {
 		}
 		add(PhaseOfEnv(e), Item{Kind: "environment", ID: e.EnvID, Title: e.Name, Since: e.Since})
 	}
+	feedback := 0
 	for _, m := range in.Materials {
-		add(PhaseOfMaterial(m, in.LastRun), Item{Kind: "material", ID: m.ID, Title: m.Title, Since: m.Since})
+		p := PhaseOfMaterial(m, in.LastRun)
+		if p.In() && m.Kind == MaterialFeedback {
+			feedback++
+		}
+		add(p, Item{Kind: "material", ID: m.ID, Title: m.Title, Since: m.Since})
 	}
 	for _, a := range in.Analyses {
 		add(PhaseOfAnalysis(a), Item{Kind: "analysis", ID: a.ID, Title: a.Title, Since: a.Since})
@@ -400,6 +408,9 @@ func Build(in Input) View {
 			}
 		}
 		pv.Counters.DonePeriod = in.DonePeriod[info.ID]
+		if info.ID == Discovery {
+			pv.FeedbackUnaccounted = feedback
+		}
 		sortItems(items)
 		if len(items) > MaxItems {
 			items = items[:MaxItems]
@@ -427,14 +438,18 @@ func Build(in Input) View {
 	return out
 }
 
-// sortItems: сначала требующие человека, затем по времени входа в фазу
-// (дольше всех ждущие первыми), при равенстве по виду и идентификатору —
-// порядок не зависит от порядка строк из базы.
+// itemRank — порядок состояний в списке элементов фазы: требующие
+// человека, затем в работе, затем ждущие. Иначе десяток ждущих отзывов
+// вытеснял бы из обрезанного списка идущий анализ (add-user-feedback).
+var itemRank = map[ItemState]int{StateNeedsHuman: 0, StateActive: 1, StateWaiting: 2}
+
+// sortItems: сначала требующие человека, затем в работе, затем ждущие,
+// внутри по времени входа в фазу (дольше всех первыми), при равенстве по
+// виду и идентификатору — порядок не зависит от порядка строк из базы.
 func sortItems(items []Item) {
 	sort.SliceStable(items, func(i, j int) bool {
-		hi, hj := items[i].State == StateNeedsHuman, items[j].State == StateNeedsHuman
-		if hi != hj {
-			return hi
+		if ri, rj := itemRank[items[i].State], itemRank[items[j].State]; ri != rj {
+			return ri < rj
 		}
 		if !items[i].Since.Equal(items[j].Since) {
 			return items[i].Since.Before(items[j].Since)

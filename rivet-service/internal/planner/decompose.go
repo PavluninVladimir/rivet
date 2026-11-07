@@ -192,6 +192,11 @@ func writeNeeds(b *strings.Builder, needs []discovery.Need) {
 			if who == "" {
 				who = "респондент"
 			}
+			if q.Kind == discovery.MaterialFeedback {
+				// Отзыв пользователя: источник и есть «кто», названия нет.
+				fmt.Fprintf(b, "   - «%s» (отзыв пользователя, %s, строка %d)\n", oneLine(q.Text), who, q.Line)
+				continue
+			}
 			fmt.Fprintf(b, "   - «%s» (%s, интервью «%s», строка %d)\n", oneLine(q.Text), who, oneLine(q.InterviewTitle), q.Line)
 		}
 		if rest := len(n.Evidence) - len(quotes); rest > 0 {

@@ -57,15 +57,15 @@ func loadCycleDiscovery(ctx context.Context, tx pgx.Tx, projectID string, from t
 	}
 
 	rows, err := tx.Query(ctx, `
-		SELECT id::text, title, created_at FROM discovery_interviews
+		SELECT id::text, kind, title, created_at FROM discovery_interviews
 		WHERE project_id=$1 AND deleted_at IS NULL ORDER BY created_at, id`, projectID)
 	if err != nil {
 		return err
 	}
 	var mats []cycle.Material
 	for rows.Next() {
-		m := cycle.Material{Kind: "interview"}
-		if err := rows.Scan(&m.ID, &m.Title, &m.Since); err != nil {
+		var m cycle.Material
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Title, &m.Since); err != nil {
 			rows.Close()
 			return err
 		}
@@ -76,13 +76,20 @@ func loadCycleDiscovery(ctx context.Context, tx pgx.Tx, projectID string, from t
 		return err
 	}
 	// Элемент фазы называет вид материала, артефакт — только название.
-	// Артефакты: пять последних интервью.
-	for i, m := range mats {
-		if i >= len(mats)-cycle.MaxArtifacts {
+	// Отзыв уже назван «Отзыв · <источник>». Артефакты: пять последних
+	// интервью, отзывы видны элементами фазы и её счётчиком.
+	interviews := 0
+	for i := len(mats) - 1; i >= 0 && interviews < cycle.MaxArtifacts; i-- {
+		if m := mats[i]; m.Kind == cycle.MaterialInterview {
 			in.Artifacts = append(in.Artifacts, cycle.Artifact{Phase: cycle.Discovery, Kind: "interview", ID: m.ID,
 				Title: m.Title, At: m.Since, Ref: cycle.Ref{View: "discovery"}})
+			interviews++
 		}
-		m.Title = "Интервью · " + m.Title
+	}
+	for _, m := range mats {
+		if m.Kind != cycle.MaterialFeedback {
+			m.Title = "Интервью · " + m.Title
+		}
 		in.Materials = append(in.Materials, m)
 	}
 
@@ -111,7 +118,7 @@ func loadCycleDiscovery(ctx context.Context, tx pgx.Tx, projectID string, from t
 		case a.Status == RunReady:
 			a.Title = fmt.Sprintf("Бэклог исследования · версия %d ждёт утверждения", version)
 		default:
-			a.Title = fmt.Sprintf("Анализ интервью · версия %d · %s", version, analysisAction(stage, done, total))
+			a.Title = fmt.Sprintf("Анализ исследования · версия %d · %s", version, analysisAction(stage, done, total))
 		}
 		in.Analyses = append(in.Analyses, a)
 	}
@@ -168,7 +175,7 @@ func analysisAction(stage string, done, total int) string {
 	if stage == StageSynthesis {
 		return "синтезирует результат"
 	}
-	return fmt.Sprintf("конспектирует интервью %d из %d", done, total)
+	return fmt.Sprintf("конспектирует материалы: %d из %d", done, total)
 }
 
 // cycleAnalyses — идущие анализы установки по агенту команды: текущая
@@ -202,7 +209,7 @@ func cycleAnalyses(ctx context.Context, tx pgx.Tx, projectID string) (map[string
 		w.Title = fmt.Sprintf("Исследование · версия %d", version)
 		w.Action = analysisAction(stage, done, total)
 		if w.ProjectID != projectID {
-			w.Action = "анализирует интервью"
+			w.Action = "анализирует материалы исследования"
 		}
 		out[agent] = &w
 	}
