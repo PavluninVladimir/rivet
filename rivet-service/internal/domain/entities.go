@@ -815,6 +815,10 @@ const (
 	// ключ не дошёл до runner'а). Ошибка настройки, а не провал проверок
 	// (fix-agent-without-connection).
 	AttModelConnection AttentionReason = "MODEL_CONNECTION"
+	// AttPRNotCreated — хостинг не создал PR ветки задачи перед review или
+	// merge: задача ждёт человека, повтор создаёт только PR
+	// (fix-pr-without-test-step).
+	AttPRNotCreated AttentionReason = "PR_NOT_CREATED"
 )
 
 type Attention struct {

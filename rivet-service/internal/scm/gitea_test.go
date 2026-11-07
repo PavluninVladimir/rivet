@@ -173,6 +173,80 @@ func TestGiteaCreatePRAndDiff(t *testing.T) {
 	}
 }
 
+// Отказ «PR уже есть» Gitea и Forgejo отдают кодом 409 с текстом «pull
+// request already exists for these targets» (проверено на gitea/gitea:28.3
+// и forgejo:15 интеграционным тестом). Прочие 409 этим отказом не
+// считаются, 429 от прокси перед инстансом — лимит с паузой.
+func TestGiteaCreatePRExists(t *testing.T) {
+	ctx := context.Background()
+	_, g := newGiteaStub(t, map[string][]giteaResp{
+		"POST /repos/own/proj/pulls": {
+			{code: 409, body: "{\n  \"message\": \"pull request already exists for these targets [id: 1, issue_id: 1, head_repo_id: 1, base_repo_id: 1, head_branch: agent/task-1, base_branch: main]\",\n  \"url\": \"http://gitea/api/swagger\"\n}"},
+			{code: 409, body: `{"message":"branch agent/task-2 is locked","url":"http://gitea/api/swagger"}`},
+			{code: 422, body: `{"message":"Invalid PullRequest: There are no changes between the head and the base","url":"http://gitea/api/swagger"}`},
+			{code: 429, body: `too many requests`, hdr: map[string]string{"Retry-After": "3"}},
+		},
+	})
+	if _, err := g.CreatePR(ctx, "own/proj", "agent/task-1", "main", "t", ""); !errors.Is(err, ErrPRExists) || Transient(err) {
+		t.Fatalf("409 «already exists»: %v", err)
+	}
+	if _, err := g.CreatePR(ctx, "own/proj", "agent/task-2", "main", "t", ""); err == nil || errors.Is(err, ErrPRExists) || Transient(err) {
+		t.Fatalf("другой 409: %v", err)
+	}
+	if _, err := g.CreatePR(ctx, "own/proj", "agent/task-3", "main", "t", ""); err == nil || errors.Is(err, ErrPRExists) || Transient(err) {
+		t.Fatalf("422 «нет изменений»: %v", err)
+	}
+	if _, err := g.CreatePR(ctx, "own/proj", "agent/task-4", "main", "t", ""); !errors.Is(err, ErrRateLimited) || !Transient(err) || RetryAfter(err) != 3*time.Second {
+		t.Fatalf("429 от прокси: %v", err)
+	}
+}
+
+// Открытый PR ветки: сначала запрос по базе и ветке, если он отдал не
+// открытый PR или 404, то перебор открытых PR от старых к новым. PR из
+// форка (другой head.repo_id) и в другую базу не подходят, повтор на
+// границе страниц не даёт ложной неоднозначности, два разных кандидата —
+// ErrAmbiguousPR, исчерпанные страницы — ошибка с пояснением.
+func TestGiteaOpenPR(t *testing.T) {
+	ctx := context.Background()
+	pull := func(n int, head, base string, headRepo int) string {
+		return fmt.Sprintf(`{"number":%d,"html_url":"http://gitea/own/proj/pulls/%d","state":"open","head":{"ref":%q,"repo_id":%d},"base":{"ref":%q,"repo_id":1}}`,
+			n, n, head, headRepo, base)
+	}
+	list := "GET /repos/own/proj/pulls?state=open&sort=oldest&limit=50&page="
+	_, g := newGiteaStub(t, map[string][]giteaResp{
+		// По базе и ветке: открытый свой PR — сразу ответ.
+		"GET /repos/own/proj/pulls/main/agent/task-0": one(200, pull(9, "agent/task-0", "main", 1)),
+		// Закрытый PR той же ветки — запасной перебор.
+		"GET /repos/own/proj/pulls/main/agent/task-1": one(200, strings.Replace(pull(2, "agent/task-1", "main", 1), `"open"`, `"closed"`, 1)),
+		list + "1": one(200, "["+pull(1, "agent/task-1", "main", 9)+","+pull(3, "agent/task-1", "release", 1)+","+
+			pull(4, "agent/task-1", "main", 1)+","+pull(5, "agent/task-3", "main", 1)+"]"),
+		// Сдвиг страниц: PR 4 повторяется на второй странице.
+		list + "2": one(200, "["+pull(4, "agent/task-1", "main", 1)+","+pull(6, "agent/task-3", "main", 1)+"]"),
+		list + "3": one(200, `[]`),
+	})
+	if pr, ok, err := g.OpenPR(ctx, "own/proj", "agent/task-0", "main"); err != nil || !ok || pr.Number != 9 {
+		t.Fatalf("PR по базе и ветке: %+v %v %v", pr, ok, err)
+	}
+	if pr, ok, err := g.OpenPR(ctx, "own/proj", "agent/task-1", "main"); err != nil || !ok || pr.Number != 4 {
+		t.Fatalf("свой открытый PR перебором, без форка, другой базы и повтора: %+v %v %v", pr, ok, err)
+	}
+	if _, _, err := g.OpenPR(ctx, "own/proj", "agent/task-3", "main"); !errors.Is(err, ErrAmbiguousPR) {
+		t.Fatalf("два разных кандидата: %v", err)
+	}
+	if _, ok, err := g.OpenPR(ctx, "own/proj", "agent/task-9", "main"); err != nil || ok {
+		t.Fatalf("PR нет: %v %v", ok, err)
+	}
+
+	routes := map[string][]giteaResp{}
+	for page := 1; page <= giteaPRPages; page++ {
+		routes[fmt.Sprintf("%s%d", list, page)] = one(200, "["+pull(100+page, "agent/other", "main", 1)+"]")
+	}
+	_, many := newGiteaStub(t, routes)
+	if _, _, err := many.OpenPR(ctx, "own/proj", "agent/task-1", "main"); err == nil || !strings.Contains(err.Error(), "остальные не читались") {
+		t.Fatalf("исчерпанные страницы — ошибка с пояснением: %v", err)
+	}
+}
+
 func TestGiteaMerge(t *testing.T) {
 	ctx := context.Background()
 	defer func(v time.Duration) { giteaMergeWait = v }(giteaMergeWait)

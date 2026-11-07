@@ -67,7 +67,12 @@ func (g *GitLab) CreatePR(ctx context.Context, repo, branch, base, title, body s
 	if err != nil {
 		return PR{}, err
 	}
-	if code != http.StatusCreated {
+	switch {
+	case code == http.StatusCreated:
+	case code == http.StatusConflict && saysAlreadyExists(raw):
+		// «Another open merge request already exists for this source branch».
+		return PR{}, fmt.Errorf("gitlab create MR: %w: %d: %s", ErrPRExists, code, tailMsg(raw))
+	default:
 		return PR{}, fmt.Errorf("gitlab create MR: %d: %s", code, tailMsg(raw))
 	}
 	var out struct {

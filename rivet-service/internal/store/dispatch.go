@@ -50,6 +50,41 @@ func (s *Store) SetTaskPR(ctx context.Context, taskID, prURL string) error {
 	return err
 }
 
+// TasksAwaitingPR — задачи на review или merge без PR (ждут с прошлой
+// версии или после отказа хостинга): их PR создаётся после старта rivetd.
+// Задачи приостановленных и архивных Epic'ов не трогаются, как и задачи,
+// чей PR человек закрыл на хостинге (открыта эскалация PR_CLOSED): от этой
+// работы отказались, новый PR не создаётся.
+func (s *Store) TasksAwaitingPR(ctx context.Context) ([]domain.Task, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT `+taskCols+` FROM `+taskFrom+`
+		JOIN epics pe ON pe.id = t.epic_id AND pe.status = 'running'
+		WHERE t.status = 'review' AND COALESCE(t.pr_url, '') = '' AND t.step_id <> '' AND t.process IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM attention a WHERE a.task_id = t.id AND a.reason = $1 AND a.status <> 'resolved')
+		ORDER BY t.num`, string(domain.AttPRClosed))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ResolveTaskEscalation закрывает открытые эскалации задачи с указанной
+// причиной: их повод исчез (PR создан).
+func (s *Store) ResolveTaskEscalation(ctx context.Context, taskID string, reason domain.AttentionReason) error {
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE attention SET status='resolved', resolved_at=now()
+		WHERE task_id=$1 AND reason=$2 AND status <> 'resolved'`, taskID, string(reason))
+	return err
+}
+
 // TaskByBranch находит задачу по ветке (webhook'и SCM).
 func (s *Store) TaskByBranch(ctx context.Context, branch string) (domain.Task, error) {
 	t, err := scanTask(s.Pool.QueryRow(ctx, `SELECT `+taskCols+` FROM `+taskFrom+` WHERE t.branch=$1`, branch))

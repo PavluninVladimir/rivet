@@ -87,6 +87,16 @@ func (e *Engine) enterReady(ctx context.Context, excluded, excludedEpics []strin
 					"task", task.ID, "step", task.StepID, "first", step.ID)
 			}
 		}
+		// Задача возвращается на review без PR (повтор после отказа хостинга
+		// в создании PR): PR создаётся до входа, агент шага до review не
+		// перезапускается (fix-pr-without-test-step).
+		if step.Kind == policy.StepReview && task.PRURL == "" {
+			withPR, ok := e.prBeforeResume(ctx, task, step)
+			if !ok {
+				continue
+			}
+			task = withPR
+		}
 		if err := e.enterStep(ctx, task, proc, hash, step, entry, "", nil); err != nil {
 			slog.Error("process: enter step", "task", task.ID, "step", step.ID, "err", err)
 		}
@@ -700,10 +710,19 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 	if policyHash != "" {
 		payload["policy_hash"] = policyHash
 	}
+	text := fmt.Sprintf("шаг %s: %s → %s", step.Title, outcome, target)
+	// Переход по порядку через отключённые шаги называет их (спека process
+	// «Отключённый шаг»).
+	if outcome == policy.OutcomeOk {
+		if skipped := proc.SkippedBetween(step.ID, target); len(skipped) > 0 {
+			payload["skipped"] = skipped
+			text += " (" + skippedText(skipped) + ")"
+		}
+	}
 	if _, err := e.St.AppendEvent(ctx, store.EventInput{
 		ActorKind: domain.ActorScheduler, Type: "task.step",
 		ProjectID: p.ID, EpicID: epic.ID, TaskID: task.ID,
-		Text:    fmt.Sprintf("шаг %s: %s → %s", step.Title, outcome, target),
+		Text:    text,
 		Payload: payload,
 	}); err != nil {
 		return err
@@ -716,7 +735,8 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 	switch outcome {
 	case policy.OutcomeOk:
 		if step.Kind == policy.StepTest {
-			// Отчёт автопроверок — ревьюеру; PR создаётся после проверок.
+			// Отчёт автопроверок — ревьюеру. PR создаёт переход на шаг,
+			// которому он нужен (gotoTarget), при любом составе процесса.
 			e.setStageContext(task.ID, "")
 			if detail != "" {
 				label := "Результаты автопроверок:\n"
@@ -724,17 +744,6 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 					label = "Отчёт тестировщика и автопроверок:\n"
 				}
 				e.setStageContext(task.ID, label+detail)
-			}
-			if task.PRURL == "" {
-				if err := e.createPR(ctx, task, p); err != nil {
-					return err
-				}
-				if task, err = e.St.GetTask(ctx, task.ID); err != nil {
-					return err
-				}
-			}
-			if prURL == "" {
-				prURL = task.PRURL
 			}
 		}
 		if step.Kind == policy.StepReview {
@@ -797,6 +806,8 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 			}
 			return e.failTask(ctx, task, "Невосстановимая ошибка этапа: "+detailText, lastRunner, evPayload)
 		}
+		// Переход по ошибке шага: текст входа на следующий шаг это называет.
+		evPayload["via"] = policy.OutcomeFail
 		return e.gotoTarget(ctx, task, proc, hash, target, policy.OutcomeOk, lastRunner, paused, evPayload, "")
 	}
 	return nil
@@ -833,6 +844,23 @@ func (e *Engine) gotoTarget(ctx context.Context, task domain.Task, proc *policy.
 	if !ok {
 		return fmt.Errorf("шаг %q не найден в снимке процесса задачи %s", target, task.ID)
 	}
+	// PR создаётся перед первым шагом, которому он нужен: review читает
+	// diff, merge мержит PR (его создаёт вход в merge). Шага test в
+	// процессе может не быть, поэтому PR не привязан к проверкам (спека
+	// task-pipeline «Изоляция работы в ветке и PR»).
+	if next.Kind == policy.StepReview && task.PRURL == "" {
+		withPR, err := e.ensurePR(ctx, task)
+		if err != nil {
+			if inTick(ctx) && scm.Transient(err) {
+				return e.prWaitAtReview(ctx, task, next, err)
+			}
+			return e.prFailed(ctx, task, next, err, evPayload)
+		}
+		task = withPR
+	}
+	if prURL == "" {
+		prURL = task.PRURL
+	}
 	var event *store.EventInput
 	if len(ev) > 0 && ev[0] != nil {
 		event = ev[0]
@@ -841,9 +869,13 @@ func (e *Engine) gotoTarget(ctx context.Context, task domain.Task, proc *policy.
 		for k, v := range evPayload {
 			pl[k] = v
 		}
-		event = &store.EventInput{Text: "проверки прошли, PR создан — ожидание review", Payload: pl}
+		event = &store.EventInput{Text: reviewEntryText(proc, task.StepID, evPayload["via"] == policy.OutcomeFail), Payload: pl}
 	} else if next.Kind == policy.StepTest {
 		event = &store.EventInput{Text: "реализация готова — запуск проверок", Payload: evPayload}
+	} else if next.Kind == policy.StepMerge {
+		// Вход в merge пишет своё событие от планировщика, отсюда — только
+		// признак перехода по ошибке для его текста.
+		event = &store.EventInput{ActorKind: domain.ActorScheduler, Payload: evPayload}
 	}
 	if event != nil && event.ActorKind == "" {
 		// Переход по результату runner'а — от его имени; внешний (review с
@@ -883,20 +915,6 @@ func (e *Engine) reusableFrom(task domain.Task) bool {
 	return !ok || s.Kind != policy.StepReview
 }
 
-// createPR открывает PR ветки задачи после успешных проверок.
-func (e *Engine) createPR(ctx context.Context, task domain.Task, p domain.Project) error {
-	adapter, err := e.SCMFor(ctx, p)
-	if err != nil {
-		return err
-	}
-	pr, err := adapter.CreatePR(ctx, p.RepoPath, task.Branch, p.DefaultBranch,
-		fmt.Sprintf("task-%d: %s", task.Num, task.Title), task.Description)
-	if err != nil {
-		return fmt.Errorf("create PR: %w", err)
-	}
-	return e.St.SetTaskPR(ctx, task.ID, pr.URL)
-}
-
 // enterMerge — шаг merge: задача ждёт подтверждения человеком, авто-merge
 // решает гейт политики (спека task-pipeline «Merge после успешной проверки»).
 func (e *Engine) enterMerge(ctx context.Context, task domain.Task, proc *policy.Resolved, hash string, ev *store.EventInput) error {
@@ -914,8 +932,19 @@ func (e *Engine) enterMerge(ctx context.Context, task domain.Task, proc *policy.
 	if len(task.Process) == 0 {
 		in.Process, in.ProcessHash = proc, hash
 	}
+	fromStep := task.StepID
 	if _, err := e.St.EnterStep(ctx, in); err != nil {
 		return err
+	}
+	// PR, если его ещё нет: без него нечего подтверждать и мержить
+	// (задача без шагов review и test, задача до исправления).
+	var prErr error
+	if task.PRURL == "" {
+		if withPR, err := e.ensurePR(ctx, task); err != nil {
+			prErr = err
+		} else {
+			task = withPR
+		}
 	}
 	actor := domain.ActorScheduler
 	actorID := ""
@@ -928,13 +957,26 @@ func (e *Engine) enterMerge(ctx context.Context, task domain.Task, proc *policy.
 			payload[k] = v
 		}
 	}
+	// Событие входа в merge одно для любого процесса (по нему консоль
+	// показывает ожидание подтверждения), текст по шагу, с которого пришла
+	// задача, и по тому, есть ли PR.
+	text, reviewed := mergeEntryText(proc, fromStep, task.PRURL != "", payload["via"] == policy.OutcomeFail)
+	if !reviewed {
+		payload["review_step"] = false
+	}
+	if task.PRURL != "" {
+		payload["pr"] = task.PRURL
+	}
 	if _, err := e.St.AppendEvent(ctx, store.EventInput{
 		ActorKind: actor, ActorID: actorID, Type: "task.review_passed",
 		ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
-		Text:    "review пройден — ожидание подтверждения merge",
+		Text:    text,
 		Payload: payload,
 	}); err != nil {
 		return err
+	}
+	if prErr != nil {
+		return e.prMissingAtMerge(ctx, task, p, prErr)
 	}
 	eff, err := e.St.EffectivePolicy(ctx, p.ID)
 	if err != nil {

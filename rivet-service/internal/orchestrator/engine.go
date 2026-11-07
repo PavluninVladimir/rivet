@@ -52,6 +52,12 @@ type Engine struct {
 	mu sync.Mutex
 	// контекст следующего шага задачи (вывод тестов, замечания review)
 	stageContext map[string]string
+	// prWait — когда снова пробовать создать PR задаче, которая вернулась
+	// на review без PR (fix-pr-without-test-step).
+	prWait map[string]prWaitState
+	// prMergeRetryAt — когда снова пробовать создать PR задачам, которые
+	// ждут на merge без PR (retryMergePRs).
+	prMergeRetryAt time.Time
 	// транскрипты открытых сессий по session_id
 	transcripts map[string][]byte
 	// открытые сессии: session_id → task_id (у задачи может идти несколько
@@ -156,6 +162,8 @@ func (e *Engine) Run(ctx context.Context) {
 
 // Tick — один проход планировщика: протухшие runner'ы, пересчёт DAG, назначения.
 func (e *Engine) Tick(ctx context.Context) error {
+	// В проходе PR создаётся одной попыткой без пауз (tickContext).
+	ctx = tickContext(ctx)
 	// Наблюдение и задания control plane идут и при сбое тика конвейера.
 	defer e.tickOps(ctx)
 	lost, lostDeps, err := e.St.MarkStaleRunnersOffline(ctx, int(e.HeartbeatTimeout.Seconds()))
@@ -213,6 +221,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err := e.enterReady(ctx, excluded, excludedEpics); err != nil {
 		return err
 	}
+	e.retryMergePRs(ctx)
 	// Runner'ы и запуски, чья стадия в этом тике не стартовала, исключаются
 	// до конца тика: остальные назначения идут дальше, а цикл не крутится
 	// на недоступном runner'е.
@@ -888,29 +897,35 @@ func (e *Engine) failTaskBy(ctx context.Context, task domain.Task, actor domain.
 // failTaskWith — failed + эскалация с указанной причиной (ошибка настройки
 // подключения модели — MODEL_CONNECTION, остальное — TEST_FAILED).
 func (e *Engine) failTaskWith(ctx context.Context, task domain.Task, reason domain.AttentionReason, actor domain.ActorKind, actorID, msg string, extra ...map[string]any) error {
+	ev, mutate := e.failParts(ctx, task, reason, actor, actorID, msg, extra...)
+	return e.St.TransitionTask(ctx, task.ID, domain.TaskFailed, ev, mutate)
+}
+
+// failParts — событие перехода в failed и изменения в той же транзакции:
+// runner'ы задачи свободны, эскалация с причиной reason.
+func (e *Engine) failParts(ctx context.Context, task domain.Task, reason domain.AttentionReason, actor domain.ActorKind, actorID, msg string,
+	extra ...map[string]any) (store.EventInput, func(pgx.Tx) error) {
 	failPayload := map[string]any{"status": "failed"}
 	for _, m := range extra {
 		for k, v := range m {
 			failPayload[k] = v
 		}
 	}
-	return e.St.TransitionTask(ctx, task.ID, domain.TaskFailed,
-		store.EventInput{ActorKind: actor, ActorID: actorID, Type: "task.status",
-			Text: msg, Payload: failPayload},
-		func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx,
-				`UPDATE runners SET status='idle', task_id=NULL WHERE task_id=$1`, task.ID); err != nil {
-				return err
-			}
-			epic, err := e.St.GetEpic(ctx, task.EpicID)
-			if err != nil {
-				return err
-			}
-			_, err = tx.Exec(ctx, `
-				INSERT INTO attention (project_id, task_id, reason, message)
-				VALUES ($1,$2,$3,$4)`, epic.ProjectID, task.ID, string(reason), msg)
+	ev := store.EventInput{ActorKind: actor, ActorID: actorID, Type: "task.status", Text: msg, Payload: failPayload}
+	return ev, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx,
+			`UPDATE runners SET status='idle', task_id=NULL WHERE task_id=$1`, task.ID); err != nil {
 			return err
-		})
+		}
+		epic, err := e.St.GetEpic(ctx, task.EpicID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO attention (project_id, task_id, reason, message)
+			VALUES ($1,$2,$3,$4)`, epic.ProjectID, task.ID, string(reason), msg)
+		return err
+	}
 }
 
 // OnBlocked — вопрос агента: blocked + эскалация. Вопрос — runner-controlled
@@ -1075,6 +1090,15 @@ func (e *Engine) MergeTask(ctx context.Context, taskID, userID string) error {
 // отложенным merge, fail-closed без списка путей; иначе merge от системного
 // актора с версией политики в payload.
 func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Project, eff store.EffectivePolicy) error {
+	// Без PR подтверждать и мержить нечего: PR создаётся при любом значении
+	// пресета, отказ хостинга даёт событие о неудачном merge и эскалацию.
+	if task.PRURL == "" {
+		withPR, err := e.ensurePR(ctx, task)
+		if err != nil {
+			return e.prMissingAtMerge(ctx, task, p, err)
+		}
+		task = withPR
+	}
 	deferMerge := func(reason, text string, paths []string) error {
 		payload := eff.Ref()
 		payload["reason"] = reason
@@ -1112,16 +1136,15 @@ func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Proje
 		return e.policyEngineUp(ctx, p.ID)
 	}
 	var paths []string
-	filesUnknown := false
-	if task.PRURL != "" {
-		diff, err := e.diffForTask(ctx, task)
-		if err != nil {
-			slog.Error("auto-merge: diff", "task", task.ID, "err", err)
-			filesUnknown = true
-		} else {
-			paths = policy.PathsFromDiff(diff)
-			filesUnknown = len(paths) == 0 && strings.TrimSpace(diff) != ""
-		}
+	// Список файлов PR неизвестен — авто-merge не выполняется (fail-closed).
+	// Пустой diff тоже неизвестный список: хостинг готовит diff только что
+	// созданного PR асинхронно, а PR без изменений создать нельзя.
+	filesUnknown := true
+	if diff, err := e.diffForTask(ctx, task); err != nil {
+		slog.Error("auto-merge: diff", "task", task.ID, "err", err)
+	} else {
+		paths = policy.PathsFromDiff(diff)
+		filesUnknown = len(paths) == 0
 	}
 	var policyFiles, protected []string
 	for _, path := range paths {
@@ -1230,35 +1253,44 @@ func shortHash(h string) string {
 }
 
 // mergeTask — merge PR → done → пересчёт DAG → автопубликации; ev — событие
-// перехода (человек или система).
+// перехода (человек или система). Задача без PR в done не переходит: PR
+// создаётся здесь, иначе изменения ветки потерялись бы молча.
 func (e *Engine) mergeTask(ctx context.Context, task domain.Task, p domain.Project, ev store.EventInput) error {
 	if task.Status != domain.TaskReview {
 		return domain.ErrBadTransition{Entity: "task", From: string(task.Status), To: string(domain.TaskDone)}
 	}
 	taskID := task.ID
-	mergeSHA := ""
-	if task.PRURL != "" {
-		num, err := prNumber(task.PRURL)
+	if task.PRURL == "" {
+		// Обычно PR создаёт вход на review или merge. Сюда задача без PR
+		// попадает, если человек подтвердил merge раньше (задача на шаге
+		// prompt до review) или дошла до merge до этого исправления.
+		withPR, err := e.ensurePR(ctx, task)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrPRNotCreated, err)
 		}
-		adapter, aerr := e.SCMFor(ctx, p)
-		if aerr != nil {
-			return aerr
-		}
-		// Граница задачи описания по данным хостинга, а не только гейтом в
-		// рабочей копии, и merge проверенной вершины (add-architecture-c4).
-		if task.Kind == domain.KindArchitecture {
-			if mergeSHA, err = e.mergeArchitecturePR(ctx, task, p, adapter, num); err != nil {
-				if errors.Is(err, ErrArchitecturePRRejected) || errors.Is(err, ErrArchitectureHeadMoved) ||
-					errors.Is(err, ErrArchitectureFilesUnavailable) {
-					return err
-				}
-				return fmt.Errorf("merge PR: %w", err)
+		task = withPR
+	}
+	num, err := prNumber(task.PRURL)
+	if err != nil {
+		return err
+	}
+	adapter, err := e.SCMFor(ctx, p)
+	if err != nil {
+		return err
+	}
+	mergeSHA := ""
+	// Граница задачи описания по данным хостинга, а не только гейтом в
+	// рабочей копии, и merge проверенной вершины (add-architecture-c4).
+	if task.Kind == domain.KindArchitecture {
+		if mergeSHA, err = e.mergeArchitecturePR(ctx, task, p, adapter, num); err != nil {
+			if errors.Is(err, ErrArchitecturePRRejected) || errors.Is(err, ErrArchitectureHeadMoved) ||
+				errors.Is(err, ErrArchitectureFilesUnavailable) {
+				return err
 			}
-		} else if mergeSHA, err = adapter.Merge(ctx, p.RepoPath, num); err != nil {
 			return fmt.Errorf("merge PR: %w", err)
 		}
+	} else if mergeSHA, err = adapter.Merge(ctx, p.RepoPath, num); err != nil {
+		return fmt.Errorf("merge PR: %w", err)
 	}
 	// Точка merge задаёт состав релиза (add-sdlc-cycle): у задачи описания
 	// архитектуры её нет, документация в релиз не входит и не публикуется.

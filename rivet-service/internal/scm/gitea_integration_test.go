@@ -130,6 +130,24 @@ func TestGiteaIntegration(t *testing.T) {
 		if err != nil || pr.Number == 0 || !strings.HasSuffix(pr.URL, fmt.Sprintf("/pulls/%d", pr.Number)) {
 			t.Fatalf("PR: %+v %v", pr, err)
 		}
+		// Повтор создания PR той же ветки (ответ прошлого запроса потерялся):
+		// отказ «PR уже есть», открытый PR находится по ветке и базе.
+		_, dup := g.CreatePR(ctx, repo, "agent/task-1", "main", "task-1: a", "задача")
+		t.Logf("повтор создания PR: %v", dup)
+		if !errors.Is(dup, ErrPRExists) {
+			t.Fatalf("повтор создания PR — ErrPRExists: %v", dup)
+		}
+		// OpenPR сначала спрашивает PR по базе и ветке: эндпоинт есть в
+		// Gitea 28 и Forgejo 15, ветка со слешем проходит.
+		if _, code, _, err := g.do(ctx, http.MethodGet, giteaRepo(repo)+"/pulls/main/agent/task-1", nil, ""); err != nil || code != http.StatusOK {
+			t.Fatalf("PR по базе и ветке: %d %v", code, err)
+		}
+		if open, ok, err := g.OpenPR(ctx, repo, "agent/task-1", "main"); err != nil || !ok || open.Number != pr.Number || open.URL != pr.URL {
+			t.Fatalf("открытый PR ветки: %+v %v %v", open, ok, err)
+		}
+		if _, ok, err := g.OpenPR(ctx, repo, "agent/task-1", "release"); err != nil || ok {
+			t.Fatalf("PR в другую базовую ветку не подходит: %v %v", ok, err)
+		}
 		d, err := g.Diff(ctx, repo, pr.Number)
 		if err != nil || !strings.Contains(d, "diff --git a/src/a.txt b/src/a.txt") {
 			t.Fatalf("diff: %q %v", d, err)

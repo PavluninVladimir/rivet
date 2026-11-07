@@ -58,6 +58,26 @@ func TestResolveSkipsDisabled(t *testing.T) {
 	if len(r.Steps) != 4 || r.Steps[0].On.Ok != "review" || r.Skipped[0] != "test" {
 		t.Fatalf("пропуск: %+v skipped=%v", r.Steps[0].On, r.Skipped)
 	}
+	// Переход code → review называет пропущенный test (fix-pr-without-test-step).
+	if got := r.SkippedBetween("code", "review"); len(got) != 1 || got[0] != "test" {
+		t.Fatalf("пропуск между code и review: %v", got)
+	}
+	if got := r.SkippedBetween("review", "code"); got != nil {
+		t.Fatalf("переход назад ничего не пропускает: %v", got)
+	}
+	if got := r.SkippedBetween("review", "merge"); got != nil {
+		t.Fatalf("соседние шаги без пропусков: %v", got)
+	}
+	// Два отключённых шага подряд и отключённый первый шаг документа.
+	p = DefaultProcess()
+	p.Steps[1].Enabled, p.Steps[2].Enabled = boolp(false), boolp(false)
+	r = Resolve(p, Defaults())
+	if got := r.SkippedBetween("code", "merge"); strings.Join(got, ",") != "test,review" {
+		t.Fatalf("два пропуска подряд: %v", got)
+	}
+	if r.Steps[0].SkippedBefore != nil {
+		t.Fatalf("перед первым шагом пропусков нет: %v", r.Steps[0].SkippedBefore)
+	}
 }
 
 // Два шага review с разными агентами и явными переходами.

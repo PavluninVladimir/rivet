@@ -80,15 +80,25 @@ func (g *GitHub) doH(ctx context.Context, method, path string, body any, accept 
 	return raw, resp.StatusCode, resp.Header, err
 }
 
+// CreatePR открывает PR. Отказ «PR ветки уже есть» (422 с этим текстом в
+// теле) — ErrPRExists, отказ по лимиту запросов (вторичный лимит на
+// создание контента, 403 или 429) — RateLimitError: повтор позже.
 func (g *GitHub) CreatePR(ctx context.Context, repo, branch, base, title, body string) (PR, error) {
-	raw, code, err := g.do(ctx, "POST", "/repos/"+repo+"/pulls", map[string]any{
+	raw, code, h, err := g.doH(ctx, "POST", "/repos/"+repo+"/pulls", map[string]any{
 		"title": title, "head": branch, "base": base, "body": body,
 	}, "")
 	if err != nil {
 		return PR{}, err
 	}
-	if code != http.StatusCreated {
-		return PR{}, fmt.Errorf("github create PR: %d: %s", code, raw)
+	switch {
+	case code == http.StatusCreated:
+	case rateLimited(code, h, raw):
+		return PR{}, &RateLimitError{After: retryAfter(h),
+			Msg: fmt.Sprintf("github create PR: %v: %d: %s", ErrRateLimited, code, tailMsg(raw))}
+	case code == http.StatusUnprocessableEntity && saysAlreadyExists(raw):
+		return PR{}, fmt.Errorf("github create PR: %w: %d: %s", ErrPRExists, code, tailMsg(raw))
+	default:
+		return PR{}, fmt.Errorf("github create PR: %d: %s", code, tailMsg(raw))
 	}
 	var out struct {
 		Number  int    `json:"number"`

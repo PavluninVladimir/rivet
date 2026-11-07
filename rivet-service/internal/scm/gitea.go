@@ -93,15 +93,25 @@ func giteaMissing(raw []byte) (id, relPath string, ok bool) {
 
 var giteaMissingRe = regexp.MustCompile(`object does not exist \[id: ([^,\]]*), rel_path: ([^\]]*)\]`)
 
-// CreatePR открывает pull request из ветки задачи в базовую ветку.
+// CreatePR открывает pull request из ветки задачи в базовую ветку. Отказ
+// «PR ветки уже есть» (409 «pull request already exists for these
+// targets») — ErrPRExists. Своего лимита запросов у Gitea нет, 429 отдаёт
+// прокси перед инстансом: RateLimitError с паузой из Retry-After.
 func (g *Gitea) CreatePR(ctx context.Context, repo, branch, base, title, body string) (PR, error) {
-	raw, code, _, err := g.do(ctx, http.MethodPost, giteaRepo(repo)+"/pulls", map[string]any{
+	raw, code, h, err := g.do(ctx, http.MethodPost, giteaRepo(repo)+"/pulls", map[string]any{
 		"head": branch, "base": base, "title": title, "body": body,
 	}, "")
 	if err != nil {
 		return PR{}, err
 	}
-	if code != http.StatusCreated {
+	switch {
+	case code == http.StatusCreated:
+	case code == http.StatusTooManyRequests:
+		return PR{}, &RateLimitError{After: retryAfter(h),
+			Msg: fmt.Sprintf("gitea create PR: %v: %d: %s", ErrRateLimited, code, clip(raw))}
+	case code == http.StatusConflict && saysAlreadyExists(raw):
+		return PR{}, fmt.Errorf("gitea create PR: %w: %d: %s", ErrPRExists, code, clip(raw))
+	default:
 		return PR{}, giteaErr("create PR", code, raw)
 	}
 	var out struct {
@@ -112,6 +122,99 @@ func (g *Gitea) CreatePR(ctx context.Context, repo, branch, base, title, body st
 		return PR{}, err
 	}
 	return PR{Number: out.Number, URL: out.HTMLURL}, nil
+}
+
+// giteaPRPages — предел страниц открытых PR, которые читает запасной поиск
+// OpenPR.
+const giteaPRPages = 20
+
+// giteaPRRef — PR в ответе Gitea: номер, ссылка, состояние и ветки с
+// репозиториями.
+type giteaPRRef struct {
+	Number  int    `json:"number"`
+	HTMLURL string `json:"html_url"`
+	State   string `json:"state"`
+	Head    struct {
+		Ref    string `json:"ref"`
+		RepoID int64  `json:"repo_id"`
+	} `json:"head"`
+	Base struct {
+		Ref    string `json:"ref"`
+		RepoID int64  `json:"repo_id"`
+	} `json:"base"`
+}
+
+// fits — открытый PR из ветки branch того же репозитория в base: PR из
+// форка (другой head.repo_id) и в другую базу не подходят.
+func (p giteaPRRef) fits(branch, base string) bool {
+	return p.State == "open" && p.Head.Ref == branch && p.Base.Ref == base && p.Head.RepoID != 0 && p.Head.RepoID == p.Base.RepoID
+}
+
+// OpenPR — открытый PR из ветки branch самого репозитория в base. Сначала
+// запрос PR по базе и ветке (GET /repos/{repo}/pulls/{base}/{head}, есть в
+// Gitea 28 и Forgejo 15): он отдаёт один PR, но не обязательно открытый.
+// Если он не подошёл, открытые PR читаются постранично от старых к новым,
+// повторы на границе страниц отбрасываются по номеру.
+func (g *Gitea) OpenPR(ctx context.Context, repo, branch, base string) (PR, bool, error) {
+	if !strings.Contains(base, "/") {
+		raw, code, _, err := g.do(ctx, http.MethodGet, giteaRepo(repo)+"/pulls/"+neturl.PathEscape(base)+"/"+escapePath(branch), nil, "")
+		if err != nil {
+			return PR{}, false, err
+		}
+		switch code {
+		case http.StatusOK:
+			var p giteaPRRef
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return PR{}, false, err
+			}
+			if p.fits(branch, base) {
+				return PR{Number: p.Number, URL: p.HTMLURL}, true, nil
+			}
+		case http.StatusNotFound:
+		default:
+			return PR{}, false, giteaErr("PR по базе и ветке", code, raw)
+		}
+	}
+	seen := map[int]bool{}
+	var found []PR
+	total := 0
+	for page := 1; ; page++ {
+		if page > giteaPRPages {
+			if len(found) > 0 {
+				break
+			}
+			return PR{}, false, fmt.Errorf("gitea list PR: просмотрено %d открытых PR на %d страницах, PR ветки %s в %s среди них нет, остальные не читались",
+				total, giteaPRPages, branch, base)
+		}
+		raw, code, _, err := g.do(ctx, http.MethodGet, fmt.Sprintf("%s/pulls?state=open&sort=oldest&limit=50&page=%d", giteaRepo(repo), page), nil, "")
+		if err != nil {
+			return PR{}, false, err
+		}
+		if code != http.StatusOK {
+			return PR{}, false, giteaErr("list PR", code, raw)
+		}
+		var out []giteaPRRef
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return PR{}, false, err
+		}
+		if len(out) == 0 {
+			break
+		}
+		for _, p := range out {
+			if seen[p.Number] {
+				continue
+			}
+			seen[p.Number] = true
+			total++
+			if p.State == "" {
+				p.State = "open"
+			}
+			if p.fits(branch, base) {
+				found = append(found, PR{Number: p.Number, URL: p.HTMLURL})
+			}
+		}
+	}
+	return onePR(found)
 }
 
 // Diff — unified diff PR (контекст review-агента).
