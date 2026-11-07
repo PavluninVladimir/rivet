@@ -62,6 +62,8 @@ func writeDiscoveryErr(w http.ResponseWriter, err error) {
 		discErr(w, http.StatusConflict, "interviews_limit", err.Error(), "", map[string]any{"limit": store.MaxInterviews})
 	case errors.Is(err, store.ErrNoInterviews):
 		discErr(w, http.StatusBadRequest, "no_interviews", err.Error(), "", nil)
+	case errors.Is(err, store.ErrFeedbackLimit):
+		discErr(w, http.StatusConflict, "feedback_limit", err.Error(), "", map[string]any{"limit": store.MaxFeedback})
 	case errors.As(err, &running):
 		discErr(w, http.StatusConflict, "analysis_running", "анализ проекта уже идёт", "", map[string]any{"run_id": running.RunID})
 	case errors.As(err, &conflict):
@@ -207,7 +209,8 @@ func nonNilSlice[T any](s []T) []T {
 
 // ─── чтение ──────────────────────────────────────────────────────────────
 
-// getDiscovery — GET /projects/{id}/discovery: интервью, текущая версия и история.
+// getDiscovery — GET /projects/{id}/discovery: интервью, отзывы с числом
+// неучтённых, текущая версия и история.
 func (s *Server) getDiscovery(w http.ResponseWriter, r *http.Request) {
 	pid := r.PathValue("id")
 	if !pathIDs(w, pid) || !s.requireMember(w, r, pid) {
@@ -217,6 +220,25 @@ func (s *Server) getDiscovery(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	feedback, err := s.St.ListFeedback(r.Context(), pid)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	unaccounted, err := s.St.UnaccountedFeedback(r.Context(), pid)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	// Сколько отзывов последней готовой версии вошло во вход синтеза: при
+	// сокращении входа отзыв в версии ещё не прочитан Аналитиком.
+	// Сводная цифра не мешает открыть исследование: сбой чтения даёт null.
+	var coverage any
+	if c, ok, err := s.St.FeedbackCoverage(r.Context(), pid); err != nil {
+		slog.Warn("отзывы во входе синтеза не прочитаны", "project", pid, "err", err)
+	} else if ok && c.Total > 0 {
+		coverage = c
 	}
 	cur, err := s.St.CurrentRun(r.Context(), pid)
 	if err != nil {
@@ -236,7 +258,8 @@ func (s *Server) getDiscovery(w http.ResponseWriter, r *http.Request) {
 	if cur != nil {
 		current = discRunDTO(*cur)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"interviews": ivs, "current": current, "versions": versions})
+	writeJSON(w, http.StatusOK, map[string]any{"interviews": ivs, "feedback": feedback, "feedback_unaccounted": unaccounted,
+		"feedback_coverage": coverage, "current": current, "versions": versions})
 }
 
 func (s *Server) getInterview(w http.ResponseWriter, r *http.Request) {
@@ -374,9 +397,49 @@ func (s *Server) deleteInterview(w http.ResponseWriter, r *http.Request) {
 		writeDiscoveryErr(w, err)
 		return
 	}
-	s.discoveryEvent(r.Context(), r, pid, "discovery.interview_deleted",
-		"удалено интервью «"+iv.Title+"»", map[string]any{"interview_id": iv.ID, "title": iv.Title})
+	text := "удалено интервью «" + iv.Title + "»"
+	if iv.Kind == store.MaterialFeedback {
+		text = "удалён отзыв: " + iv.Source
+	}
+	s.discoveryEvent(r.Context(), r, pid, "discovery.interview_deleted", text,
+		map[string]any{"interview_id": iv.ID, "title": iv.Title, "kind": iv.Kind})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// maxFeedbackBody — предел тела отзыва: 2000 символов текста и 200
+// источника по 4 байта и запас на JSON.
+const maxFeedbackBody = 64 << 10
+
+// addFeedback — POST /projects/{id}/discovery/feedback: отзыв пользователя
+// добавляет любой участник проекта (спека product-discovery «Обратная
+// связь пользователей»).
+func (s *Server) addFeedback(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("id")
+	if !pathIDs(w, pid) || !s.requireMember(w, r, pid) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxFeedbackBody)
+	var body struct {
+		Text   string `json:"text"`
+		Source string `json:"source"`
+	}
+	if err := decodeJSONLimit(r, &body); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			discErr(w, http.StatusBadRequest, "invalid", "отзыв длиннее 2000 символов", "text", nil)
+			return
+		}
+		discErr(w, http.StatusBadRequest, "invalid", "тело запроса не разобрано: "+err.Error(), "", nil)
+		return
+	}
+	fb, err := s.St.AddFeedback(r.Context(), pid, currentUser(r).ID, store.NewFeedback{Text: body.Text, Source: body.Source})
+	if err != nil {
+		writeDiscoveryErr(w, err)
+		return
+	}
+	s.discoveryEvent(r.Context(), r, pid, "feedback.created", "отзыв пользователя: "+fb.Source,
+		map[string]any{"material_id": fb.ID, "source": fb.Source})
+	writeJSON(w, http.StatusCreated, fb)
 }
 
 // discoveryEvent — событие исследования от имени пользователя запроса.
@@ -389,6 +452,25 @@ func (s *Server) discoveryEvent(ctx context.Context, r *http.Request, projectID,
 }
 
 // ─── анализ ──────────────────────────────────────────────────────────────
+
+// materialsText — состав анализа: «интервью 2, отзывы 3».
+func materialsText(ms []store.DiscoveryInterview) string {
+	interviews, feedback := 0, 0
+	for _, m := range ms {
+		if m.Kind == store.MaterialFeedback {
+			feedback++
+		} else {
+			interviews++
+		}
+	}
+	switch {
+	case feedback == 0:
+		return fmt.Sprintf("интервью %d", interviews)
+	case interviews == 0:
+		return fmt.Sprintf("отзывы %d", feedback)
+	}
+	return fmt.Sprintf("интервью %d, отзывы %d", interviews, feedback)
+}
 
 // analystModelError — модель Аналитика не настроена или недоступна (412).
 type analystModelError struct {
@@ -494,12 +576,13 @@ func (s *Server) startAnalysis(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	ivs, err := s.St.ListInterviews(ctx, pid)
+	// Анализ идёт по всем материалам: интервью и отзывам пользователей.
+	has, err := s.St.HasMaterials(ctx, pid)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	if len(ivs) == 0 {
+	if !has {
 		writeDiscoveryErr(w, store.ErrNoInterviews)
 		return
 	}
@@ -546,7 +629,7 @@ func (s *Server) startAnalysis(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := s.St.AppendEvent(context.WithoutCancel(ctx), store.EventInput{
 		ActorKind: domain.ActorUser, ActorID: user(r), Type: "discovery.analysis_started", ProjectID: pid,
-		Text:    fmt.Sprintf("%s начинает анализ интервью: %d", who, len(texts)),
+		Text:    who + " начинает анализ: " + materialsText(texts),
 		Payload: analyst.Payload(run, setup.agentID, setup.who),
 	}); err != nil {
 		slog.Error("событие старта анализа", "run", run.ID, "err", err)

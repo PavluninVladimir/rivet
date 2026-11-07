@@ -333,6 +333,12 @@ func PhaseOfIncident(i Incident) Placement {
 	return Placement{}
 }
 
+// Виды материалов исследования.
+const (
+	MaterialInterview = "interview"
+	MaterialFeedback  = "feedback"
+)
+
 // Material — интервью или отзыв пользователя.
 type Material struct {
 	ID    string

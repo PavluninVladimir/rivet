@@ -146,3 +146,51 @@ func TestInstructionSHA(t *testing.T) {
 		t.Fatal("модель входит в ключ кэша")
 	}
 }
+
+// Отзыв пользователя (add-user-feedback): своё задание конспекта без
+// источника и без описания респондента (конспект кэшируется по тексту на
+// всю установку), свой ключ кэша конспекта, во входе синтеза у отзыва
+// kind и источник без названия и резюме, отзыв без находок не входит.
+// Задания по одним интервью не меняются.
+func TestFeedbackPrompts(t *testing.T) {
+	a := Analyst{Title: "Аналитик", Name: "Вера", Instruction: "Разбирай интервью."}
+	chunk := SplitInterview("После импорта пропали телефоны.\n", SummaryChunkChars, ChunkOverlapLines)[0]
+	p := SummaryPrompt(SummaryTask{Analyst: a, Kind: MaterialFeedback, InterviewID: "fb-1", Title: "Отзыв · Анна",
+		RespondentRole: "менеджер\nАнна", Chunk: chunk, Part: 1, Parts: 1})
+	for _, want := range []string{MarkerSummary + "\n", "конспект отзыва пользователя", "\n# Отзыв пользователя\nИдентификатор: fb-1\n\n",
+		"\n# Текст отзыва\n", "1| После импорта пропали телефоны.", `{"findings": [`, "пустой список находок"} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("в задании конспекта отзыва нет %q:\n%s", want, p)
+		}
+	}
+	for _, leak := range []string{"Анна", "Источник", "Роль респондента", "# Интервью", `"respondent"`} {
+		if strings.Contains(p, leak) {
+			t.Fatalf("в задании конспекта отзыва есть %q:\n%s", leak, p)
+		}
+	}
+	if a.SummaryInstructionSHA(MaterialFeedback) == a.InstructionSHA() || a.SummaryInstructionSHA(MaterialInterview) != a.InstructionSHA() ||
+		a.SummaryInstructionSHA("") != a.InstructionSHA() {
+		t.Fatal("ключ кэша конспекта отзыва совпадает с интервью или ключ интервью сменился")
+	}
+
+	iv := InterviewInput{ID: "iv-1", Title: "Анна", RespondentRole: "Менеджер"}
+	fb := InterviewInput{ID: "fb-1", Kind: MaterialFeedback, Title: "Отзыв · Анна", RespondentRole: "менеджер Анна",
+		Summary: Summary{Respondent: Respondent{Summary: "резюме"}, Findings: []Finding{{Kind: KindPain, Text: "телефоны", Importance: ImportanceHigh,
+			Quotes: []Quote{{Text: "После импорта пропали телефоны.", Line: 1}}}}}}
+	empty := InterviewInput{ID: "fb-2", Kind: MaterialFeedback, Title: "Отзыв · Олег", RespondentRole: "Олег"}
+	only, _ := SynthesisPrompt(SynthesisTask{Analyst: a, Interviews: []InterviewInput{iv}})
+	if strings.Contains(only, `"kind": "feedback"`) || strings.Contains(only, "kind: feedback") {
+		t.Fatalf("синтез по интервью получил пометку отзывов:\n%s", only)
+	}
+	both, _ := SynthesisPrompt(SynthesisTask{Analyst: a, Interviews: []InterviewInput{iv, fb, empty}})
+	if strings.Contains(both, "fb-2") || strings.Contains(both, "Отзыв · Анна") || strings.Contains(both, "резюме") ||
+		!strings.Contains(both, `"respondent_role": "менеджер Анна"`) {
+		t.Fatalf("отзыв во входе синтеза: только kind, источник и находки, отзыв без находок не входит:\n%s", both)
+	}
+	if !strings.Contains(both, `"kind": "feedback"`) || !strings.Contains(both, "Конспекты с полем kind: feedback") {
+		t.Fatalf("синтез с отзывом без пометки:\n%s", both)
+	}
+	if strings.Count(both, `"kind": "feedback"`) != 1 {
+		t.Fatalf("пометка вида у интервью:\n%s", both)
+	}
+}

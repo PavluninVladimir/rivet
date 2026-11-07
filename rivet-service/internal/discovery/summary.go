@@ -60,6 +60,9 @@ type Dropped struct {
 // Причины отбрасывания: человек видит их в разделе отброшенного.
 const (
 	ReasonQuoteNotFound     = "цитата не найдена в интервью"
+	ReasonQuoteNotInReview  = "цитата не найдена в отзыве"
+	ReasonFeedbackNoFinding = "в отзыве нет подтверждённых находок"
+	ReasonFeedbackUnparsed  = "ответ модели на отзыв не разобран"
 	ReasonQuoteTooShort     = "цитата короче 10 символов"
 	ReasonQuoteDuplicate    = "цитата повторяется"
 	ReasonOverlapDuplicate  = "находка повторяет соседнюю часть интервью"
@@ -164,6 +167,9 @@ type SummaryCheck struct {
 	// осталась хотя бы одна находка, либо модель честно вернула пустой
 	// конспект).
 	Usable bool
+	// Parsed — ответ разобрался как JSON конспекта. Неразобранный ответ
+	// (сбой провайдера, текст вместо JSON) не говорит о самом материале.
+	Parsed bool
 }
 
 // CheckSummary разбирает и проверяет ответ первого этапа по тексту
@@ -171,11 +177,19 @@ type SummaryCheck struct {
 // интервью, номер строки от модели — подсказка). ref — подпись интервью в
 // разделе отброшенного.
 func CheckSummary(ref, text, raw string) SummaryCheck {
+	return CheckMaterialSummary(ref, MaterialInterview, text, raw)
+}
+
+// CheckMaterialSummary — CheckSummary для материала вида kind: у отзыва
+// причины и дефекты называют отзыв, а не интервью. Дефект повтора
+// различает короткую цитату и цитату, которой нет в тексте: модели нужен
+// разный совет.
+func CheckMaterialSummary(ref, kind, text, raw string) SummaryCheck {
 	s, warning, err := decodeAnswer[Summary](raw, "findings")
 	if err != nil {
 		return SummaryCheck{Defects: []string{err.Error()}, Retry: true}
 	}
-	var out SummaryCheck
+	out := SummaryCheck{Parsed: true}
 	if warning != "" {
 		out.Defects = append(out.Defects, ref+": "+warning)
 	}
@@ -198,8 +212,9 @@ func CheckSummary(ref, text, raw string) SummaryCheck {
 		for _, q := range f.Quotes {
 			loc, reason, ok := locate(text, q.Text, q.Line)
 			if !ok {
+				reason = materialReason(reason, kind)
 				out.Dropped = append(out.Dropped, Dropped{Kind: "quote", Ref: fref + ": «" + short(q.Text) + "»", Reason: reason})
-				out.Defects = append(out.Defects, fmt.Sprintf("%s: цитата «%s» не найдена в интервью дословно", fref, short(q.Text)))
+				out.Defects = append(out.Defects, quoteDefect(fref, q.Text, reason, kind))
 				continue
 			}
 			var dup *Located
@@ -227,6 +242,26 @@ func CheckSummary(ref, text, raw string) SummaryCheck {
 		out.Defects = append(out.Defects, fmt.Sprintf("%s: отброшено %d из %d находок", ref, dropped, len(s.Findings)))
 	}
 	return out
+}
+
+// materialReason — причина отказа цитаты с названием материала.
+func materialReason(reason, kind string) string {
+	if kind == MaterialFeedback && reason == ReasonQuoteNotFound {
+		return ReasonQuoteNotInReview
+	}
+	return reason
+}
+
+// quoteDefect — дефект цитаты для повторного задания по причине отказа.
+func quoteDefect(ref, quote, reason, kind string) string {
+	where := "текста интервью"
+	if kind == MaterialFeedback {
+		where = "текста отзыва"
+	}
+	if reason == ReasonQuoteTooShort {
+		return fmt.Sprintf("%s: цитата «%s» короче %d символов: возьми более длинный дословный фрагмент %s или не приводи находку", ref, short(quote), MinQuoteRunes, where)
+	}
+	return fmt.Sprintf("%s: цитата «%s» не найдена дословно: копируй фрагмент %s символ в символ", ref, short(quote), where)
 }
 
 // addQuote добавляет найденную цитату. Цитаты с одним началом в тексте —

@@ -441,3 +441,48 @@ func TestArtifactOrderWithinMoment(t *testing.T) {
 		t.Fatalf("потребности по важности: %s", got)
 	}
 }
+
+// Неучтённые отзывы (add-user-feedback): счётчик фазы «Исследование»
+// считает только отзывы, которых нет в последней готовой версии.
+func TestFeedbackUnaccounted(t *testing.T) {
+	in := Input{
+		Materials: []Material{
+			{ID: "iv1", Kind: MaterialInterview}, {ID: "fb1", Kind: MaterialFeedback},
+			{ID: "fb2", Kind: MaterialFeedback}, {ID: "fb3", Kind: MaterialFeedback},
+		},
+		LastRun:   LastRun{Included: map[string]bool{"fb1": true}},
+		Available: map[Phase]bool{Discovery: true},
+	}
+	v := Build(in)
+	disc := phaseOf(v, Discovery)
+	if disc.FeedbackUnaccounted != 2 || disc.Counters.Waiting != 3 {
+		t.Fatalf("исследование: %+v", disc)
+	}
+	for _, p := range v.Phases {
+		if p.ID != Discovery && p.FeedbackUnaccounted != 0 {
+			t.Fatalf("счётчик отзывов у фазы %s", p.ID)
+		}
+	}
+	b, _ := json.Marshal(phaseOf(Build(Input{}), Discovery))
+	if strings.Contains(string(b), "feedback_unaccounted") {
+		t.Fatalf("нулевой счётчик в JSON: %s", b)
+	}
+}
+
+// Идущий анализ не выпадает из обрезанного списка, когда неучтённых
+// материалов десять и больше: в работе раньше ждущих.
+func TestActiveBeforeWaiting(t *testing.T) {
+	in := Input{Available: map[Phase]bool{Discovery: true},
+		Analyses: []Analysis{{ID: "run", Status: "running", Since: t0}}}
+	for i := 0; i < 12; i++ {
+		in.Materials = append(in.Materials, Material{ID: fmt.Sprintf("fb%02d", i), Kind: MaterialFeedback, Since: t0.Add(-time.Duration(i+1) * time.Minute)})
+	}
+	in.Analyses = append(in.Analyses, Analysis{ID: "old", Status: "ready", Since: t0.Add(-time.Hour)})
+	disc := phaseOf(Build(in), Discovery)
+	if len(disc.Items) != MaxItems || disc.Items[0].ID != "old" || disc.Items[1].ID != "run" || disc.Items[2].State != StateWaiting {
+		t.Fatalf("порядок элементов: %+v", disc.Items[:3])
+	}
+	if disc.Counters.Waiting != 12 || disc.Counters.Active != 1 || disc.Counters.NeedsHuman != 1 {
+		t.Fatalf("счётчики: %+v", disc.Counters)
+	}
+}
