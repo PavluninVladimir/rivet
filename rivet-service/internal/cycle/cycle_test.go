@@ -2,6 +2,7 @@ package cycle
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -114,7 +115,9 @@ func TestPhaseOfOtherEntities(t *testing.T) {
 		{"учтённое интервью", PhaseOfMaterial(Material{ID: "m1"}, LastRun{Included: map[string]bool{"m1": true}}), Placement{}},
 		{"интервью без версий", PhaseOfMaterial(Material{ID: "m1"}, LastRun{}), Placement{Discovery, StateWaiting, ""}},
 		{"идёт анализ", PhaseOfAnalysis(Analysis{Status: "running"}), Placement{Discovery, StateActive, ""}},
-		{"бэклог на утверждении", PhaseOfAnalysis(Analysis{Status: "review"}), Placement{Discovery, StateNeedsHuman, ""}},
+		{"бэклог на утверждении", PhaseOfAnalysis(Analysis{Status: "ready"}), Placement{Discovery, StateNeedsHuman, ""}},
+		{"анализ упал", PhaseOfAnalysis(Analysis{Status: "failed"}), Placement{}},
+		{"бэклог утверждён", PhaseOfAnalysis(Analysis{Status: "approved"}), Placement{}},
 		{"проверка упала", PhaseOfEnv(EnvMonitor{State: "fail"}), Placement{Operations, StateActive, ""}},
 		{"проверка unknown", PhaseOfEnv(EnvMonitor{State: "unknown"}), Placement{}},
 	}
@@ -410,5 +413,31 @@ func TestBuildEmptyJSON(t *testing.T) {
 	}
 	if strings.Contains(s, `"phase"`) {
 		t.Error("служебное поле фазы не должно попадать в JSON")
+	}
+}
+
+// Артефакты одного момента идут по Order, а не по строковому ID: решения
+// одной даты новыми номерами (10 раньше 9), потребности по важности.
+func TestArtifactOrderWithinMoment(t *testing.T) {
+	in := Input{Available: map[Phase]bool{Architecture: true, Discovery: true}}
+	for _, n := range []int{8, 9, 10, 7} {
+		in.Artifacts = append(in.Artifacts, Artifact{Phase: Architecture, Kind: "adr", ID: fmt.Sprint(n), At: t0, Order: -n})
+	}
+	for i, id := range []string{"r/n9", "r/n2", "r/n10"} {
+		in.Artifacts = append(in.Artifacts, Artifact{Phase: Discovery, Kind: "need", ID: id, At: t0, Order: i})
+	}
+	ids := func(p PhaseView) string {
+		var out []string
+		for _, a := range p.Artifacts {
+			out = append(out, a.ID)
+		}
+		return strings.Join(out, ",")
+	}
+	v := Build(in)
+	if got := ids(phaseOf(v, Architecture)); got != "10,9,8,7" {
+		t.Fatalf("решения одной даты: %s", got)
+	}
+	if got := ids(phaseOf(v, Discovery)); got != "r/n9,r/n2,r/n10" {
+		t.Fatalf("потребности по важности: %s", got)
 	}
 }

@@ -643,6 +643,35 @@ func TestLoadCycle1000(t *testing.T) {
 		FROM generate_series(1, 1000) g`, f.epic); err != nil {
 		t.Fatal(err)
 	}
+	// Исследование и архитектура на пределах спеки (fix-cycle-phase-data):
+	// 50 интервью, версия с 60 потребностями, снимок с 300 решениями и
+	// большим HLD.
+	if _, err := f.s.Pool.Exec(ctx, `
+		INSERT INTO discovery_interviews (project_id, title, text, sha256, chars, lines)
+		SELECT $1, 'Интервью ' || g, repeat('**Р:** реплика. ', 2000), md5(g::text), 32000, 1
+		FROM generate_series(1, 50) g`, f.project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.Pool.Exec(ctx, `
+		INSERT INTO discovery_runs (project_id, version, status, stage, interviews, result, finished_at, approved_at)
+		SELECT $1, 1, 'approved', 'done',
+			(SELECT jsonb_agg(jsonb_build_object('id', id::text, 'title', title)) FROM (SELECT id, title FROM discovery_interviews WHERE project_id=$1 LIMIT 40) i),
+			jsonb_build_object('needs', (SELECT jsonb_agg(jsonb_build_object('id', 'n' || g, 'title', 'Потребность ' || g, 'importance', 'high'))
+				FROM generate_series(1, 60) g)), now(), now()`, f.project); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(map[string]any{"system": map[string]string{"name": "CRM"}, "hld": strings.Repeat("HLD ", 50000),
+		"decisions": func() []map[string]any {
+			var out []map[string]any
+			for n := 1; n <= 300; n++ {
+				out = append(out, map[string]any{"number": n, "title": fmt.Sprintf("Решение %d", n), "status": "accepted",
+					"date": "2026-11-01", "body": strings.Repeat("текст ", 200)})
+			}
+			return out
+		}()})
+	if _, _, err := f.s.SaveProjectArchitecture(ctx, f.project, ArchitectureSave{Status: "ok", SHA: "abc", Data: data}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.s.LoadCycle(ctx, f.project, "7d", time.UTC, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +683,7 @@ func TestLoadCycle1000(t *testing.T) {
 		}
 	}
 	avg := time.Since(start) / n
-	t.Logf("агрегат цикла на 1000 задачах: %s", avg)
+	t.Logf("агрегат цикла на 1000 задачах, 50 интервью и 300 решениях: %s", avg)
 	if avg > 200*time.Millisecond {
 		t.Fatalf("агрегат дольше 200 мс: %s", avg)
 	}

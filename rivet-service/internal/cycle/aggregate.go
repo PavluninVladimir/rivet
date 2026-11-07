@@ -148,7 +148,10 @@ func agentPhase(a Agent) (Phase, bool) {
 
 // ─── вход и выход агрегата ───────────────────────────────────────────────
 
-// Ref — ссылка артефакта: представление консоли или внешний URL.
+// Ref — ссылка артефакта: представление консоли или внешний URL. View:
+// epic, task, release, incident — с идентификатором сущности; discovery —
+// «Исследование», ID версии исследования или пусто; architecture —
+// «Архитектура» проекта; adr — решение в «Архитектуре», ID его номер.
 type Ref struct {
 	View string `json:"view,omitempty"`
 	ID   string `json:"id,omitempty"`
@@ -158,11 +161,14 @@ type Ref struct {
 // Artifact — артефакт фазы.
 type Artifact struct {
 	Phase Phase     `json:"-"`
-	Kind  string    `json:"kind"` // interview | need | architecture | plan | pr | check | review | release | incident
+	Kind  string    `json:"kind"` // interview | need | architecture | adr | plan | pr | check | review | release | incident
 	ID    string    `json:"id"`
 	Title string    `json:"title"`
 	At    time.Time `json:"at"`
 	Ref   Ref       `json:"ref"`
+	// Order — порядок артефактов одного момента: меньше раньше. Потребности
+	// одной версии идут по важности, решения одной даты новыми номерами.
+	Order int `json:"-"`
 }
 
 // LastRelease — последний релиз проекта для сводки.
@@ -403,6 +409,9 @@ func Build(in Input) View {
 		sort.SliceStable(arts, func(i, j int) bool {
 			if !arts[i].At.Equal(arts[j].At) {
 				return arts[i].At.After(arts[j].At)
+			}
+			if arts[i].Order != arts[j].Order {
+				return arts[i].Order < arts[j].Order
 			}
 			if arts[i].Kind != arts[j].Kind {
 				return arts[i].Kind < arts[j].Kind

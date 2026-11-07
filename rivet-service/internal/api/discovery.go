@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/analyst"
+	"github.com/PavluninVladimir/rivet/internal/architecture"
 	"github.com/PavluninVladimir/rivet/internal/discovery"
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/llm"
@@ -576,11 +577,12 @@ func (s *Server) analystRunner() *analyst.Runner {
 	return &analyst.Runner{St: s.St}
 }
 
-// productContext — README основной ветки для синтеза. Снимок архитектуры
-// придёт с add-architecture-c4, до него задание явно говорит, что
-// описания архитектуры нет. Ошибка хостинга не мешает анализу.
+// productContext — README основной ветки и сводка снимка архитектуры для
+// синтеза. Ошибка хостинга и отсутствие корректного описания не мешают
+// анализу: задание явно называет, чего нет.
 func (s *Server) productContext(ctx context.Context, projectID string) discovery.ProductContext {
 	var pc discovery.ProductContext
+	pc.Architecture = s.architectureContext(ctx, projectID)
 	if s.Engine == nil {
 		return pc
 	}
@@ -607,6 +609,35 @@ func (s *Server) productContext(ctx context.Context, projectID string) discovery
 		}
 	}
 	return pc
+}
+
+// architectureContext — сводка корректного снимка архитектуры проекта:
+// при ok текущей версии, при invalid и error последней корректной, с
+// пометкой, что текущее описание не прошло проверку или не прочитано.
+// Снимка или корректной версии нет — пусто.
+func (s *Server) architectureContext(ctx context.Context, projectID string) string {
+	row, ok, err := s.St.GetProjectArchitecture(ctx, projectID)
+	if err != nil {
+		slog.Warn("снимок архитектуры для анализа", "project", projectID, "err", err)
+		return ""
+	}
+	if !ok || len(row.ValidData) == 0 || string(row.ValidData) == "null" {
+		return ""
+	}
+	var d architecture.SnapshotData
+	if err := json.Unmarshal(row.ValidData, &d); err != nil {
+		slog.Warn("снимок архитектуры для анализа не разобран", "project", projectID, "err", err)
+		return ""
+	}
+	out := architecture.ContextSummary(d)
+	if row.Status != "ok" {
+		sha := row.ValidSHA
+		if len(sha) > 7 {
+			sha = sha[:7]
+		}
+		out = fmt.Sprintf("Последняя корректная версия описания (коммит %s): текущее описание на основной ветке не прошло проверку или не прочитано.\n\n", sha) + out
+	}
+	return out
 }
 
 // RecoverDiscovery — при старте rivetd: анализы, прерванные перезапуском,
