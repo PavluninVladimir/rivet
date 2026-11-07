@@ -207,6 +207,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/stream", s.sse)
 	mux.HandleFunc("POST /api/v1/webhooks/github", s.githubWebhook)
 	mux.HandleFunc("POST /api/v1/webhooks/gitlab", s.gitlabWebhook)
+	mux.HandleFunc("POST /api/v1/webhooks/gitea", s.giteaWebhook)
 	return s.withAuth(mux)
 }
 
@@ -410,14 +411,14 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			Code: "no_secret_key", Message: "ключ шифрования не настроен: учётные данные не сохранить"}})
 		return
 	}
-	provider, baseURL, repoPath, err := probeInput{
+	rr, err := s.resolveRepo(r.Context(), probeInput{
 		Provider: in.Provider, RepoURL: in.RepoURL, BaseURL: in.BaseURL,
-	}.resolve()
+	})
 	if err != nil {
 		unprocessable(w, err.Error())
 		return
 	}
-	provider = s.effectiveProvider(provider)
+	provider, baseURL, repoPath := s.effectiveProvider(rr.provider), rr.baseURL, rr.repoPath
 
 	// Режим «создать новый»: сначала проверяем токен, затем создаём
 	// репозиторий — он инициализируется с базовой веткой.
@@ -456,7 +457,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		unprocessable(w, "нужен URL репозитория")
 		return
 	}
-	res := s.probe(r, provider, baseURL, repoPath, in.Token)
+	res := rr.failed(s.probe(r, provider, baseURL, repoPath, in.Token))
 	if !res.OK {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
 			"error": apiError{Code: res.Reason, Message: res.Message}, "probe": res})

@@ -35,6 +35,7 @@ FUZZ_TARGETS = \
 	./internal/runner:FuzzParseUsage \
 	./internal/api:FuzzBearerSecret \
 	./internal/scm:FuzzParseRepoURL \
+	./internal/scm:FuzzGiteaParse \
 	./internal/policy:FuzzProcessDocument \
 	./internal/discovery:FuzzSplitInterview \
 	./internal/discovery:FuzzCheckSummary \

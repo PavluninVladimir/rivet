@@ -10,9 +10,10 @@ import (
 	"testing"
 )
 
-// Один набор сценариев прогоняется против обоих адаптеров: конвейер не
+// Один набор сценариев прогоняется против всех адаптеров: конвейер не
 // должен видеть разницы между PR и MR (спека scm-integration «Протокол
-// SCM-адаптера»). Хостинг подменяется httptest-сервером.
+// SCM-адаптера»). Хостинг подменяется httptest-сервером. Сценарии, где
+// ответы Gitea устроены иначе, — в gitea_test.go.
 
 type stub struct {
 	// путь -> (код, тело); путь включает метод: "GET /api/v4/user"
@@ -72,8 +73,20 @@ func bothAdapters(github, gitlab map[string]stubResp) []adapterCase {
 	}
 }
 
+// allAdapters — те же сценарии и для Gitea (change add-gitea-adapter):
+// пустые маршруты Gitea — сценарий для неё не прогоняется.
+func allAdapters(github, gitlab, gitea map[string]stubResp) []adapterCase {
+	cases := bothAdapters(github, gitlab)
+	if gitea != nil {
+		cases = append(cases, adapterCase{"gitea", gitea, func(base, token string) Adapter {
+			return NewGitea(base, token)
+		}})
+	}
+	return cases
+}
+
 func TestAdapterProbeSuccess(t *testing.T) {
-	cases := bothAdapters(
+	cases := allAdapters(
 		map[string]stubResp{
 			"GET /user":           {200, `{"login":"bot"}`},
 			"GET /repos/own/proj": {200, `{"full_name":"own/proj","default_branch":"main","permissions":{"push":true,"pull":true}}`},
@@ -81,6 +94,11 @@ func TestAdapterProbeSuccess(t *testing.T) {
 		map[string]stubResp{
 			"GET /api/v4/user":                {200, `{"username":"bot"}`},
 			"GET /api/v4/projects/own%2Fproj": {200, `{"path_with_namespace":"own/proj","default_branch":"main","permissions":{"project_access":{"access_level":40}}}`},
+		},
+		map[string]stubResp{
+			"GET /api/v1/user":                  {200, `{"login":"bot"}`},
+			"GET /api/v1/repos/own/proj":        {200, `{"full_name":"own/proj","default_branch":"main","permissions":{"push":true,"pull":true}}`},
+			"POST /api/v1/repos/own/proj/pulls": {422, `{"message":"[Head]: Required"}`},
 		},
 	)
 	for _, c := range cases {
@@ -103,20 +121,22 @@ func TestAdapterProbeSuccess(t *testing.T) {
 // Причины отказа различаются по смыслу: пользователю нужен конкретный текст.
 func TestAdapterProbeReasons(t *testing.T) {
 	scenarios := []struct {
-		name           string
-		github, gitlab map[string]stubResp
-		want           string
+		name                  string
+		github, gitlab, gitea map[string]stubResp
+		want                  string
 	}{
 		{
 			"токен не принят",
 			map[string]stubResp{"GET /user": {401, `{"message":"Bad credentials"}`}},
 			map[string]stubResp{"GET /api/v4/user": {401, `{"message":"unauthorized"}`}},
+			map[string]stubResp{"GET /api/v1/user": {401, `{"message":"user does not exist [uid: 0, name: ]"}`}},
 			ReasonBadToken,
 		},
 		{
 			"репозиторий не найден",
 			map[string]stubResp{"GET /user": {200, `{"login":"bot"}`}},
 			map[string]stubResp{"GET /api/v4/user": {200, `{"username":"bot"}`}},
+			map[string]stubResp{"GET /api/v1/user": {200, `{"login":"bot"}`}},
 			ReasonNotFound,
 		},
 		{
@@ -129,11 +149,15 @@ func TestAdapterProbeReasons(t *testing.T) {
 				"GET /api/v4/user":                {200, `{"username":"bot"}`},
 				"GET /api/v4/projects/own%2Fproj": {200, `{"path_with_namespace":"own/proj","default_branch":"main","permissions":{"project_access":{"access_level":20}}}`},
 			},
+			map[string]stubResp{
+				"GET /api/v1/user":           {200, `{"login":"bot"}`},
+				"GET /api/v1/repos/own/proj": {200, `{"full_name":"own/proj","default_branch":"main","permissions":{"push":false,"pull":true}}`},
+			},
 			ReasonNoScope,
 		},
 	}
 	for _, sc := range scenarios {
-		for _, c := range bothAdapters(sc.github, sc.gitlab) {
+		for _, c := range allAdapters(sc.github, sc.gitlab, sc.gitea) {
 			t.Run(sc.name+"/"+c.name, func(t *testing.T) {
 				srv := newStub(c.routes).server(t)
 				res := c.build(srv.URL, "tok").Probe(context.Background(), "own/proj")
@@ -149,7 +173,7 @@ func TestAdapterProbeReasons(t *testing.T) {
 }
 
 func TestAdapterProbeUnreachable(t *testing.T) {
-	for _, c := range bothAdapters(map[string]stubResp{}, map[string]stubResp{}) {
+	for _, c := range allAdapters(map[string]stubResp{}, map[string]stubResp{}, map[string]stubResp{}) {
 		t.Run(c.name, func(t *testing.T) {
 			// Адрес, который никто не слушает.
 			res := c.build("http://127.0.0.1:1", "tok").Probe(context.Background(), "own/proj")
@@ -162,9 +186,10 @@ func TestAdapterProbeUnreachable(t *testing.T) {
 
 // Пустой repo — режим «создать новый»: проверяется только токен.
 func TestAdapterProbeTokenOnly(t *testing.T) {
-	cases := bothAdapters(
+	cases := allAdapters(
 		map[string]stubResp{"GET /user": {200, `{"login":"bot"}`}},
 		map[string]stubResp{"GET /api/v4/user": {200, `{"username":"bot"}`}},
+		map[string]stubResp{"GET /api/v1/user": {200, `{"login":"bot"}`}},
 	)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -201,6 +226,10 @@ func TestAdapterCreateRepoInitialises(t *testing.T) {
 		{"gitlab", glStub, func(b string) Adapter {
 			return &GitLab{Token: "t", Client: httpClient(), Base: b}
 		}, "POST /api/v4/projects", `"initialize_with_readme":true`},
+		{"gitea", newStub(map[string]stubResp{
+			"GET /api/v1/user":        {200, `{"login":"bot"}`},
+			"POST /api/v1/user/repos": {201, `{"full_name":"bot/svc","html_url":"https://gt/bot/svc","default_branch":"main"}`},
+		}), func(b string) Adapter { return NewGitea(b, "t") }, "POST /api/v1/user/repos", `"auto_init":true`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -237,6 +266,10 @@ func TestAdapterCreateRepoExists(t *testing.T) {
 			"GET /api/v4/namespaces?search=bot": {200, `[{"id":7,"full_path":"bot"}]`},
 			"POST /api/v4/projects":             {400, `{"message":{"path":["has already been taken"]}}`},
 		}), func(b string) Adapter { return &GitLab{Token: "t", Client: httpClient(), Base: b} }},
+		{"gitea", newStub(map[string]stubResp{
+			"GET /api/v1/user":        {200, `{"login":"bot"}`},
+			"POST /api/v1/user/repos": {409, `{"message":"The repository with the same name already exists."}`},
+		}), func(b string) Adapter { return NewGitea(b, "t") }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -276,6 +309,15 @@ func TestAdapterRegisterWebhook(t *testing.T) {
 				"GET /api/v4/projects/own%2Fproj/hooks": {403, `{"message":"forbidden"}`},
 			}),
 			func(b string) Adapter { return &GitLab{Token: "t", Client: httpClient(), Base: b} }},
+		{"gitea",
+			newStub(map[string]stubResp{
+				"GET /api/v1/repos/own/proj/hooks?limit=50&page=1": {200, `[]`},
+				"POST /api/v1/repos/own/proj/hooks":                {201, `{"id":1}`},
+			}),
+			newStub(map[string]stubResp{
+				"GET /api/v1/repos/own/proj/hooks?limit=50&page=1": {403, `{"message":"forbidden"}`},
+			}),
+			func(b string) Adapter { return NewGitea(b, "t") }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -318,6 +360,10 @@ func TestAdapterWebhookUpsertsSecret(t *testing.T) {
 		{"gitlab", glStub, func(b string) Adapter {
 			return &GitLab{Token: "t", Client: httpClient(), Base: b}
 		}, "PUT /api/v4/projects/own%2Fproj/hooks/7"},
+		{"gitea", newStub(map[string]stubResp{
+			"GET /api/v1/repos/own/proj/hooks?limit=50&page=1": {200, `[{"id":7,"config":{"url":"https://rivet/hook"}}]`},
+			"PATCH /api/v1/repos/own/proj/hooks/7":             {200, `{"id":7}`},
+		}), func(b string) Adapter { return NewGitea(b, "t") }, "PATCH /api/v1/repos/own/proj/hooks/7"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -349,9 +395,13 @@ func TestAdapterWebhookForeignHookNotRegistered(t *testing.T) {
 
 // Merge отдаёт sha merge-коммита независимо от хостинга.
 func TestAdapterMergeReturnsSHA(t *testing.T) {
-	cases := bothAdapters(
+	cases := allAdapters(
 		map[string]stubResp{"PUT /repos/own/proj/pulls/7/merge": {200, `{"sha":"abc123"}`}},
 		map[string]stubResp{"PUT /api/v4/projects/own%2Fproj/merge_requests/7/merge": {200, `{"merge_commit_sha":"abc123"}`}},
+		map[string]stubResp{
+			"POST /api/v1/repos/own/proj/pulls/7/merge": {200, ``},
+			"GET /api/v1/repos/own/proj/pulls/7":        {200, `{"number":7,"merged":true,"merge_commit_sha":"abc123"}`},
+		},
 	)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -455,9 +505,10 @@ func TestFakeMergeConflictOnce(t *testing.T) {
 
 // CreatePR/CreateMR возвращают номер и ссылку одинаково.
 func TestAdapterCreatePR(t *testing.T) {
-	cases := bothAdapters(
+	cases := allAdapters(
 		map[string]stubResp{"POST /repos/own/proj/pulls": {201, `{"number":12,"html_url":"https://gh/pr/12"}`}},
 		map[string]stubResp{"POST /api/v4/projects/own%2Fproj/merge_requests": {201, `{"iid":12,"web_url":"https://gl/mr/12"}`}},
+		map[string]stubResp{"POST /api/v1/repos/own/proj/pulls": {201, `{"number":12,"html_url":"https://gt/pulls/12"}`}},
 	)
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

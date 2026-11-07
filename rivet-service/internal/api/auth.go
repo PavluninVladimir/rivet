@@ -45,7 +45,7 @@ func authExempt(r *http.Request) bool {
 	switch r.URL.Path {
 	case "/api/v1/health", "/api/v1/about", "/api/v1/auth/login",
 		// Webhook'и аутентифицируются подписью хостинга, а не сессией.
-		"/api/v1/webhooks/github", "/api/v1/webhooks/gitlab":
+		"/api/v1/webhooks/github", "/api/v1/webhooks/gitlab", "/api/v1/webhooks/gitea":
 		return true
 	}
 	return false

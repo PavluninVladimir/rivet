@@ -29,13 +29,17 @@ func FuzzWebhookPayload(f *testing.F) {
 	f.Add([]byte(`не json`))
 	f.Add([]byte(`null`))
 	f.Add([]byte(`{"pull_request":{"head":{"ref":""}}}`))
+	f.Add([]byte(`{"action":"reviewed","repository":{"full_name":"o/r"},"review":{"type":"pull_request_review_rejected","content":"x"}}`))
 	f.Fuzz(func(t *testing.T, body []byte) {
 		gh := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(body))
 		gh.Header.Set("X-GitHub-Event", "pull_request")
 		gl := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/gitlab", bytes.NewReader(body))
 		gl.Header.Set("X-Gitlab-Event", "Merge Request Hook")
 
-		for _, ev := range []hostingEvent{parseGitHubEvent(gh, body), parseGitLabEvent(gl, body)} {
+		gt := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/gitea", bytes.NewReader(body))
+		gt.Header.Set("X-Gitea-Event", "pull_request")
+
+		for _, ev := range []hostingEvent{parseGitHubEvent(gh, body), parseGitLabEvent(gl, body), parseGiteaEvent(gt, body)} {
 			if ev.Malformed {
 				// Нечитаемое тело не должно давать данных, по которым
 				// конвейер что-то предпримет.
@@ -70,6 +74,12 @@ func FuzzWebhookSignature(f *testing.F) {
 		gl.Header.Set("X-Gitlab-Token", sig)
 		if got, want := verifyGitLabToken(gl, body, secret), sig == secret; got != want {
 			t.Fatalf("токен GitLab: %q дал %v, ожидалось %v", sig, got, want)
+		}
+
+		gt := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/gitea", bytes.NewReader(body))
+		gt.Header.Set("X-Gitea-Signature", sig)
+		if got, want := verifyGiteaSignature(gt, body, secret), "sha256="+sig == fuzzSign(secret, body); got != want {
+			t.Fatalf("HMAC Gitea: подпись %q для тела длиной %d дала %v, ожидалось %v", sig, len(body), got, want)
 		}
 	})
 }

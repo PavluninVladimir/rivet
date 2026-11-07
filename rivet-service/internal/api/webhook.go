@@ -86,6 +86,22 @@ func (s *Server) gitlabWebhook(w http.ResponseWriter, r *http.Request) {
 	s.handleHostingEvent(w, r, string(scm.ProviderGitLab), body, ev, verifyGitLabToken)
 }
 
+// giteaWebhook — события Gitea и Forgejo: подпись HMAC-SHA256 тела в
+// X-Gitea-Signature (hex, у Forgejo ещё X-Forgejo-Signature), вид события —
+// X-Gitea-Event (add-gitea-adapter).
+func (s *Server) giteaWebhook(w http.ResponseWriter, r *http.Request) {
+	body, ok := s.readWebhookBody(w, r)
+	if !ok {
+		return
+	}
+	ev := parseGiteaEvent(r, body)
+	if ev.Malformed {
+		unprocessable(w, "невалидный payload")
+		return
+	}
+	s.handleHostingEvent(w, r, string(scm.ProviderGitea), body, ev, verifyGiteaSignature)
+}
+
 // Лимиты тела webhook'а: подпись проверяется по всему телу, поэтому оно
 // читается целиком до проверки. Push несёт списки файлов коммитов и
 // бывает больше мегабайта, ему лимит выше.
@@ -208,7 +224,8 @@ func (s *Server) readWebhookBody(w http.ResponseWriter, r *http.Request) ([]byte
 	// прокси) тоже бывает больше мегабайта, а память и так считается по
 	// пришедшим байтам.
 	limit := int64(webhookBodyLimit)
-	if r.Header.Get("X-GitHub-Event") == "push" || r.Header.Get("X-Gitlab-Event") == "Push Hook" {
+	if r.Header.Get("X-GitHub-Event") == "push" || r.Header.Get("X-Gitlab-Event") == "Push Hook" ||
+		giteaEvent(r) == "push" {
 		limit = pushBodyLimit
 	}
 	// Отказ без чтения тела: соединение закрывается, иначе сервер ждал бы
@@ -259,6 +276,18 @@ func verifyGitHubSignature(r *http.Request, body []byte, secret string) bool {
 	mac.Write(body)
 	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	return hmac.Equal([]byte(r.Header.Get("X-Hub-Signature-256")), []byte(want))
+}
+
+// verifyGiteaSignature — HMAC-SHA256 тела в hex без префикса. Forgejo
+// шлёт ту же подпись и под своим именем.
+func verifyGiteaSignature(r *http.Request, body []byte, secret string) bool {
+	got := r.Header.Get("X-Gitea-Signature")
+	if got == "" {
+		got = r.Header.Get("X-Forgejo-Signature")
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return hmac.Equal([]byte(got), []byte(hex.EncodeToString(mac.Sum(nil))))
 }
 
 func verifyGitLabToken(r *http.Request, _ []byte, secret string) bool {
@@ -691,6 +720,106 @@ func parseGitLabEvent(r *http.Request, body []byte) hostingEvent {
 		ev.Branch, ev.Body = payload.MergeRequest.SourceBranch, a.Note
 		// URL — сам комментарий, PRURL — MR: сверка задачи идёт по второму.
 		ev.URL, ev.PRURL = a.URL, payload.MergeRequest.URL
+	}
+	return ev
+}
+
+// giteaEvent — вид события Gitea (у Forgejo — и под своим именем).
+func giteaEvent(r *http.Request) string {
+	if ev := r.Header.Get("X-Gitea-Event"); ev != "" {
+		return ev
+	}
+	return r.Header.Get("X-Forgejo-Event")
+}
+
+// parseGiteaEvent — события Gitea и Forgejo. Форма тела близка к GitHub:
+// merge и закрытие PR — pull_request с action closed, review человека —
+// отдельные события по исходу (одобрение, запрос изменений, комментарий)
+// с текстом в review.content, итог Actions — workflow_run в форме GitHub.
+func parseGiteaEvent(r *http.Request, body []byte) hostingEvent {
+	var payload struct {
+		Action string `json:"action"`
+		// push: ветка и новая вершина.
+		Ref        string `json:"ref"`
+		After      string `json:"after"`
+		Repository struct {
+			FullName string `json:"full_name"`
+		} `json:"repository"`
+		PullRequest struct {
+			Merged         bool   `json:"merged"`
+			HTMLURL        string `json:"html_url"`
+			MergeCommitSHA string `json:"merge_commit_sha"`
+			Head           struct {
+				Ref string `json:"ref"`
+			} `json:"head"`
+			MergedBy struct {
+				Login string `json:"login"`
+			} `json:"merged_by"`
+		} `json:"pull_request"`
+		Sender struct {
+			Login string `json:"login"`
+		} `json:"sender"`
+		Review struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		} `json:"review"`
+		WorkflowRun struct {
+			Name         string `json:"name"`
+			DisplayTitle string `json:"display_title"`
+			HeadBranch   string `json:"head_branch"`
+			Conclusion   string `json:"conclusion"`
+			Status       string `json:"status"`
+			HTMLURL      string `json:"html_url"`
+		} `json:"workflow_run"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return hostingEvent{Malformed: true}
+	}
+	ev := hostingEvent{RepoPath: payload.Repository.FullName}
+	pr := payload.PullRequest
+	review := func(state string) hostingEvent {
+		ev.Kind, ev.State = hookReview, state
+		ev.Branch, ev.URL, ev.PRURL = pr.Head.Ref, pr.HTMLURL, pr.HTMLURL
+		ev.Actor, ev.Body = payload.Sender.Login, payload.Review.Content
+		return ev
+	}
+	switch giteaEvent(r) {
+	case "push":
+		if branch, ok := strings.CutPrefix(payload.Ref, "refs/heads/"); ok {
+			ev.Kind, ev.Branch, ev.MergeSHA = hookPush, branch, payload.After
+		}
+	case "pull_request":
+		if payload.Action != "closed" {
+			return ev
+		}
+		ev.Branch, ev.URL, ev.PRURL, ev.MergeSHA = pr.Head.Ref, pr.HTMLURL, pr.HTMLURL, pr.MergeCommitSHA
+		if pr.Merged {
+			ev.Kind, ev.Actor = hookMerge, firstNonEmpty(pr.MergedBy.Login, payload.Sender.Login)
+			return ev
+		}
+		ev.Kind, ev.Actor = hookPRClosed, payload.Sender.Login
+	case "pull_request_approved":
+		return review("approved")
+	case "pull_request_rejected":
+		return review("changes_requested")
+	case "pull_request_comment":
+		// Комментарий review; комментарий PR без review приходит событием
+		// issue_comment и, как у GitHub, конвейер не трогает.
+		if payload.Action != "reviewed" {
+			return ev
+		}
+		return review("commented")
+	case "workflow_run":
+		run := payload.WorkflowRun
+		if run.Status != "completed" {
+			return ev
+		}
+		ok, decisive := checksOutcome(run.Conclusion)
+		if !decisive {
+			return ev
+		}
+		ev.Kind, ev.Branch, ev.OK = hookChecks, run.HeadBranch, ok
+		ev.Name, ev.URL = firstNonEmpty(run.Name, run.DisplayTitle), run.HTMLURL
 	}
 	return ev
 }
