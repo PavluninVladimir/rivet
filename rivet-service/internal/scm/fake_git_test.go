@@ -135,13 +135,16 @@ func TestFakeGitHeadAndRead(t *testing.T) {
 		t.Fatalf("RepoFS: %q %v", raw, err)
 	}
 
-	// Файлы, записанные WriteFile (публикация GitOps), читаются из памяти,
-	// как без git-режима.
+	// Файл, записанный WriteFile (публикация GitOps), — коммит в ветку:
+	// ReadFile читает его из git, вершина ветки сдвинулась.
 	if _, err := f.WriteFile(ctx, "own/proj", "main", "deploy/app.yaml", "", "kind: x\n", "m"); err != nil {
 		t.Fatal(err)
 	}
 	if fc, err := f.ReadFile(ctx, "own/proj", "main", "deploy/app.yaml"); err != nil || fc.Content != "kind: x\n" {
-		t.Fatalf("файл из памяти: %+v %v", fc, err)
+		t.Fatalf("записанный файл: %+v %v", fc, err)
+	}
+	if next := remoteSHA(t, work, "main"); next == head {
+		t.Fatal("запись в git-режиме не сдвинула ветку")
 	}
 }
 
@@ -175,6 +178,163 @@ func TestFakeGitWriteAfterRead(t *testing.T) {
 	}
 	if _, err := f.WriteFile(ctx, "own/proj", "gitops/new", "app.yaml", "", "kind: x\n", "m"); !errors.Is(err, ErrRefNotFound) {
 		t.Fatalf("запись в ветку, которой нет в git: %v", err)
+	}
+	// Версия, прочитанная до записи, устарела: второй писатель с ней
+	// отклоняется, а не затирает чужую версию.
+	if _, err := f.WriteFile(ctx, "own/proj", "main", "shared.txt", fc.FileID, "y\n", "m"); err == nil {
+		t.Fatal("запись по устаревшему sha блоба должна отклоняться")
+	}
+	if _, err := f.WriteFile(ctx, "own/proj", "main", "deploy/new.yaml", "", "kind: y\n", "m"); err == nil {
+		t.Fatal("запись нового файла поверх существующего должна отклоняться")
+	}
+	for _, bad := range []string{"", "-x", "../x", "docs/architecture"} {
+		if _, err := f.WriteFile(ctx, "own/proj", "main", bad, "", "x\n", "m"); err == nil {
+			t.Fatalf("путь %q должен отклоняться", bad)
+		}
+	}
+}
+
+// Запись в git-режиме — настоящий коммит: родитель — прежняя вершина,
+// сообщение — переданное, в дереве изменён только записанный файл, ссылка
+// ведёт на SHA коммита. Пустая ветка — ветка HEAD. Так окружение GitOps
+// e2e-стенда видит версию в bare-репозитории, как GitOps-контроллер.
+func TestFakeGitWriteCommits(t *testing.T) {
+	repos, work := gitStand(t)
+	f := NewFakeGit(repos, "own/proj")
+	ctx := context.Background()
+	before := remoteSHA(t, work, "main")
+
+	c, err := f.WriteFile(ctx, "own/proj", "main", "/envs/prod/version", "", "v1\n", "prod: версия v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := remoteSHA(t, work, "main"); c.SHA != after || len(c.SHA) != 40 {
+		t.Fatalf("коммит %q, вершина %q", c.SHA, after)
+	}
+	if c.URL != "https://fake.local/own/proj/commit/"+c.SHA {
+		t.Fatalf("ссылка на коммит: %q", c.URL)
+	}
+	if parent := fakeGitT(t, work, "rev-parse", c.SHA+"^"); parent != before {
+		t.Fatalf("родитель %q, ожидался %q", parent, before)
+	}
+	if msg := fakeGitT(t, work, "log", "-1", "--format=%s", c.SHA); msg != "prod: версия v1" {
+		t.Fatalf("сообщение коммита: %q", msg)
+	}
+	if got := fakeGitT(t, work, "show", c.SHA+":envs/prod/version"); got != "v1" {
+		t.Fatalf("файл в коммите: %q", got)
+	}
+	if diff := fakeGitT(t, work, "diff", "--name-only", before, c.SHA); diff != "envs/prod/version" {
+		t.Fatalf("изменённые файлы: %q", diff)
+	}
+
+	// Обновление по sha блоба и запись без ветки (ветка HEAD).
+	fc, err := f.ReadFile(ctx, "own/proj", "main", "envs/prod/version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := f.WriteFile(ctx, "own/proj", "", "envs/prod/version", fc.FileID, "v2\n", "prod: версия v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if top := remoteSHA(t, work, "main"); top != c2.SHA {
+		t.Fatalf("вершина после второй записи: %q", top)
+	}
+	if parent := fakeGitT(t, work, "rev-parse", c2.SHA+"^"); parent != c.SHA {
+		t.Fatalf("второй коммит не поверх первого: %q", parent)
+	}
+	if got, _ := f.ReadFile(ctx, "own/proj", "main", "envs/prod/version"); got.Content != "v2\n" {
+		t.Fatalf("после второй записи: %+v", got)
+	}
+	// Ветку сдвинул кто-то ещё (push на стенде): его коммит остаётся в
+	// истории, следующая запись ложится поверх него.
+	branchT(t, work, "main", "other.txt", "push\n")
+	pushed := remoteSHA(t, work, "main")
+	if parent := fakeGitT(t, work, "rev-parse", pushed+"^"); parent != c2.SHA {
+		t.Fatalf("push не поверх записи: %q", parent)
+	}
+	fc, _ = f.ReadFile(ctx, "own/proj", "main", "envs/prod/version")
+	c3, err := f.WriteFile(ctx, "own/proj", "main", "envs/prod/version", fc.FileID, "v3\n", "m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteSHA(t, work, "main")
+	if parent := fakeGitT(t, work, "rev-parse", c3.SHA+"^"); parent != pushed {
+		t.Fatalf("запись не поверх чужого push: %q, ожидался %q", parent, pushed)
+	}
+}
+
+// Две записи по одной прочитанной версии (два rivetd или повтор
+// публикации): проходит ровно одна, вторая отклоняется как устаревшая.
+func TestFakeGitWriteRace(t *testing.T) {
+	repos, _ := gitStand(t)
+	f := NewFakeGit(repos, "own/proj")
+	ctx := context.Background()
+	fc, err := f.ReadFile(ctx, "own/proj", "main", "shared.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	errs := make(chan error, 2)
+	for _, v := range []string{"a\n", "b\n"} {
+		go func() {
+			_, err := f.WriteFile(ctx, "own/proj", "main", "shared.txt", fc.FileID, v, "m")
+			errs <- err
+		}()
+	}
+	ok := 0
+	for range 2 {
+		if <-errs == nil {
+			ok++
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("успешных записей %d, ожидалась одна", ok)
+	}
+}
+
+// Тег с именем ветки: по правилам git он стоит раньше ветки, но ReadFile
+// читает ветку, как и запись. Иначе запись по sha блоба из ReadFile
+// отклонялась бы как устаревшая. SHA по-прежнему читается как версия.
+func TestFakeGitBranchBeforeTag(t *testing.T) {
+	repos, work := gitStand(t)
+	f := NewFakeGit(repos, "own/proj")
+	ctx := context.Background()
+	base := remoteSHA(t, work, "main")
+	branchT(t, work, "main", "shared.txt", "next\n")
+	fakeGitT(t, work, "push", "-q", "origin", base+":refs/tags/main")
+
+	fc, err := f.ReadFile(ctx, "own/proj", "main", "shared.txt")
+	if err != nil || fc.Content != "next\n" {
+		t.Fatalf("ReadFile при теге с именем ветки: %+v %v", fc, err)
+	}
+	if _, err := f.WriteFile(ctx, "own/proj", "main", "shared.txt", fc.FileID, "x\n", "m"); err != nil {
+		t.Fatalf("запись по sha блоба из ReadFile: %v", err)
+	}
+	if old, err := f.ReadFile(ctx, "own/proj", base, "shared.txt"); err != nil || old.Content != "base\n" {
+		t.Fatalf("чтение по SHA: %+v %v", old, err)
+	}
+}
+
+// Вне git-режима запись по-прежнему живёт в памяти: новый файл — без
+// версии, обновление — с версией, которую отдал ReadFile.
+func TestFakeWriteFileMemory(t *testing.T) {
+	f := NewFakeGit("")
+	ctx := context.Background()
+	c, err := f.WriteFile(ctx, "e2e/demo", "main", "envs/prod/version", "", "main\n", "m")
+	if err != nil || !strings.HasPrefix(c.SHA, "fake-commit-") || c.URL != "https://fake.local/e2e/demo/commit/"+c.SHA {
+		t.Fatalf("запись: %+v %v", c, err)
+	}
+	fc, err := f.ReadFile(ctx, "e2e/demo", "main", "envs/prod/version")
+	if err != nil || fc.Content != "main\n" {
+		t.Fatalf("чтение: %+v %v", fc, err)
+	}
+	if _, err := f.WriteFile(ctx, "e2e/demo", "main", "envs/prod/version", "", "x\n", "m"); err == nil {
+		t.Fatal("перезапись без версии должна отклоняться")
+	}
+	if _, err := f.WriteFile(ctx, "e2e/demo", "main", "envs/new", "fake-file", "x\n", "m"); err == nil {
+		t.Fatal("новый файл с версией должен отклоняться")
+	}
+	if _, err := f.WriteFile(ctx, "e2e/demo", "main", "envs/prod/version", fc.FileID, "x\n", "m"); err != nil {
+		t.Fatalf("обновление по версии: %v", err)
 	}
 }
 

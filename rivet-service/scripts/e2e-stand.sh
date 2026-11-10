@@ -33,9 +33,9 @@ git init -b main -q "$SEED"
 
 # Репозиторий сценариев архитектуры e2e/arch: README и корректное описание
 # демо-CRM (internal/architecture/testdata/crm) на основной ветке. Для
-# него одного включён git-режim fake SCM (RIVET_FAKE_GIT_REPOS ниже):
-# снимок архитектуры читается из настоящей версии, остальные сценарии
-# работают на e2e/demo в прежнем режиме.
+# него (и для e2e/gitops ниже) включён git-режим fake SCM
+# (RIVET_FAKE_GIT_REPOS): снимок архитектуры читается из настоящей версии,
+# остальные сценарии работают на e2e/demo в прежнем режиме.
 ARCH_BARE="$STAND_DIR/repos/e2e/arch.git"
 git init --bare -b main -q "$ARCH_BARE"
 ARCH_SEED="$STAND_DIR/seed-arch"
@@ -48,6 +48,20 @@ printf '# CRM\n\nУчёт контактов и сделок отдела про
   && git -c user.email=e2e@rivet -c user.name=e2e commit -q -m "seed" \
   && git push -q "$ARCH_BARE" main)
 
+# Репозиторий конфигурации GitOps e2e/gitops (сценарий публикации через
+# GitOps): тоже в git-режиме fake SCM, поэтому публикация коммитит версию
+# в него настоящим коммитом. Окружение стенда (gitops-env ниже) отвечает
+# версией из его ветки main, как приложение после синхронизации.
+GITOPS_BARE="$STAND_DIR/repos/e2e/gitops.git"
+git init --bare -b main -q "$GITOPS_BARE"
+GITOPS_SEED="$STAND_DIR/seed-gitops"
+git init -b main -q "$GITOPS_SEED"
+printf '# Конфигурация окружений e2e\n' > "$GITOPS_SEED/README.md"
+(cd "$GITOPS_SEED" \
+  && git add -A \
+  && git -c user.email=e2e@rivet -c user.name=e2e commit -q -m "seed" \
+  && git push -q "$GITOPS_BARE" main)
+
 # Свежая сборка консоли во встроенную статику, затем бинарники. Путь консоли
 # вычисляется через cd: если rivet-service — символическая ссылка, `..` в
 # пути для cp разворачивался бы от цели ссылки, а не от её каталога.
@@ -57,7 +71,8 @@ rm -rf "$SERVICE_DIR/internal/webui/dist"
 cp -r "$WEB_DIR/dist" "$SERVICE_DIR/internal/webui/dist"
 (cd "$SERVICE_DIR" && go build -o "$STAND_DIR/rivetd" ./cmd/rivetd \
   && go build -o "$STAND_DIR/rivet-runner" ./cmd/rivet-runner \
-  && go build -o "$STAND_DIR/fake-llm" ./cmd/fake-llm)
+  && go build -o "$STAND_DIR/fake-llm" ./cmd/fake-llm \
+  && go build -o "$STAND_DIR/gitops-env" ./scripts/e2e-gitops-env)
 
 cleanup() { kill 0 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
@@ -70,6 +85,19 @@ for _ in $(seq 1 50); do
   curl -s "http://localhost:$LLM_PORT/v1/models" >/dev/null 2>&1 && break
   sleep 0.1
 done
+
+# Окружение GitOps стенда: порт выбирает ОС, адрес — в
+# $STAND_DIR/gitops-env.addr (его читает сценарий GitOps rivet-e2e).
+# Первый запуск свежего бинарника может задержать проверка ОС, поэтому
+# окно до 30 секунд, а ранний выход программы виден сразу.
+"$STAND_DIR/gitops-env" -repo "$GITOPS_BARE" -ref main -addr-file "$STAND_DIR/gitops-env.addr" &
+GITOPS_PID=$!
+for _ in $(seq 1 300); do
+  [ -s "$STAND_DIR/gitops-env.addr" ] && break
+  kill -0 "$GITOPS_PID" 2>/dev/null || break
+  sleep 0.1
+done
+[ -s "$STAND_DIR/gitops-env.addr" ] || { echo "e2e-stand: окружение GitOps не запустилось" >&2; exit 1; }
 
 # Идентичность стенда: bootstrap-админ (см. ниже env rivetd), PAT для
 # CLI/скриптов в $STAND_DIR/token и токен регистрации runner'ов. Runner'ы
@@ -182,7 +210,7 @@ exec env \
   RIVET_DATABASE_URL="$DB_URL" \
   RIVET_SCM=fake \
   RIVET_FAKE_GIT_DIR="$STAND_DIR/repos" \
-  RIVET_FAKE_GIT_REPOS=e2e/arch \
+  RIVET_FAKE_GIT_REPOS=e2e/arch,e2e/gitops \
   RIVET_ALLOW_PRIVATE_URLS=true \
   RIVET_GITHUB_WEBHOOK_SECRET="${E2E_WEBHOOK_SECRET:-e2e-webhook-secret}" \
   RIVET_ADMIN_LOGIN="$ADMIN_LOGIN" \
