@@ -41,10 +41,32 @@ jobs:
       - run: go test ./...
         env:
           RIVET_DATABASE_URL: postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable
+      # Версия закреплена: с latest новые проверки приходили в CI раньше,
+      # чем локально. Обновление отдельным PR вместе с исправлениями
+      # находок; локально та же версия: go install
+      # github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0.
       - uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.15.0
           working-directory: rivet-service
+
+  # Встроенная консоль: internal/webui/dist совпадает со сборкой коммита
+  # main rivet-web из internal/webui/REVISION. Обновление: make ui-sync в
+  # rivet-service. Node той же версии, что в CI rivet-web: сборка сверяется
+  # побайтно.
+  webui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rivet-service
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: make ui-check
 
   # Короткий фаззинг-smoke: ловит регрессии по корпусу и свежие крэши.
   # Таргеты — чистые функции, БД не нужна.
