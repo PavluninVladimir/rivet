@@ -610,10 +610,18 @@ func (e *Engine) hostJob(ctx context.Context, h domain.EnvHost, p infra.Provider
 		e.hostNote(ctx, h, "ждём deploy-runner с поддержкой заданий хоста (capability deploy"+capsText(env.RunnerCaps)+")")
 		return now.Add(hostRetryInterval)
 	}
+	if h.Provider == infra.KindLocal && kind == hostJobTeardown && h.LocalRunner == "" {
+		e.hostNote(ctx, h, "машина локального хоста неизвестна: автоматическое снятие недоступно")
+		return now.Add(hostRetryInterval)
+	}
+	ownership := map[string]any{"job_id": "", "job_kind": kind, "job_runner": runnerID,
+		"job_started_at": store.SQL("now()"), "detail": ""}
+	if h.Provider == infra.KindLocal {
+		ownership["local_runner"] = runnerID
+	}
 	jobID := newHostJobID()
-	_, claimed, err := e.St.ChangeHost(ctx, h.ID, store.HostChange{From: []string{h.State}, Where: "job_id = ''",
-		Set: map[string]any{"job_id": jobID, "job_kind": kind, "job_runner": runnerID,
-			"job_started_at": store.SQL("now()"), "detail": ""}})
+	ownership["job_id"] = jobID
+	_, claimed, err := e.St.ChangeHost(ctx, h.ID, store.HostChange{From: []string{h.State}, Where: "job_id = '' AND (provider <> 'local' OR local_runner IN ('', {1}))", Args: []any{runnerID}, Set: ownership})
 	if err != nil || !claimed {
 		return now.Add(hostRetryInterval)
 	}
@@ -666,6 +674,21 @@ func (e *Engine) OnHostJobResult(ctx context.Context, runnerID string, r *pb.Hos
 	}
 	output := cleanDetail(r.Output)
 	if !r.Ok {
+		if h.Provider != infra.KindLocal && h.JobKind == hostJobBootstrap && h.HostKey == "" && strings.TrimSpace(r.HostKey) != "" {
+			key := strings.TrimSpace(r.HostKey)
+			if err := domain.ValidHostKey(key); err != nil {
+				return err
+			}
+			updated, ok, err := e.St.ChangeHost(ctx, h.ID, store.HostChange{From: []string{domain.HostBootstrapping},
+				Where: "job_id = {1} AND host_key = ''", Args: []any{r.JobId}, Set: map[string]any{"host_key": key}})
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+			h = updated
+		}
 		e.hostJobFailed(ctx, h, output)
 		return nil
 	}
@@ -761,14 +784,14 @@ func (e *Engine) hostBilling(ctx context.Context, h domain.EnvHost, p infra.Prov
 		if errors.Is(err, infra.ErrNotFound) {
 			msg := "сервер " + h.ServerID + " не найден у провайдера: возможно, его удалили в панели RUVDS. Удалите хост окружения и запросите новый"
 			if _, _, cerr := e.St.ChangeHost(ctx, h.ID, store.HostChange{From: []string{domain.HostReady},
-				Set: map[string]any{"detail": msg}, Open: []store.HostAttention{{Reason: domain.AttHostFailed, Message: msg}}}); cerr != nil {
+				Set: map[string]any{"detail": msg, "next_attempt_at": now.Add(hostBillingEvery)}, Open: []store.HostAttention{{Reason: domain.AttHostFailed, Message: msg}}}); cerr != nil {
 				slog.Error("хост окружения: сервер пропал", "host", h.ID, "err", cerr)
 			}
 			return now.Add(hostBillingEvery)
 		}
 		return e.backoff(err).Add(30 * time.Minute)
 	}
-	set := map[string]any{"cost_checked_at": store.SQL("now()"), "paid_till": b.PaidTill}
+	set := map[string]any{"cost_checked_at": store.SQL("now()"), "paid_till": b.PaidTill, "next_attempt_at": now.Add(hostBillingEvery)}
 	c := store.HostChange{From: []string{domain.HostReady}, Set: set}
 	if b.Cost != nil {
 		set["cost_amount"], set["cost_currency"], set["cost_period"] = b.Cost.Amount, b.Cost.Currency, b.Cost.Period

@@ -47,6 +47,7 @@ func (a *agent) executeHostJob(ctx context.Context, job *pb.HostJob, emit func(*
 		return
 	}
 	res.Output = out.String()
+	res.HostKey = hostKey
 	if err != nil {
 		if jctx.Err() == context.DeadlineExceeded {
 			err = fmt.Errorf("таймаут задания %s", timeout)
@@ -61,7 +62,7 @@ func (a *agent) executeHostJob(ctx context.Context, job *pb.HostJob, emit func(*
 
 // runHostJob ждёт SSH нового сервера, исполняет скрипт и возвращает
 // принятый ключ хоста (только при первом подключении).
-func (a *agent) runHostJob(ctx context.Context, job *pb.HostJob, feed func([]byte)) (string, error) {
+func (a *agent) runHostJob(ctx context.Context, job *pb.HostJob, feed func([]byte)) (key string, resultErr error) {
 	run := scriptRun{Host: job.Host, HostKey: job.HostKey, Dir: a.cfg.Workdir, Script: job.Script, Env: job.Env}
 	if job.Host != "" && job.AcceptNewHostKey {
 		f, err := os.CreateTemp("", "rivet-known-hosts-*")
@@ -71,6 +72,15 @@ func (a *agent) runHostJob(ctx context.Context, job *pb.HostJob, feed func([]byt
 		_ = f.Close()
 		defer os.Remove(f.Name())
 		run.KnownHosts, run.HostKey = f.Name(), ""
+		defer func() {
+			accepted, err := acceptedHostKey(run.KnownHosts)
+			if accepted != "" {
+				key = accepted
+			}
+			if resultErr == nil && err != nil {
+				resultErr = err
+			}
+		}()
 	}
 	if job.Host != "" && job.SshWaitS > 0 {
 		if err := waitSSH(ctx, run, time.Duration(job.SshWaitS)*time.Second, feed); err != nil {

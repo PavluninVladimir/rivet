@@ -215,6 +215,7 @@ type EnvHost struct {
 	JobID        string
 	JobKind      string
 	JobRunner    string
+	LocalRunner  string
 	JobStartedAt *time.Time
 	Attempts     int
 	NeedsRetry   bool

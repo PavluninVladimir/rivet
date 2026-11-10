@@ -343,14 +343,8 @@ func (s *Server) assignLocalPort(w http.ResponseWriter, r *http.Request, cfg *do
 		}
 		return true
 	}
-	for port := domain.LocalPortFirst; port <= domain.LocalPortLast; port++ {
-		if _, ok := used[port]; !ok {
-			p.Port = port
-			return true
-		}
-	}
-	fieldErr(w, "invalid", "config.provision.port", "свободных портов в диапазоне не осталось: задайте порт")
-	return false
+	// Автоматический порт выбирается при сохранении в транзакции Store.
+	return true
 }
 
 // checkInfraConn: подключение привязки существует, включено и того же

@@ -51,54 +51,89 @@ func orEmptyCaps(caps []string) []string {
 }
 
 // CreateEnvironment создаёт окружение; дубль имени в проекте — ErrConflict.
-func (s *Store) CreateEnvironment(ctx context.Context, e domain.Environment) (domain.Environment, error) {
-	cfg, err := json.Marshal(e.Config)
-	if err != nil {
-		return e, err
-	}
-	out, err := scanEnv(s.Pool.QueryRow(ctx, `
-		INSERT INTO environments (project_id, name, exec_type, trigger, config, runner_caps)
-		VALUES ($1,$2,$3,$4,$5,$6)
-		ON CONFLICT (project_id, name) DO NOTHING
-		RETURNING `+envCols, e.ProjectID, e.Name, e.ExecType, e.Trigger, cfg, orEmptyCaps(e.RunnerCaps)))
-	if errors.Is(err, pgx.ErrNoRows) {
-		return out, fmt.Errorf("окружение %q: %w", e.Name, ErrConflict)
-	}
+func (s *Store) CreateEnvironment(ctx context.Context, e domain.Environment) (out domain.Environment, err error) {
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := allocateLocalPort(ctx, tx, &e); err != nil {
+			return err
+		}
+		cfg, err := json.Marshal(e.Config)
+		if err != nil {
+			return err
+		}
+		out, err = scanEnv(tx.QueryRow(ctx, `
+            INSERT INTO environments (project_id, name, exec_type, trigger, config, runner_caps)
+            VALUES ($1,$2,$3,$4,$5,$6)
+            ON CONFLICT (project_id, name) DO NOTHING
+            RETURNING `+envCols, e.ProjectID, e.Name, e.ExecType, e.Trigger, cfg, orEmptyCaps(e.RunnerCaps)))
+		if errors.Is(err, pgx.ErrNoRows) || isUnique(err) {
+			return fmt.Errorf("окружение %q: %w", e.Name, ErrConflict)
+		}
+		return err
+	})
 	return out, err
 }
 
-// UpdateEnvironment заменяет имя, правило запуска и конфигурацию целиком
-// (PATCH по контракту — replace, не merge).
-func (s *Store) UpdateEnvironment(ctx context.Context, e domain.Environment) (domain.Environment, error) {
-	cfg, err := json.Marshal(e.Config)
-	if err != nil {
-		return e, err
-	}
-	out, err := scanEnv(s.Pool.QueryRow(ctx, `
-		UPDATE environments SET name=$2, trigger=$3, config=$4, runner_caps=$5
-		WHERE id=$1
-		  AND NOT EXISTS (SELECT 1 FROM deployments d
-		                  WHERE d.env_id = environments.id
-		                    AND d.status IN ('queued','deploying','verifying'))
-		RETURNING `+envCols, e.ID, e.Name, e.Trigger, cfg, orEmptyCaps(e.RunnerCaps)))
-	if isUnique(err) {
-		return out, fmt.Errorf("окружение %q: %w", e.Name, ErrConflict)
-	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Строка есть, но условие не выполнено: под окружением идёт
-		// публикация, а она читает конфигурацию на ходу.
-		if exists, cerr := s.envExists(ctx, e.ID); cerr == nil && exists {
-			return out, fmt.Errorf("у окружения идёт публикация: %w", ErrConflict)
+// UpdateEnvironment меняет конфигурацию и резервирует порт в одной транзакции.
+func (s *Store) UpdateEnvironment(ctx context.Context, e domain.Environment) (out domain.Environment, err error) {
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := allocateLocalPort(ctx, tx, &e); err != nil {
+			return err
 		}
-	}
-	return out, nf(err)
+		cfg, err := json.Marshal(e.Config)
+		if err != nil {
+			return err
+		}
+		out, err = scanEnv(tx.QueryRow(ctx, `
+            UPDATE environments SET name=$2, trigger=$3, config=$4, runner_caps=$5
+            WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM deployments d
+                WHERE d.env_id=environments.id AND d.status IN ('queued','deploying','verifying'))
+            RETURNING `+envCols, e.ID, e.Name, e.Trigger, cfg, orEmptyCaps(e.RunnerCaps)))
+		if isUnique(err) {
+			return fmt.Errorf("окружение %q: %w", e.Name, ErrConflict)
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			var exists bool
+			if cerr := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM environments WHERE id=$1)`, e.ID).Scan(&exists); cerr != nil {
+				return cerr
+			}
+			if exists {
+				return fmt.Errorf("у окружения идёт публикация: %w", ErrConflict)
+			}
+		}
+		return nf(err)
+	})
+	return out, err
 }
 
-func (s *Store) envExists(ctx context.Context, envID string) (bool, error) {
-	var ok bool
-	err := s.Pool.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM environments WHERE id=$1)`, envID).Scan(&ok)
-	return ok, err
+// allocateLocalPort сериализует выбор и сохранение порта между всеми rivetd.
+// Уникальный индекс дополнительно защищает записи вне этого пути.
+func allocateLocalPort(ctx context.Context, tx pgx.Tx, env *domain.Environment) error {
+	p := env.Config.Provision
+	if p == nil || p.Provider != domain.ProvisionLocal {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(9250048)`); err != nil {
+		return err
+	}
+	if p.Port != 0 {
+		var used bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM environments
+            WHERE config->'provision'->>'provider'='local' AND (config->'provision'->>'port')::int=$1 AND id::text<>$2)`, p.Port, env.ID).Scan(&used); err != nil {
+			return err
+		}
+		if used {
+			return fmt.Errorf("локальный порт %d занят: %w", p.Port, ErrConflict)
+		}
+		return nil
+	}
+	err := tx.QueryRow(ctx, `SELECT port FROM generate_series($1::int,$2::int) port
+        WHERE NOT EXISTS (SELECT 1 FROM environments WHERE config->'provision'->>'provider'='local'
+            AND (config->'provision'->>'port')::int=port AND id::text<>$3) ORDER BY port LIMIT 1`,
+		domain.LocalPortFirst, domain.LocalPortLast, env.ID).Scan(&p.Port)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("свободных локальных портов не осталось: %w", ErrConflict)
+	}
+	return err
 }
 
 // DeleteEnvironment удаляет окружение с историей публикаций;
@@ -285,6 +320,8 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 				WHERE r.status = 'idle' AND NOT r.draining
 				  AND r.capabilities @> ARRAY['deploy']
 				  AND r.capabilities @> e.runner_caps
+                      AND (COALESCE(e.config->'provision'->>'provider','') <> 'local' OR EXISTS (
+                          SELECT 1 FROM env_hosts h WHERE h.env_id=e.id AND h.state='ready' AND h.local_runner=r.id))
 				-- Сначала самый «узкий» подходящий runner: иначе обычная
 				-- публикация заняла бы runner с редкими capability, и
 				-- публикация, которой он нужен, ждала бы зря.

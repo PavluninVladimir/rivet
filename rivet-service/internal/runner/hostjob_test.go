@@ -157,3 +157,14 @@ func TestFeaturesDeclareHostJobs(t *testing.T) {
 		t.Fatalf("runner агента объявил host_jobs: %v", f)
 	}
 }
+
+func TestHostJobFailureReturnsAcceptedKey(t *testing.T) {
+	fakeSSH(t)
+	a := &agent{cfg: Config{Workdir: t.TempDir()}}
+	emit, result := collectHostJob(t)
+	go a.executeHostJob(context.Background(), &pb.HostJob{JobId: "failed-bootstrap", Host: "root@10.77.0.5", Script: "exit 3", AcceptNewHostKey: true}, emit)
+	r := result()
+	if r.Ok || r.HostKey == "" {
+		t.Fatalf("ошибка bootstrap не должна терять принятый ключ: %+v", r)
+	}
+}

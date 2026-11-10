@@ -97,7 +97,7 @@ func (e *Engine) HostAction(ctx context.Context, env domain.Environment, in Host
 		c = store.HostChange{From: []string{domain.HostDeleteRequested}, To: domain.HostDeleting,
 			Where: "delete_requested_by <> ''",
 			Set: map[string]any{"delete_confirmed_by": in.Actor, "job_id": "", "job_kind": "", "job_runner": "",
-				"job_started_at": nil, "needs_retry": false, "attempts": 0, "next_attempt_at": store.SQL("now()")},
+				"job_started_at": nil, "needs_retry": false, "attempts": 0, "action_id": "", "delete_sent_at": nil, "next_attempt_at": store.SQL("now()")},
 			Resolve: []domain.AttentionReason{domain.AttHostDelete, domain.AttHostFailed},
 			// Адрес и ключ уходят из конфигурации сразу: ни публикация, ни
 			// проверка не пойдут на сервер, который удаляется.

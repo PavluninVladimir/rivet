@@ -24,7 +24,7 @@ const hostCols = `h.id::text, h.env_id::text, e.project_id::text, h.provider, CO
 	h.quote_amount, h.quote_currency, h.quote_period, h.balance_amount, h.balance_currency,
 	h.approved_by, h.approved_at, h.approved_amount, h.create_sent_at,
 	h.server_id, h.action_id, h.address, h.host_key, h.waiting_payment, h.port,
-	h.job_id, h.job_kind, h.job_runner, h.job_started_at, h.attempts, h.needs_retry,
+	h.job_id, h.job_kind, h.job_runner, h.local_runner, h.job_started_at, h.attempts, h.needs_retry,
 	h.remove_volumes, h.delete_requested_by, h.delete_confirmed_by, h.delete_sent_at,
 	h.paid_till, h.cost_amount, h.cost_currency, h.cost_period, h.cost_checked_at,
 	h.failure, h.detail, h.next_attempt_at, h.created_at, h.updated_at, h.ended_at`
@@ -42,7 +42,7 @@ func scanHost(row pgx.Row) (domain.EnvHost, error) {
 		&h.QuoteAmount, &h.QuoteCurrency, &h.QuotePeriod, &h.BalanceAmount, &h.BalanceCurrency,
 		&h.ApprovedBy, &h.ApprovedAt, &h.ApprovedAmount, &h.CreateSentAt,
 		&h.ServerID, &h.ActionID, &h.Address, &h.HostKey, &h.WaitingPayment, &h.Port,
-		&h.JobID, &h.JobKind, &h.JobRunner, &h.JobStartedAt, &h.Attempts, &h.NeedsRetry,
+		&h.JobID, &h.JobKind, &h.JobRunner, &h.LocalRunner, &h.JobStartedAt, &h.Attempts, &h.NeedsRetry,
 		&h.RemoveVolumes, &h.DeleteRequestedBy, &h.DeleteConfirmedBy, &h.DeleteSentAt,
 		&h.PaidTill, &h.CostAmount, &h.CostCurrency, &h.CostPeriod, &h.CostCheckedAt,
 		&h.Failure, &h.Detail, &h.NextAttemptAt, &h.Created, &h.Updated, &h.Ended)
@@ -242,7 +242,7 @@ var hostColumns = map[string]bool{
 	"balance_amount": true, "balance_currency": true, "approved_by": true, "approved_at": true,
 	"approved_amount": true, "create_sent_at": true, "server_id": true, "action_id": true,
 	"address": true, "host_key": true, "waiting_payment": true, "job_id": true, "job_kind": true,
-	"job_runner": true, "job_started_at": true, "attempts": true, "needs_retry": true,
+	"job_runner": true, "local_runner": true, "job_started_at": true, "attempts": true, "needs_retry": true,
 	"remove_volumes": true, "delete_requested_by": true, "delete_confirmed_by": true,
 	"delete_sent_at": true, "paid_till": true, "cost_amount": true, "cost_currency": true,
 	"cost_period": true, "cost_checked_at": true, "failure": true, "detail": true,
@@ -408,7 +408,8 @@ func (s *Store) HostRunner(ctx context.Context, env domain.Environment) (string,
 		WHERE status <> 'offline' AND NOT draining
 		  AND capabilities @> ARRAY['deploy'] AND capabilities @> $1::text[]
 		  AND 'host_jobs' = ANY(features)
-		ORDER BY (status = 'idle') DESC, cardinality(capabilities), last_seen DESC LIMIT 1`, caps).Scan(&id)
+          AND (COALESCE((SELECT local_runner FROM env_hosts h WHERE h.env_id=$2::uuid AND h.provider='local' AND h.state NOT IN ('deleted','failed','rejected')), '') IN ('', runners.id))
+		ORDER BY (status = 'idle') DESC, cardinality(capabilities), last_seen DESC LIMIT 1`, caps, env.ID).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
