@@ -147,6 +147,12 @@ message Usage {
 }
 
 // StageResult — детерминированный итог этапа конвейера.
+message CriterionResult {
+  int32 index = 1;
+  bool ok = 2;
+  string note = 3;
+}
+
 message StageResult {
   string task_id = 1;
   Stage stage = 2;
@@ -169,6 +175,7 @@ message StageResult {
   }
   // Вердикт шага prompt: ok | changes | fail (пусто для остальных стадий).
   string verdict = 10;
+  repeated CriterionResult criteria = 11;
 }
 
 // BlockedQuestion — агент не может продолжить без человека.

@@ -110,6 +110,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	}
 	// Вердикт шага prompt (ok | changes | fail), пусто у остальных стадий.
 	promptVerdict := ""
+	var criteria []*pb.CriterionResult
 	result := func(ok bool, detail string) {
 		emitUsage()
 		// Ошибка провайдера или агента в итоге может нести эхо ключа
@@ -125,7 +126,7 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_StageResult{
 			StageResult: &pb.StageResult{TaskId: as.TaskId, SessionId: as.SessionId,
 				StepId: as.StepId, Participant: as.Participant, Verdict: promptVerdict,
-				Stage: as.Stage, Ok: ok, Detail: detail,
+				Stage: as.Stage, Ok: ok, Detail: detail, Criteria: criteria,
 				// Эхо доставленной версии: итог стадии привязан к политике,
 				// по которой работал агент (спека access-policy).
 				PolicyHash: as.GetPolicy().GetHash()}}})
@@ -287,6 +288,10 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			}
 			result(false, fmt.Sprintf("ревьюер завершился с ошибкой: %v", err))
 			return
+		}
+		criteria = parseCriteria(run.FinalText, len(as.Criteria))
+		for _, c := range criteria {
+			c.Note = masker.maskString(c.Note)
 		}
 		approved, verdict := parseVerdict(run.FinalText)
 		result(approved, verdict)
@@ -770,8 +775,8 @@ func reviewPrompt(as *pb.Assignment) string {
 	}
 	if len(as.Criteria) > 0 {
 		b.WriteString("# Acceptance criteria\n")
-		for _, c := range as.Criteria {
-			b.WriteString("- " + c + "\n")
+		for i, c := range as.Criteria {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, c)
 		}
 		b.WriteString("\n")
 	}
@@ -780,7 +785,8 @@ func reviewPrompt(as *pb.Assignment) string {
 	}
 	b.WriteString(policyPrompt(as.GetPolicy()))
 	b.WriteString("Проверь изменения в текущем каталоге (ветка " + as.Branch + ") по критериям и качеству кода. " +
-		"Код не меняй. Закончи вывод РОВНО одной строкой: " +
+		"Код не меняй. Перед вердиктом отчитайся по каждому критерию отдельной строкой с начала строки: CRITERION <номер>: OK или CRITERION <номер>: FAIL <причина>. " +
+		"Закончи вывод РОВНО одной строкой: " +
 		"«VERDICT: APPROVED» или «VERDICT: CHANGES: <список замечаний одной строкой>».\n")
 	return b.String()
 }

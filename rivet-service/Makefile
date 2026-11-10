@@ -33,6 +33,7 @@ FUZZ_TARGETS = \
 	./internal/api:FuzzWebhookPayload \
 	./internal/runner:FuzzTail \
 	./internal/runner:FuzzParseUsage \
+	./internal/runner:FuzzParseCriteria \
 	./internal/api:FuzzBearerSecret \
 	./internal/scm:FuzzParseRepoURL \
 	./internal/scm:FuzzGiteaParse \

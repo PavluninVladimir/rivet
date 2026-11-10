@@ -900,6 +900,40 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 		}
 	}
 	verdict := verdictOf(step.Kind, sr.Ok, sr.Verdict)
+	var reports []store.CriteriaReport
+	if step.Kind == policy.StepReview && sr.Stage == pb.StageResult_REVIEW && sr.Verdict == "" {
+		report := store.CriteriaReport{Pass: run.Pass, By: runnerID}
+		var failed []string
+		indexed := map[int]*pb.CriterionResult{}
+		for _, c := range sr.Criteria {
+			if c != nil && c.Index > 0 && int(c.Index) <= len(task.Criteria) {
+				indexed[int(c.Index)] = c
+			}
+		}
+		for i := 1; i <= len(task.Criteria); i++ {
+			c := indexed[i]
+			if c == nil || c.Index < 1 || int(c.Index) > len(task.Criteria) {
+				continue
+			}
+			note := redact.String(c.Note)
+			if len([]rune(note)) > 1000 {
+				note = string([]rune(note)[:1000])
+			}
+			report.Results = append(report.Results, store.CriterionResult{Index: int(c.Index), OK: c.Ok, Note: note})
+			if !c.Ok {
+				failed = append(failed, fmt.Sprintf("%d — %s", c.Index, note))
+			}
+		}
+		reports = append(reports, report)
+		if verdict == policy.OutcomeOk && len(failed) > 0 {
+			verdict = policy.OutcomeChanges
+			detail := "Не выполнены критерии: " + strings.Join(failed, "; ")
+			if sr.Detail != "" && sr.Detail != "review пройден" {
+				detail += "\n\n" + sr.Detail
+			}
+			sr.Detail = detail
+		}
+	}
 	if infraExhausted {
 		// Повторный сбой — не замечания разработчику, а эскалация (переход fail).
 		verdict = policy.OutcomeFail
@@ -913,7 +947,7 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 	if next, found := proc.Step(step.Target(verdict)); found && step.Kind != policy.StepReview && !e.epicPaused(ctx, task) {
 		keep = e.reuseTarget(ctx, task, next, runnerID)
 	}
-	claimed, err := e.St.RecordVerdict(ctx, run.ID, verdict, sr.Detail, keep)
+	claimed, err := e.St.RecordVerdict(ctx, run.ID, verdict, sr.Detail, keep, reports...)
 	if err != nil {
 		return err
 	}

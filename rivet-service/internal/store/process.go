@@ -235,6 +235,9 @@ func (s *Store) EnterStep(ctx context.Context, in EnterStep) ([]StepRun, error) 
 		// Новый вход на review — новые ревьюеры: прежний reviewer_id не
 		// должен пережить шаг.
 		if in.Step.Kind == policy.StepReview {
+			if _, err := tx.Exec(ctx, `UPDATE tasks SET criteria=CASE WHEN jsonb_typeof(criteria)='array' THEN COALESCE((SELECT jsonb_agg(jsonb_build_object('text',c->'text','ok',false)) FROM jsonb_array_elements(criteria) c),'[]'::jsonb) ELSE criteria END WHERE id=$1`, in.TaskID); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `UPDATE tasks SET reviewer_id=NULL WHERE id=$1`, in.TaskID); err != nil {
 				return err
 			}
@@ -491,8 +494,8 @@ func (s *Store) AddSequentialRun(ctx context.Context, taskID string, step policy
 // RecordVerdict закрывает запуск вердиктом и освобождает его runner
 // (кроме keepRunner: тот же runner продолжит следующий шаг). Возвращает
 // false, если запуск уже закрыт (поздний результат).
-func (s *Store) RecordVerdict(ctx context.Context, runID int64, verdict, detail string, keepRunner bool) (bool, error) {
-	return s.recordVerdict(ctx, runID, verdict, detail, "", keepRunner)
+func (s *Store) RecordVerdict(ctx context.Context, runID int64, verdict, detail string, keepRunner bool, report ...CriteriaReport) (bool, error) {
+	return s.recordVerdict(ctx, runID, verdict, detail, "", keepRunner, report...)
 }
 
 // RecordUserVerdict — вердикт человека с его логином; повторный вердикт
@@ -501,10 +504,20 @@ func (s *Store) RecordUserVerdict(ctx context.Context, runID int64, login, verdi
 	return s.recordVerdict(ctx, runID, verdict, detail, login, false)
 }
 
-func (s *Store) recordVerdict(ctx context.Context, runID int64, verdict, detail, by string, keepRunner bool) (bool, error) {
+func (s *Store) recordVerdict(ctx context.Context, runID int64, verdict, detail, by string, keepRunner bool, report ...CriteriaReport) (bool, error) {
 	var claimed bool
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var runnerID, taskID string
+		// Порядок блокировок совпадает с EnterStep: сначала задача, затем запуск.
+		if len(report) > 0 {
+			var gen, closed int
+			if err := tx.QueryRow(ctx, `SELECT t.id::text,t.step_gen,t.step_closed_gen FROM tasks t JOIN task_step_runs r ON r.task_id=t.id WHERE r.id=$1 FOR UPDATE OF t`, runID).Scan(&taskID, &gen, &closed); err != nil {
+				return err
+			}
+			if gen != report[0].Pass || closed >= report[0].Pass {
+				return nil
+			}
+		}
 		// Адресат проверяется в том же UPDATE: между проверкой снаружи и
 		// вердиктом роль или членство могли измениться.
 		err := tx.QueryRow(ctx, `
@@ -524,6 +537,11 @@ func (s *Store) recordVerdict(ctx context.Context, runID int64, verdict, detail,
 			return err
 		}
 		claimed = true
+		if len(report) > 0 {
+			if err := recordCriteriaResultsTx(ctx, tx, taskID, report[0]); err != nil {
+				return err
+			}
+		}
 		if runnerID != "" && !keepRunner {
 			_, err = tx.Exec(ctx, `UPDATE runners SET status='idle', task_id=NULL WHERE id=$1 AND task_id=$2`, runnerID, taskID)
 		}

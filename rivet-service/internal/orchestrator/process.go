@@ -558,9 +558,17 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 			outcome = policy.OutcomeOk
 		}
 	}
-	// Исход применяется один раз на вход: одновременные вердикты двух
-	// участников не должны дважды расходовать попытку и входить на шаг.
-	claimed, err := e.St.ClaimStepOutcome(ctx, task.ID, pass)
+	// FAIL сверяется атомарно с закреплением исхода: конкурентный отчёт
+	// не может оказаться записанным между проверкой и claim.
+	var claimed bool
+	var criteriaDetail string
+	if step.Kind == policy.StepReview {
+		var claim store.ReviewOutcome
+		claim, err = e.St.ClaimReviewOutcome(ctx, task.ID, pass, outcome)
+		claimed, outcome, criteriaDetail = claim.Claimed, claim.Outcome, claim.Detail
+	} else {
+		claimed, err = e.St.ClaimStepOutcome(ctx, task.ID, pass)
+	}
 	if err != nil {
 		return err
 	}
@@ -579,6 +587,13 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 		e.cancelOpenRuns(ctx, task, 0)
 	}
 	verdicts, detail := e.stepVerdicts(ctx, step, runs, outcome)
+	if criteriaDetail != "" && outcome == policy.OutcomeChanges && !strings.Contains(detail, criteriaDetail) {
+		if detail == "" {
+			detail = criteriaDetail
+		} else {
+			detail = criteriaDetail + "\n\n" + detail
+		}
+	}
 	return e.applyOutcome(ctx, task, proc, hash, step, outcome, detail, verdicts, lastRunner, policyHash, prURL)
 }
 

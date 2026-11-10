@@ -131,8 +131,12 @@ const (
 )
 
 type Criterion struct {
-	Text string `json:"text"`
-	OK   bool   `json:"ok"`
+	Text   string `json:"text"`
+	OK     bool   `json:"ok"`
+	Status string `json:"status,omitempty"`
+	Note   string `json:"note,omitempty"`
+	By     string `json:"by,omitempty"`
+	Pass   int    `json:"pass,omitempty"`
 }
 
 type Task struct {
