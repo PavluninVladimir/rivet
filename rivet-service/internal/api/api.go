@@ -264,6 +264,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		status, code = http.StatusConflict, "bad_transition"
 	case errors.Is(err, store.ErrNoRunner):
 		status, code = http.StatusConflict, "no_runner"
+	case errors.Is(err, orchestrator.ErrSCMCredentials):
+		status, code = http.StatusConflict, "scm_credentials"
 	case errors.Is(err, store.ErrMaintenanceLocked):
 		status, code = http.StatusConflict, "maintenance_locked"
 	case errors.Is(err, store.ErrConflict),
@@ -976,6 +978,9 @@ func (s *Server) taskAnswer(w http.ResponseWriter, r *http.Request) {
 		unprocessable(w, "нужен text ответа")
 		return
 	}
+	if !s.prepareRetry(w, r) {
+		return
+	}
 	if err := s.St.ResolveTask(r.Context(), r.PathValue("id"), in.Text, user(r), false); err != nil {
 		writeErr(w, err)
 		return
@@ -984,8 +989,32 @@ func (s *Server) taskAnswer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
 
+// prepareRetry — задаче, упавшей без PR перед review, PR создаётся до
+// повтора: повтор продолжает с review без нового прохода агента. Хостинг
+// снова отказал — 502 pr_not_created, задача не меняется
+// (fix-pr-without-test-step).
+func (s *Server) prepareRetry(w http.ResponseWriter, r *http.Request) bool {
+	if s.Engine == nil {
+		return true
+	}
+	err := s.Engine.PrepareRetry(r.Context(), r.PathValue("id"))
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, orchestrator.ErrPRNotCreated) {
+		writeJSON(w, http.StatusBadGateway, map[string]apiError{"error": {Code: "pr_not_created",
+			Message: "повтор не выполнен: " + err.Error()}})
+		return false
+	}
+	writeErr(w, err)
+	return false
+}
+
 func (s *Server) taskRetry(w http.ResponseWriter, r *http.Request) {
 	if !s.requireTaskMember(w, r, r.PathValue("id")) {
+		return
+	}
+	if !s.prepareRetry(w, r) {
 		return
 	}
 	if err := s.St.ResolveTask(r.Context(), r.PathValue("id"), "", user(r), false); err != nil {
@@ -1040,6 +1069,13 @@ func (s *Server) taskMerge(w http.ResponseWriter, r *http.Request) {
 		}
 		if status, ae, ok := architectureMergeError(err); ok {
 			writeJSON(w, status, map[string]apiError{"error": ae})
+			return
+		}
+		// У задачи не было PR, и хостинг отказал в его создании: merge не
+		// выполнен, задача осталась в ожидании (fix-pr-without-test-step).
+		if errors.Is(err, orchestrator.ErrPRNotCreated) {
+			writeJSON(w, http.StatusBadGateway, map[string]apiError{"error": {Code: "pr_not_created",
+				Message: "merge не выполнен: " + err.Error()}})
 			return
 		}
 		writeErr(w, err)

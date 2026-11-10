@@ -219,6 +219,9 @@ print(json.dumps({"models": models}))' > "$STAND_DIR/llm-models.json" \
 ) &
 
 # Control plane на переднем плане.
+# RIVET_FAKE_SCM_REVOKED — файл со списком токенов, которые fake-хостинг
+# считает отозванными: сценарий отзыва пишет в него токен проекта и
+# проверяет, что новый токен подключение возвращает (fix-credential-state).
 # Ключ шифрования учётных данных хостингов: без него подключение
 # репозитория с токеном отключено (fail-closed), и мастер не создаст проект.
 # Генерируется на каждый прогон, как и пароль администратора.
@@ -234,6 +237,7 @@ exec env \
   RIVET_SCM=fake \
   RIVET_FAKE_GIT_DIR="$STAND_DIR/repos" \
   RIVET_FAKE_GIT_REPOS=e2e/arch,e2e/gitops \
+  RIVET_FAKE_SCM_REVOKED="$STAND_DIR/scm-revoked" \
   RIVET_ALLOW_PRIVATE_URLS=true \
   RIVET_RUVDS_API_URL="http://127.0.0.1:$RUVDS_PORT" \
   RIVET_GITHUB_WEBHOOK_SECRET="${E2E_WEBHOOK_SECRET:-e2e-webhook-secret}" \

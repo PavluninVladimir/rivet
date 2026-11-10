@@ -15,6 +15,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -56,7 +58,62 @@ type Client struct {
 // ErrUnauthorized — провайдер отклонил ключ (401/403): состояние invalid.
 var ErrUnauthorized = errors.New("провайдер отклонил ключ")
 
+// AuthError — отказ провайдера по ключу с кодом ответа: 401 — ключ
+// недействителен (отозван, неверен), 403 — у ключа нет прав (модель,
+// регион, блокировка сети). errors.Is(err, ErrUnauthorized) верно для
+// обоих, текст прежний: «провайдер отклонил ключ: HTTP 401».
+type AuthError struct{ Status int }
+
+func (e *AuthError) Error() string { return fmt.Sprintf("%v: HTTP %d", ErrUnauthorized, e.Status) }
+
+// Is — AuthError это ErrUnauthorized.
+func (e *AuthError) Is(target error) bool { return target == ErrUnauthorized }
+
+func authError(status int) error { return &AuthError{Status: status} }
+
+// KeyRejected — провайдер отклонил сам ключ (HTTP 401).
+func KeyRejected(err error) bool {
+	var ae *AuthError
+	return errors.As(err, &ae) && ae.Status == http.StatusUnauthorized
+}
+
+// RejectionStatus — код отказа провайдера по ключу (401 или 403) в итоге
+// стадии с вердиктом runner'а connection. Код читается только из первой
+// строки: там runner пишет ошибку агента и не режет её, текст агента идёт
+// ниже и на разбор не влияет. 0 — отказа по ключу в первой строке нет.
+func RejectionStatus(detail string) int {
+	first, _, _ := strings.Cut(detail, "\n")
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		if strings.Contains(first, (&AuthError{Status: status}).Error()) {
+			return status
+		}
+	}
+	return 0
+}
+
 var defaultHTTP = &http.Client{Timeout: 30 * time.Minute}
+
+// IsLocalURL — адрес сервера модели на этой же машине (Ollama, LM Studio):
+// такому серверу ключ не нужен. Правило общее у runner'а, который без
+// ключа отказывается идти на нелокальный адрес, и у control plane, который
+// не назначает стадию на такое подключение. Хост разбирается целиком, без
+// поиска подстрок и без DNS: localhost (и *.localhost) или loopback-адрес
+// (127.0.0.0/8, ::1, в том числе IPv4 в IPv6).
+func IsLocalURL(u string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(u))
+	if err != nil {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if host == "" {
+		return false
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.Unmap().IsLoopback()
+}
 
 // DefaultBaseURL — адрес API по умолчанию для типа API.
 func DefaultBaseURL(api API) string {
@@ -160,7 +217,7 @@ func (c Client) anthropic() anthropic.Client {
 func anthropicErr(err error) error {
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
-		return fmt.Errorf("%w: HTTP %d", ErrUnauthorized, apiErr.StatusCode)
+		return authError(apiErr.StatusCode)
 	}
 	return err
 }
@@ -377,7 +434,7 @@ func (c Client) openaiRequest(ctx context.Context, method, path string, body []b
 	case http.StatusOK:
 		return raw, nil
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return nil, fmt.Errorf("%w: HTTP %d", ErrUnauthorized, resp.StatusCode)
+		return nil, authError(resp.StatusCode)
 	}
 	return nil, &httpStatusError{Status: resp.StatusCode, Body: strings.TrimSpace(string(raw))}
 }

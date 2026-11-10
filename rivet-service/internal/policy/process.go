@@ -394,6 +394,10 @@ type ResolvedStep struct {
 	Require      string                `json:"require"`
 	Attempts     int                   `json:"attempts"`
 	On           Transitions           `json:"on"`
+	// SkippedBefore — отключённые шаги документа между предыдущим
+	// включённым шагом и этим: переход к шагу по порядку пишет в событии,
+	// что они пропущены (спека process «Отключённый шаг»).
+	SkippedBefore []string `json:"skipped_before,omitempty"`
 }
 
 // ResolvedParticipant — участник с порядковым идентификатором (p1, p2, …):
@@ -415,15 +419,23 @@ func (p ResolvedParticipant) IsUser() bool { return p.User.Login != "" || p.User
 func Resolve(p Process, presets Presets) Resolved {
 	var out Resolved
 	var enabled []Step
+	skippedBefore := map[int][]string{}
+	var pending []string
 	for _, s := range p.Steps {
 		if s.enabled() {
+			if len(pending) > 0 {
+				skippedBefore[len(enabled)] = pending
+				pending = nil
+			}
 			enabled = append(enabled, s)
 		} else {
 			out.Skipped = append(out.Skipped, s.ID)
+			pending = append(pending, s.ID)
 		}
 	}
 	for i, s := range enabled {
-		rs := ResolvedStep{ID: s.ID, Kind: s.Kind, Title: s.Title, Mode: s.Mode, Require: s.Require, Prompt: strings.TrimSpace(s.Prompt)}
+		rs := ResolvedStep{ID: s.ID, Kind: s.Kind, Title: s.Title, Mode: s.Mode, Require: s.Require, Prompt: strings.TrimSpace(s.Prompt),
+			SkippedBefore: skippedBefore[i]}
 		if rs.Title == "" {
 			rs.Title = defaultTitle(s.Kind)
 		}
@@ -605,6 +617,22 @@ func (r Resolved) First() (ResolvedStep, bool) {
 		return ResolvedStep{}, false
 	}
 	return r.Steps[0], true
+}
+
+// SkippedBetween — отключённые шаги, которые пропускает переход from → to:
+// они есть, только если to идёт сразу за from среди включённых шагов.
+// Переход назад или через несколько шагов ничего не пропускает.
+func (r Resolved) SkippedBetween(from, to string) []string {
+	for i, s := range r.Steps {
+		if s.ID != from {
+			continue
+		}
+		if i+1 < len(r.Steps) && r.Steps[i+1].ID == to {
+			return r.Steps[i+1].SkippedBefore
+		}
+		return nil
+	}
+	return nil
 }
 
 // HasKind — есть ли в процессе включённый шаг такого типа.

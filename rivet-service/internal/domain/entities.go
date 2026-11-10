@@ -59,8 +59,13 @@ type ScmCredential struct {
 	Owner       string
 	TokenPrefix string
 	State       string // ok | invalid | unchecked
-	CheckedAt   *time.Time
-	Created     time.Time
+	// StateReason и StateMessage — причина нерабочего состояния: код
+	// (bad_token, no_access, insufficient_scope, not_found) и текст для
+	// человека. У рабочего подключения пустые.
+	StateReason  string
+	StateMessage string
+	CheckedAt    *time.Time
+	Created      time.Time
 }
 
 // Check — команда этапа testing из конфига проекта.
@@ -832,6 +837,20 @@ const (
 	AttHostCreate AttentionReason = "HOST_CREATE"
 	AttHostDelete AttentionReason = "HOST_DELETE"
 	AttHostFailed AttentionReason = "HOST_FAILED"
+	// AttModelConnection — агентская стадия не запустилась: у модели нет
+	// рабочего подключения (нет подключения, оно выключено, без ключа или
+	// ключ не дошёл до runner'а). Ошибка настройки, а не провал проверок
+	// (fix-agent-without-connection).
+	AttModelConnection AttentionReason = "MODEL_CONNECTION"
+	// AttPRNotCreated — хостинг не создал PR ветки задачи перед review или
+	// merge: задача ждёт человека, повтор создаёт только PR
+	// (fix-pr-without-test-step).
+	AttPRNotCreated AttentionReason = "PR_NOT_CREATED"
+	// AttScmCredentials — учётные данные хостинга проекта перестали
+	// действовать: конвейер проекта стоит до замены токена или
+	// восстановления доступа (change fix-credential-state). Эскалация
+	// уровня проекта, одна открытая на проект.
+	AttScmCredentials AttentionReason = "SCM_CREDENTIALS"
 )
 
 type Attention struct {

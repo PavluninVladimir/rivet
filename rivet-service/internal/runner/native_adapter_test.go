@@ -171,8 +171,8 @@ func TestNativeAdapterKeyAndVerdicts(t *testing.T) {
 	t.Setenv("RIVET_NATIVE_KEY", "")
 	cfg := Config{Adapter: AdapterNative, Model: "deepseek-v4-flash", Workdir: t.TempDir()}
 	sink, _, _ := nativeSink()
-	if _, err := newAdapter(cfg).Run(context.Background(), t.TempDir(), "x", sink); !errors.Is(err, ErrNoProviderKey) {
-		t.Fatalf("без ключа: %v", err)
+	if _, err := newAdapter(cfg).Run(context.Background(), t.TempDir(), "x", sink); !errors.Is(err, ErrNoProviderKey) || !isEndpointError(err) {
+		t.Fatalf("без ключа — ошибка подключения: %v", err)
 	}
 	p := &providerScript{calls: []map[string]any{{"name": "finish", "args": map[string]any{"verdict": "fail", "summary": "API хостинга недоступен"}}}}
 	srv := httptest.NewServer(p.handler(t))
@@ -182,7 +182,7 @@ func TestNativeAdapterKeyAndVerdicts(t *testing.T) {
 	dir := t.TempDir()
 	// Реализация: fail — неуспех запуска.
 	run, err := newAdapter(cfg).Run(context.Background(), dir, "x", sink)
-	if err == nil || !run.isError || !strings.Contains(err.Error(), "выполнить нельзя") {
+	if err == nil || !run.isError || !strings.Contains(err.Error(), "выполнить нельзя") || isEndpointError(err) {
 		t.Fatalf("fail у реализации: %v", err)
 	}
 	// Review: fail — маркер, стадия разберёт его сама.

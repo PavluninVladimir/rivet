@@ -322,6 +322,32 @@ func (s *Store) SetConnectionCheck(ctx context.Context, id string, state domain.
 	return out, err
 }
 
+// MarkConnectionRejected — провайдер отклонил ключ подключения при
+// проверке control plane после отказа стадии (fix-agent-without-connection):
+// состояние invalid, следующие стадии на этом подключении ждут нового
+// ключа. Уже invalid не трогается. marked — этот вызов перевёл подключение
+// в invalid: эскалация одна на перевод, даже если отказы пришли разом.
+func (s *Store) MarkConnectionRejected(ctx context.Context, id, detail string) (marked bool, err error) {
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE model_connections SET state='invalid', check_detail=$2, checked_at=now()
+			WHERE id=$1 AND state <> 'invalid'`, id, detail)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		marked = true
+		_, err = appendEvent(ctx, tx, EventInput{
+			ActorKind: domain.ActorSystem, Type: "connection.checked",
+			Text:    "провайдер отклонил ключ подключения " + id + ": состояние invalid",
+			Payload: map[string]any{"connection_id": id, "state": domain.LLMStateInvalid, "detail": detail},
+		})
+		return err
+	})
+	if err != nil {
+		marked = false
+	}
+	return marked, err
+}
+
 // ConnectionRefs — кто ссылается на подключение (планировщик; агенты
 // добавятся в add-agent-profiles).
 func (s *Store) ConnectionRefs(ctx context.Context, id string) ([]Ref, error) {

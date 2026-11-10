@@ -77,18 +77,33 @@ func (g *GitHub) doH(ctx context.Context, method, path string, body any, accept 
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes))
+	if err == nil && rateLimited(resp.StatusCode, resp.Header, raw) {
+		// Лимит запросов — не отказ в правах: 403 по лимиту не должен
+		// выглядеть как отозванный доступ.
+		err = &RateLimitError{After: retryAfter(resp.Header), Msg: fmt.Sprintf("github %s %s: %v: %d: %s", method, path, ErrRateLimited, resp.StatusCode, tailMsg(raw))}
+	}
 	return raw, resp.StatusCode, resp.Header, err
 }
 
+// CreatePR открывает PR. Отказ «PR ветки уже есть» (422 с этим текстом в
+// теле) — ErrPRExists, отказ по лимиту запросов (вторичный лимит на
+// создание контента, 403 или 429) — RateLimitError: повтор позже.
 func (g *GitHub) CreatePR(ctx context.Context, repo, branch, base, title, body string) (PR, error) {
-	raw, code, err := g.do(ctx, "POST", "/repos/"+repo+"/pulls", map[string]any{
+	raw, code, h, err := g.doH(ctx, "POST", "/repos/"+repo+"/pulls", map[string]any{
 		"title": title, "head": branch, "base": base, "body": body,
 	}, "")
 	if err != nil {
 		return PR{}, err
 	}
-	if code != http.StatusCreated {
-		return PR{}, fmt.Errorf("github create PR: %d: %s", code, raw)
+	switch {
+	case code == http.StatusCreated:
+	case rateLimited(code, h, raw):
+		return PR{}, &RateLimitError{After: retryAfter(h),
+			Msg: fmt.Sprintf("github create PR: %v: %d: %s", ErrRateLimited, code, tailMsg(raw))}
+	case code == http.StatusUnprocessableEntity && saysAlreadyExists(raw):
+		return PR{}, fmt.Errorf("github create PR: %w: %d: %s", ErrPRExists, code, tailMsg(raw))
+	default:
+		return PR{}, statusErr("github create PR", code, raw)
 	}
 	var out struct {
 		Number  int    `json:"number"`
@@ -107,7 +122,7 @@ func (g *GitHub) Diff(ctx context.Context, repo string, number int) (string, err
 		return "", err
 	}
 	if code != http.StatusOK {
-		return "", fmt.Errorf("github diff: %d: %s", code, raw)
+		return "", statusErr("github diff", code, raw)
 	}
 	// Тело режется лимитом молча: сигнализируем обрезку, чтобы решения по
 	// путям PR не принимались по части diff'а.
@@ -139,7 +154,7 @@ func (g *GitHub) MergeAt(ctx context.Context, repo string, number int, headSHA s
 		if code == http.StatusMethodNotAllowed && g.conflicting(ctx, repo, number, raw) {
 			return "", fmt.Errorf("github merge: %w: %s", ErrMergeConflict, tailMsg(raw))
 		}
-		return "", fmt.Errorf("github merge: %d: %s", code, raw)
+		return "", statusErr("github merge", code, raw)
 	}
 	var out struct {
 		SHA string `json:"sha"`
@@ -186,7 +201,7 @@ func (g *GitHub) HeadSHA(ctx context.Context, repo, branch string) (string, erro
 		return "", fmt.Errorf("github branch %s: %w", branch, ErrBranchNotFound)
 	}
 	if code != http.StatusOK {
-		return "", fmt.Errorf("github branch: %d: %s", code, clip(raw))
+		return "", statusErr("github branch", code, raw)
 	}
 	var out struct {
 		Commit struct {
@@ -315,7 +330,7 @@ func (g *GitHub) CreateRepo(ctx context.Context, in NewRepo) (RepoInfo, error) {
 		return RepoInfo{}, ErrRepoExists
 	}
 	if code != http.StatusCreated {
-		return RepoInfo{}, fmt.Errorf("github create repo: %d: %s", code, tailMsg(raw))
+		return RepoInfo{}, statusErr("github create repo", code, raw)
 	}
 	var out struct {
 		FullName      string `json:"full_name"`
@@ -337,7 +352,7 @@ func (g *GitHub) login(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if code != http.StatusOK {
-		return "", fmt.Errorf("github user: %d: %s", code, tailMsg(raw))
+		return "", statusErr("github user", code, raw)
 	}
 	var me struct {
 		Login string `json:"login"`
@@ -474,7 +489,7 @@ func (g *GitHub) TriggerPipeline(ctx context.Context, repo, pipeline, ref string
 		return PipelineRun{}, err
 	}
 	if code != http.StatusNoContent && code != http.StatusCreated {
-		return PipelineRun{}, fmt.Errorf("github workflow_dispatch: %d: %s", code, clip(raw))
+		return PipelineRun{}, statusErr("github workflow_dispatch", code, raw)
 	}
 	return PipelineRun{State: PipelineStarting}, nil
 }
@@ -489,7 +504,7 @@ func (g *GitHub) PipelineRun(ctx context.Context, repo, pipeline, ref, runID str
 			return PipelineRun{}, err
 		}
 		if code != http.StatusOK {
-			return PipelineRun{}, fmt.Errorf("github run: %d: %s", code, clip(raw))
+			return PipelineRun{}, statusErr("github run", code, raw)
 		}
 		var run githubRun
 		if err := json.Unmarshal(raw, &run); err != nil {
@@ -507,7 +522,7 @@ func (g *GitHub) PipelineRun(ctx context.Context, repo, pipeline, ref, runID str
 		return PipelineRun{}, err
 	}
 	if code != http.StatusOK {
-		return PipelineRun{}, fmt.Errorf("github runs: %d: %s", code, clip(raw))
+		return PipelineRun{}, statusErr("github runs", code, raw)
 	}
 	var out struct {
 		WorkflowRuns []githubRun `json:"workflow_runs"`
@@ -572,7 +587,7 @@ func (g *GitHub) ReadFile(ctx context.Context, repo, ref, path string) (FileCont
 		return FileContent{}, ErrFileNotFound
 	}
 	if code != http.StatusOK {
-		return FileContent{}, fmt.Errorf("github contents: %d: %s", code, clip(raw))
+		return FileContent{}, statusErr("github contents", code, raw)
 	}
 	// Для каталога contents API отвечает массивом записей (или объектом
 	// type=dir в media type object).
@@ -627,7 +642,7 @@ func (g *GitHub) ReadFile(ctx context.Context, repo, ref, path string) (FileCont
 			return FileContent{}, err
 		}
 		if code != http.StatusOK {
-			return FileContent{}, fmt.Errorf("github blob: %d: %s", code, clip(blob))
+			return FileContent{}, statusErr("github blob", code, blob)
 		}
 		if int64(len(blob)) != out.Size {
 			return FileContent{}, fmt.Errorf("github contents: %s: прочитано %d байт из %d, файл больше лимита чтения", path, len(blob), out.Size)
@@ -655,7 +670,7 @@ func (g *GitHub) WriteFile(ctx context.Context, repo, ref, path, prevID, content
 		return Commit{}, err
 	}
 	if code != http.StatusOK && code != http.StatusCreated {
-		return Commit{}, fmt.Errorf("github contents write: %d: %s", code, clip(raw))
+		return Commit{}, statusErr("github contents write", code, raw)
 	}
 	var out struct {
 		Commit struct {
@@ -687,12 +702,14 @@ func (g *GitHub) BranchProtected(ctx context.Context, repo, branch string) (bool
 	if err != nil {
 		return false, err
 	}
+	// 401 — не «нет защиты», а нерабочий токен: ответ «ветка не защищена»
+	// ввёл бы в заблуждение.
 	switch code {
-	case http.StatusNotFound, http.StatusForbidden, http.StatusUnauthorized:
+	case http.StatusNotFound, http.StatusForbidden:
 		return false, nil
 	case http.StatusOK:
 	default:
-		return false, fmt.Errorf("github branch protection: %d: %s", code, clip(raw))
+		return false, statusErr("github branch protection", code, raw)
 	}
 	var out struct {
 		RequiredPullRequestReviews *struct {

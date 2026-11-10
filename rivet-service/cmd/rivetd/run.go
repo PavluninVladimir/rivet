@@ -247,6 +247,9 @@ func run(ctx context.Context, cfg config.Config) error {
 	// паузами и не должна задерживать сверку снимков.
 	g.Go(func() error { apiSrv.ResubscribeWebhooks(ctx); return nil })
 	g.Go(func() error { engine.ResumeArchitecture(ctx); return nil })
+	// Задачи, которые ждут на review или merge без PR, получают его сами
+	// (fix-pr-without-test-step).
+	g.Go(func() error { engine.ResumePendingPRs(ctx); return nil })
 	g.Go(func() error {
 		<-ctx.Done()
 		grpcSrv.GracefulStop()

@@ -117,7 +117,7 @@ func TestDeployRunnerGetsNoAgentStage(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE tasks SET status='blocked' WHERE id=$1`, task.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.StartUserSession(ctx, task.ID, owner.Login, false); !errors.Is(err, store.ErrNoRunner) {
+	if _, err := st.StartUserSession(ctx, task.ID, owner.Login, false, nil); !errors.Is(err, store.ErrNoRunner) {
 		t.Fatalf("сессия доработки без runner'а агента: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx, `UPDATE tasks SET status='ready' WHERE id=$1`, task.ID); err != nil {

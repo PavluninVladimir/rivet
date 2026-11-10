@@ -38,7 +38,7 @@ func TestAssignedModelNotStickyAfterRelease(t *testing.T) {
 	if err != nil || !ok || a.Run.AgentID != "maks" {
 		t.Fatalf("Макс: %v %v %+v", ok, err, a.Run)
 	}
-	if err := s.SetRunModel(ctx, a.Run.ID, "opus"); err != nil {
+	if err := s.SetRunAssignment(ctx, a.Run.ID, "opus", "", false); err != nil {
 		t.Fatal(err)
 	}
 	runs := codeRuns(t, s, tasks[0].ID)
@@ -209,7 +209,7 @@ func TestDeferRunAndTickExclusions(t *testing.T) {
 		t.Fatalf("отложенный запуск отвязан: %+v", runs[0])
 	}
 	// Отложенный не назначается, второй исключён в рамках тика.
-	b, ok, err := s.AssignRunExcept(ctx, nil, nil, nil, []int64{otherRun(t, s, tasks, a.Task.ID)})
+	b, ok, err := s.AssignRunExcept(ctx, nil, nil, nil, []int64{otherRun(t, s, tasks, a.Task.ID)}, nil)
 	if err != nil || ok {
 		t.Fatalf("исключённый и отложенный не назначаются: %v %v %+v", ok, err, b.Run)
 	}
@@ -218,10 +218,10 @@ func TestDeferRunAndTickExclusions(t *testing.T) {
 	if marked, err := s.MarkRunnerOffline(ctx, "r2", r2.LastSeen); err != nil || !marked {
 		t.Fatalf("отметка offline: %v %v", marked, err)
 	}
-	if _, ok, err := s.AssignRunExcept(ctx, nil, nil, []string{"r1"}, nil); err != nil || ok {
+	if _, ok, err := s.AssignRunExcept(ctx, nil, nil, []string{"r1"}, nil, nil); err != nil || ok {
 		t.Fatalf("исключённый runner и offline не получают работу: %v %v", ok, err)
 	}
-	c, ok, err := s.AssignRunExcept(ctx, nil, nil, nil, nil)
+	c, ok, err := s.AssignRunExcept(ctx, nil, nil, nil, nil, nil)
 	if err != nil || !ok || c.Runner.ID != "r1" || c.Task.ID == a.Task.ID {
 		t.Fatalf("второй запуск на r1: %v %v %+v", ok, err, c)
 	}
