@@ -664,13 +664,22 @@ indexrelid = 'events_task_step'::regclass` и, если там `false`, удал
 
 ### Веб-консоль
 
-rivetd отдаёт консоль из `internal/webui/dist` (go:embed). Чтобы пересобрать
-её из `rivet-web`:
+rivetd отдаёт консоль из `internal/webui/dist` (go:embed). Она собрана из
+коммита `main` репозитория `rivet-web`, его SHA лежит в
+`internal/webui/REVISION`. CI пересобирает этот коммит и сверяет с `dist`
+побайтно, поэтому `dist` руками не правится. После слияния изменения
+консоли встроенную сборку обновляют отдельным PR (нужны Node 24 и
+`go-licenses`):
 
 ```sh
 cd rivet-service
-make ui
+make ui-sync                  # main rivet-web; или make ui-sync WEB_REF=<коммит main>
+git add internal/webui ../NOTICE ../THIRD_PARTY
 ```
+
+`make ui-check` повторяет проверку CI локально. `make ui` собирает консоль из
+соседнего клона `../rivet-web` как есть, для отладки. Такую сборку не
+коммитьте, как и `dist` после локального e2e-стенда: CI её не примет.
 
 ### Тесты
 
