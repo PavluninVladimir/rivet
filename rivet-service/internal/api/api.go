@@ -258,6 +258,8 @@ func writeErr(w http.ResponseWriter, err error) {
 		status, code = http.StatusConflict, "bad_transition"
 	case errors.Is(err, store.ErrNoRunner):
 		status, code = http.StatusConflict, "no_runner"
+	case errors.Is(err, orchestrator.ErrSCMCredentials):
+		status, code = http.StatusConflict, "scm_credentials"
 	case errors.Is(err, store.ErrMaintenanceLocked):
 		status, code = http.StatusConflict, "maintenance_locked"
 	case errors.Is(err, store.ErrConflict),

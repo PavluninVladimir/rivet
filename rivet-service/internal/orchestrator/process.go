@@ -320,25 +320,34 @@ func (e *Engine) dispatchAssigned(ctx context.Context, a store.RunAssignment) (b
 	return e.dispatchOrRelease(ctx, a.Task, a.Run, a.Runner, step, a.Task.StepEntry, a.Pending)
 }
 
-// reviewContext — контекст ревьюера: diff PR и отчёт автопроверок.
-func (e *Engine) reviewContext(ctx context.Context, task domain.Task) string {
+// reviewContext — контекст ревьюера: diff PR и отчёт автопроверок. Ошибка —
+// только нерабочие учётные данные хостинга (ErrSCMCredentials): прочие
+// сбои чтения diff'а стадию не останавливают.
+func (e *Engine) reviewContext(ctx context.Context, task domain.Task) (string, error) {
 	extra := e.peekStageContext(task.ID)
 	if task.PRURL == "" {
-		return extra
+		withPR, err := e.ensurePR(ctx, task)
+		if err != nil {
+			return "", err
+		}
+		task = withPR
 	}
 	d, err := e.diffForTask(ctx, task)
 	if errors.Is(err, scm.ErrDiffTruncated) {
 		// Ревьюеру начало diff'а полезнее, чем ничего.
 		d, err = d+"\n…[diff обрезан: превышен лимит чтения]\n", nil
 	}
+	if errors.Is(err, ErrSCMCredentials) {
+		return "", fmt.Errorf("diff PR: %w", err)
+	}
 	if err != nil {
 		slog.Error("diff for review", "task", task.ID, "err", err)
-		return extra
+		return extra, nil
 	}
 	if extra != "" {
-		return d + "\n\n" + extra
+		return d + "\n\n" + extra, nil
 	}
-	return d
+	return d, nil
 }
 
 func (e *Engine) peekStageContext(taskID string) string {
@@ -435,6 +444,11 @@ func (e *Engine) reuseTarget(ctx context.Context, task domain.Task, next policy.
 	if runnerID == "" || (next.Kind != policy.StepCode && next.Kind != policy.StepTest && next.Kind != policy.StepPrompt) || len(next.Participants) != 1 {
 		return false
 	}
+	// Нерабочие учётные данные хостинга: следующая стадия не стартует и на
+	// том же runner'е, её назначит планировщик после восстановления.
+	if projectID, _, err := e.St.TaskRefs(ctx, task.ID); err == nil && e.credentialsInvalid(ctx, projectID) {
+		return false
+	}
 	p := next.Participants[0]
 	rb := e.roleBindings(ctx, task, next)[p.ID]
 	r, err := e.St.GetRunner(ctx, runnerID)
@@ -492,17 +506,14 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 		return err
 	}
 	var open, changes, fails int
-	var remarks []string
 	for _, r := range runs {
 		switch r.Verdict {
 		case "":
 			open++
 		case policy.OutcomeChanges:
 			changes++
-			remarks = append(remarks, remark(step, r))
 		case policy.OutcomeFail:
 			fails++
-			remarks = append(remarks, remark(step, r))
 		case policy.OutcomeBlocked, "cancelled":
 			// Заблокированный или прерванный шаг решён другим путём.
 			return nil
@@ -567,6 +578,13 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 	if step.Require == policy.RequireAny && outcome == policy.OutcomeOk && open > 0 {
 		e.cancelOpenRuns(ctx, task, 0)
 	}
+	verdicts, detail := e.stepVerdicts(ctx, step, runs, outcome)
+	return e.applyOutcome(ctx, task, proc, hash, step, outcome, detail, verdicts, lastRunner, policyHash, prURL)
+}
+
+// stepVerdicts — вердикты участников для события шага и текст исхода:
+// замечания с автором или итог единственного участника при ok.
+func (e *Engine) stepVerdicts(ctx context.Context, step policy.ResolvedStep, runs []store.StepRun, outcome string) ([]map[string]any, string) {
 	verdicts := make([]map[string]any, 0, len(runs))
 	titles, labels := e.roleTitles(ctx), e.runnerLabels(ctx)
 	for _, r := range runs {
@@ -593,7 +611,7 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 		verdicts = append(verdicts, v)
 	}
 	// Автор блока замечаний — роль и имя исполнителя, если они есть.
-	remarks = remarks[:0]
+	var remarks []string
 	for _, r := range runs {
 		if r.Verdict == policy.OutcomeChanges || r.Verdict == policy.OutcomeFail {
 			remarks = append(remarks, remarkBy(step, r, performerLabel(r, titles, labels)))
@@ -603,12 +621,7 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 	if outcome == policy.OutcomeOk && len(runs) == 1 {
 		detail = runs[0].Detail
 	}
-	return e.applyOutcome(ctx, task, proc, hash, step, outcome, detail, verdicts, lastRunner, policyHash, prURL)
-}
-
-// remark — блок замечаний участника с указанием автора.
-func remark(step policy.ResolvedStep, r store.StepRun) string {
-	return remarkBy(step, r, "")
+	return verdicts, detail
 }
 
 // remarkBy — блок замечаний участника; performer — роль и имя исполнителя
@@ -851,6 +864,9 @@ func (e *Engine) gotoTarget(ctx context.Context, task domain.Task, proc *policy.
 	if next.Kind == policy.StepReview && task.PRURL == "" {
 		withPR, err := e.ensurePR(ctx, task)
 		if err != nil {
+			if errors.Is(err, ErrSCMCredentials) {
+				return e.awaitCredentials(ctx, task, target, entry, "PR откроется", err)
+			}
 			if inTick(ctx) && scm.Transient(err) {
 				return e.prWaitAtReview(ctx, task, next, err)
 			}

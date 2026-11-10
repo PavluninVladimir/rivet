@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -72,7 +73,7 @@ func (g *Gitea) do(ctx context.Context, method, path string, body any, accept st
 // адаптер: отказы по авторизации классифицируются здесь же, как у
 // остальных адаптеров.
 func giteaErr(op string, code int, raw []byte) error {
-	return fmt.Errorf("gitea %s: %d: %s", op, code, clip(raw))
+	return statusErr("gitea "+op, code, raw)
 }
 
 // giteaRepo — путь репозитория в адресе API.
@@ -739,9 +740,10 @@ func (g *Gitea) ReadFile(ctx context.Context, repo, ref, filePath string) (FileC
 		if id, rel, ok := giteaMissing(raw); ok && id == "" && rel != "" {
 			return FileContent{}, ErrFileNotFound
 		}
-		// Нет версии или самого репозитория: как у GitLab, это не
-		// «нет файла».
-		return FileContent{}, fmt.Errorf("gitea contents %s@%s: %w: %s", filePath, ref, ErrRefNotFound, clip(raw))
+		if _, _, ok := giteaMissing(raw); ok {
+			return FileContent{}, fmt.Errorf("gitea contents %s@%s: %w: %s", filePath, ref, ErrRefNotFound, clip(raw))
+		}
+		return FileContent{}, errors.Join(ErrRefNotFound, giteaErr("contents", code, raw))
 	}
 	if code != http.StatusOK {
 		return FileContent{}, giteaErr("contents", code, raw)

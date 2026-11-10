@@ -160,6 +160,11 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		if as.Stage == pb.StageResult_TESTING && as.GetRole() != nil {
 			promptVerdict = verdictInfraError
 		}
+		// Хостинг отклонил clone или fetch по авторизации: control plane
+		// проверит учётные данные проекта (fix-credential-state).
+		if gitAuthFailed(err.Error()) {
+			promptVerdict = verdictSCMAuth
+		}
 		result(false, "workspace: "+err.Error())
 		return
 	}
@@ -201,6 +206,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		defer gitCleanup()
 		if err := gitCommitPush(sctx, ws, as.Branch, gitEnv,
 			fmt.Sprintf("task-%d: %s (%s)", as.TaskNum, as.Title, strings.ToLower(as.Stage.String()))); err != nil {
+			if gitAuthFailed(err.Error()) {
+				promptVerdict = verdictSCMAuth
+			}
 			result(false, "git: "+err.Error())
 			return
 		}
@@ -315,6 +323,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		defer gitCleanup()
 		if err := gitCommitPush(sctx, ws, as.Branch, gitEnv,
 			fmt.Sprintf("task-%d: %s (%s)", as.TaskNum, as.Title, as.StepId)); err != nil {
+			if gitAuthFailed(err.Error()) {
+				promptVerdict = verdictSCMAuth
+			}
 			result(false, "git: "+err.Error())
 			return
 		}
@@ -512,6 +523,51 @@ func (a *agent) gitCredentials(as *pb.Assignment) ([]string, func(), error) {
 		"RIVET_GIT_USER=rivet",
 		"RIVET_GIT_TOKEN=" + as.GitToken,
 	}, cleanup, nil
+}
+
+// verdictSCMAuth — вердикт стадии: хостинг отклонил git-операцию runner'а
+// (clone, fetch, push) по авторизации. Control plane проверяет учётные
+// данные проекта и, если они не работают, откладывает запуск без расхода
+// попытки (fix-credential-state).
+const verdictSCMAuth = "scm_auth"
+
+// gitAuthMarkers — признаки отказа хостинга по авторизации в выводе git
+// (HTTPS с askpass): 401 и 403, отозванный или неверный токен, нет права
+// на push. Сюда же «репозиторий не найден»: на приватный репозиторий без
+// доступа GitHub и GitLab отвечают именно так. Ложный признак безопасен —
+// состояние подключения меняет только проверка control plane.
+var gitAuthMarkers = []string{
+	"authentication failed",
+	"could not read username",
+	"could not read password",
+	"returned error: 401",
+	"returned error: 403",
+	"returned error: 404",
+	"http basic: access denied",
+	"invalid username or password",
+	"not allowed to push",
+	"permission denied for writing",
+	"repository not found",
+	"could not be found or you don't have permission",
+}
+
+// gitAuthFailed — вывод git говорит об отказе хостинга по авторизации.
+func gitAuthFailed(out string) bool {
+	low := strings.ToLower(out)
+	for _, m := range gitAuthMarkers {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	// GitHub: «remote: Permission to owner/repo.git denied to bot.»
+	if i := strings.Index(low, "permission to "); i >= 0 && strings.Contains(low[i:], " denied to ") {
+		return true
+	}
+	// git: «fatal: repository 'https://…' not found».
+	if i := strings.Index(low, "fatal: repository '"); i >= 0 && strings.Contains(low[i:], "' not found") {
+		return true
+	}
+	return false
 }
 
 func gitCommitPush(ctx context.Context, dir, branch string, env []string, message string) error {

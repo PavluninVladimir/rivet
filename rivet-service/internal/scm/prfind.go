@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -45,7 +44,7 @@ func (g *GitHub) OpenPR(ctx context.Context, repo, branch, base string) (PR, boo
 		return PR{}, false, err
 	}
 	if code != http.StatusOK {
-		return PR{}, false, fmt.Errorf("github list PR: %d: %s", code, tailMsg(raw))
+		return PR{}, false, statusErr("github list PR", code, raw)
 	}
 	var out []struct {
 		Number  int    `json:"number"`
@@ -83,7 +82,7 @@ func (g *GitLab) OpenPR(ctx context.Context, repo, branch, base string) (PR, boo
 		return PR{}, false, err
 	}
 	if code != http.StatusOK {
-		return PR{}, false, fmt.Errorf("gitlab list MR: %d: %s", code, tailMsg(raw))
+		return PR{}, false, statusErr("gitlab list MR", code, raw)
 	}
 	var out []struct {
 		IID             int    `json:"iid"`

@@ -866,6 +866,123 @@ func (s *Store) SetTaskWaitReason(ctx context.Context, taskID, reason string) er
 // WaitKindTeam — причина ожидания ролей с командой (markTeamWaiting).
 const WaitKindTeam = "team"
 
+// WaitKindCredentials — исход шага закреплён, но не применён: PR не открылся
+// из-за нерабочих учётных данных хостинга (fix-credential-state). Задачу
+// продолжает ClaimCredentialsWait после восстановления подключения.
+const WaitKindCredentials = "credentials"
+
+// SetTaskCredentialsWait — задача ждёт восстановления подключения с
+// закреплённым исходом шага: target и entry — шаг, на который она шла, и
+// вход на него. Захват продолжения сбрасывается.
+func (s *Store) SetTaskCredentialsWait(ctx context.Context, taskID, reason, target, entry string) error {
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE tasks SET wait_reason=$2, wait_kind=$3, wait_target=$4, wait_entry=$5,
+			wait_claimed_at=NULL, wait_failures=0, updated_at=now() WHERE id=$1`,
+		taskID, clipRunes(reason, 300), WaitKindCredentials, target, entry)
+	return err
+}
+
+// ClaimCredentialsWait захватывает продолжение ждущей задачи на срок
+// lease: отметку ожидания снимает только вход на следующий шаг, поэтому
+// сбой или рестарт посреди продолжения её не теряют — захват истечёт, и
+// задачу подхватит следующий проход. ok=false — задачу уже продолжают или
+// ожидания нет.
+// CredentialsClaim — захват продолжения ждущей задачи: куда она шла и
+// метка захвата, по которой владелец сверяет, что захват всё ещё его.
+type CredentialsClaim struct {
+	Target, Entry string
+	At            time.Time
+}
+
+func (s *Store) ClaimCredentialsWait(ctx context.Context, taskID string, lease time.Duration) (CredentialsClaim, bool, error) {
+	var c CredentialsClaim
+	err := s.Pool.QueryRow(ctx, `
+		UPDATE tasks SET wait_claimed_at=now()
+		WHERE id=$1 AND wait_kind=$2
+		  AND (wait_claimed_at IS NULL OR wait_claimed_at < now() - make_interval(secs => $3))
+		RETURNING wait_target, wait_entry, wait_claimed_at`, taskID, WaitKindCredentials, lease.Seconds()).Scan(&c.Target, &c.Entry, &c.At)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CredentialsClaim{}, false, nil
+	}
+	return c, err == nil, err
+}
+
+// RenewCredentialsClaim продлевает свой захват перед переходом: захват
+// истёк и достался другому проходу — false, переход не делается.
+func (s *Store) RenewCredentialsClaim(ctx context.Context, taskID string, c CredentialsClaim) (CredentialsClaim, bool, error) {
+	err := s.Pool.QueryRow(ctx, `
+		UPDATE tasks SET wait_claimed_at=now()
+		WHERE id=$1 AND wait_kind=$2 AND wait_claimed_at=$3
+		RETURNING wait_claimed_at`, taskID, WaitKindCredentials, c.At).Scan(&c.At)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return c, false, nil
+	}
+	return c, err == nil, err
+}
+
+// NoteCredentialsResumeFailure — продолжение не удалось по причине, не
+// связанной с учётными данными: причина ожидания показывает настоящую
+// ошибку, счётчик неудач растёт. Возвращает число неудач подряд.
+func (s *Store) NoteCredentialsResumeFailure(ctx context.Context, taskID, reason string) (int, error) {
+	var n int
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var projectID, epicID, step string
+		err := tx.QueryRow(ctx, `
+            UPDATE tasks t SET wait_failures = wait_failures + 1, wait_reason=$3, updated_at=now()
+            FROM epics e WHERE t.id=$1 AND t.wait_kind=$2 AND e.id=t.epic_id
+            RETURNING t.wait_failures, e.project_id::text, t.epic_id::text, t.step_id`,
+			taskID, WaitKindCredentials, clipRunes(reason, 300)).Scan(&n, &projectID, &epicID, &step)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		_, err = appendEvent(ctx, tx, EventInput{ActorKind: domain.ActorSystem, Type: "task.wait",
+			ProjectID: projectID, EpicID: epicID, TaskID: taskID, Text: reason,
+			Payload: map[string]any{"step": step, "credentials": true, "reason": reason, "error": reason, "attempt": n}})
+		return err
+	})
+	return n, err
+}
+
+// ClearCredentialsWait снимает ожидание учётных данных (задача уходит в
+// эскалацию после постоянных неудач продолжения).
+func (s *Store) ClearCredentialsWait(ctx context.Context, taskID string) error {
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE tasks SET wait_kind='', wait_reason='', wait_claimed_at=NULL, wait_failures=0
+		WHERE id=$1 AND wait_kind=$2`, taskID, WaitKindCredentials)
+	return err
+}
+
+// AwaitingCredentials — задачи, ждущие восстановления подключения, у
+// которых оно уже рабочее: исход шага закреплён, Epic идёт, продолжение
+// никто не держит (или захват старше lease).
+func (s *Store) AwaitingCredentials(ctx context.Context, lease time.Duration) ([]domain.Task, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT `+taskCols+` FROM `+taskFrom+`
+		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+		WHERE t.wait_kind = $1 AND t.step_gen = t.step_closed_gen
+		  AND t.status IN ('ready','running','fixing','testing','review')
+		  AND (t.wait_claimed_at IS NULL OR t.wait_claimed_at < now() - make_interval(secs => $2))
+		  AND NOT EXISTS (SELECT 1 FROM projects cp JOIN scm_credentials cc ON cc.id = cp.credential_id
+			WHERE cp.id = e.project_id AND cc.state = 'invalid')
+		ORDER BY t.num`, WaitKindCredentials, lease.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // SetTaskTeamWait фиксирует причину ожидания агента команды: её снимает
 // ClearTeamWaits, когда задача стоит из-за бюджета или зависимостей Epic'а.
 func (s *Store) SetTaskTeamWait(ctx context.Context, taskID, reason string) error {

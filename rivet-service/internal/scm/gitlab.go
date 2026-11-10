@@ -73,7 +73,7 @@ func (g *GitLab) CreatePR(ctx context.Context, repo, branch, base, title, body s
 		// «Another open merge request already exists for this source branch».
 		return PR{}, fmt.Errorf("gitlab create MR: %w: %d: %s", ErrPRExists, code, tailMsg(raw))
 	default:
-		return PR{}, fmt.Errorf("gitlab create MR: %d: %s", code, tailMsg(raw))
+		return PR{}, statusErr("gitlab create MR", code, raw)
 	}
 	var out struct {
 		IID    int    `json:"iid"`
@@ -93,7 +93,7 @@ func (g *GitLab) Diff(ctx context.Context, repo string, number int) (string, err
 		return "", err
 	}
 	if code != http.StatusOK {
-		return "", fmt.Errorf("gitlab MR changes: %d: %s", code, tailMsg(raw))
+		return "", statusErr("gitlab MR changes", code, raw)
 	}
 	var out struct {
 		Changes []struct {
@@ -141,7 +141,13 @@ func (g *GitLab) MergeAt(ctx context.Context, repo string, number int, headSHA s
 		if mergeRefusal(code) && g.conflicting(ctx, repo, number) {
 			return "", fmt.Errorf("gitlab merge: %w: %s", ErrMergeConflict, tailMsg(raw))
 		}
-		return "", fmt.Errorf("gitlab merge: %d: %s", code, tailMsg(raw))
+		// 401 на merge GitLab отдаёт и рабочему токену без права merge в
+		// целевую ветку («This user does not have permission to accept this
+		// merge request»): это запрет операции, а не отзыв токена.
+		if code == http.StatusUnauthorized {
+			return "", &hostError{msg: fmt.Sprintf("gitlab merge: %d: %s", code, clip(raw)), kind: ErrForbidden}
+		}
+		return "", statusErr("gitlab merge", code, raw)
 	}
 	var out struct {
 		SHA       string `json:"sha"`
@@ -197,7 +203,7 @@ func (g *GitLab) HeadSHA(ctx context.Context, repo, branch string) (string, erro
 		return "", fmt.Errorf("gitlab branch %s: %w", branch, ErrBranchNotFound)
 	}
 	if code != http.StatusOK {
-		return "", fmt.Errorf("gitlab branch: %d: %s", code, tailMsg(raw))
+		return "", statusErr("gitlab branch", code, raw)
 	}
 	var out struct {
 		Commit struct {
@@ -303,7 +309,7 @@ func (g *GitLab) CreateRepo(ctx context.Context, in NewRepo) (RepoInfo, error) {
 		return RepoInfo{}, ErrRepoExists
 	}
 	if code != http.StatusCreated {
-		return RepoInfo{}, fmt.Errorf("gitlab create project: %d: %s", code, tailMsg(raw))
+		return RepoInfo{}, statusErr("gitlab create project", code, raw)
 	}
 	var out struct {
 		PathWithNamespace string `json:"path_with_namespace"`
@@ -327,7 +333,7 @@ func (g *GitLab) namespaceID(ctx context.Context, owner string) (int, error) {
 		return 0, err
 	}
 	if code != http.StatusOK {
-		return 0, fmt.Errorf("gitlab namespaces: %d: %s", code, tailMsg(raw))
+		return 0, statusErr("gitlab namespaces", code, raw)
 	}
 	var list []struct {
 		ID       int    `json:"id"`
@@ -443,7 +449,7 @@ func (g *GitLab) TriggerPipeline(ctx context.Context, repo, pipeline, ref string
 		return PipelineRun{}, err
 	}
 	if code != http.StatusCreated && code != http.StatusOK {
-		return PipelineRun{}, fmt.Errorf("gitlab pipeline: %d: %s", code, clip(raw))
+		return PipelineRun{}, statusErr("gitlab pipeline", code, raw)
 	}
 	var out gitlabPipeline
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -463,7 +469,7 @@ func (g *GitLab) PipelineRun(ctx context.Context, repo, pipeline, ref, runID str
 		return PipelineRun{}, err
 	}
 	if code != http.StatusOK {
-		return PipelineRun{}, fmt.Errorf("gitlab pipeline: %d: %s", code, clip(raw))
+		return PipelineRun{}, statusErr("gitlab pipeline", code, raw)
 	}
 	var out gitlabPipeline
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -513,7 +519,7 @@ func (g *GitLab) ReadFile(ctx context.Context, repo, ref, path string) (FileCont
 		return FileContent{}, ErrFileNotFound
 	}
 	if code != http.StatusOK {
-		return FileContent{}, fmt.Errorf("gitlab files: %d: %s", code, clip(raw))
+		return FileContent{}, statusErr("gitlab files", code, raw)
 	}
 	// Ответ упёрся в лимит чтения: JSON обрезан, файл слишком большой.
 	if len(raw) >= MaxResponseBytes {
@@ -562,7 +568,7 @@ func (g *GitLab) WriteFile(ctx context.Context, repo, ref, path, prevID, content
 		return Commit{}, err
 	}
 	if code != http.StatusOK && code != http.StatusCreated {
-		return Commit{}, fmt.Errorf("gitlab commit: %d: %s", code, clip(raw))
+		return Commit{}, statusErr("gitlab commit", code, raw)
 	}
 	var out struct {
 		ID     string `json:"id"`
@@ -587,11 +593,11 @@ func (g *GitLab) BranchProtected(ctx context.Context, repo, branch string) (bool
 		return false, err
 	}
 	switch code {
-	case http.StatusNotFound, http.StatusForbidden, http.StatusUnauthorized:
+	case http.StatusNotFound, http.StatusForbidden:
 		return false, nil
 	case http.StatusOK:
 	default:
-		return false, fmt.Errorf("gitlab protected branch: %d: %s", code, clip(raw))
+		return false, statusErr("gitlab protected branch", code, raw)
 	}
 	var out struct {
 		Name string `json:"name"`

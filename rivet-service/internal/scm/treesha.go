@@ -39,7 +39,7 @@ func (g *GitHub) PathSHA(ctx context.Context, repo, ref, dir string) (string, er
 		return "", nil
 	}
 	if code != http.StatusOK {
-		return "", fmt.Errorf("github contents %s: %d: %s", parent, code, tailMsg(raw))
+		return "", statusErr("github contents "+parent, code, raw)
 	}
 	var entries []struct {
 		Name string `json:"name"`
@@ -73,7 +73,7 @@ func (g *GitLab) PathSHA(ctx context.Context, repo, ref, dir string) (string, er
 			return "", nil
 		}
 		if code != http.StatusOK {
-			return "", fmt.Errorf("gitlab tree %s: %d: %s", parent, code, tailMsg(raw))
+			return "", statusErr("gitlab tree "+parent, code, raw)
 		}
 		var entries []struct {
 			ID   string `json:"id"`
@@ -98,6 +98,9 @@ func (g *GitLab) PathSHA(ctx context.Context, repo, ref, dir string) (string, er
 // PathSHA — fake в git-режиме: настоящий SHA дерева. Без git-режима
 // сравнивать нечего, снимок читается целиком.
 func (f *Fake) PathSHA(ctx context.Context, repo, ref, dir string) (string, error) {
+	if err := f.refused(repo); err != nil {
+		return "", err
+	}
 	gitDir, inGit := f.repoDir(repo)
 	if !inGit {
 		return "", nil

@@ -43,6 +43,12 @@ type Fake struct {
 	// файла): проверка состояния и сдвиг ref'а должны видеть одно
 	// состояние.
 	gitMu sync.Mutex
+	// revoked — репозитории, чьи учётные данные отозваны (SetRevoked);
+	// revokedTokens — отозванные токены (SetRevokedToken); revokedFile —
+	// файл со списком отозванных токенов (FakeRevokedEnv).
+	revoked       map[string]bool
+	revokedTokens map[string]bool
+	revokedFile   string
 }
 
 type fakePR struct{ branch, base string }
@@ -60,11 +66,74 @@ const FakeGitDirEnv = "RIVET_FAKE_GIT_DIR"
 // Без списка git-режим не действует ни для одного репозитория.
 const FakeGitReposEnv = "RIVET_FAKE_GIT_REPOS"
 
+// FakeRevokedEnv — файл со списком отозванных токенов (по строке): fake-
+// хостинг отвечает на операции с ними 401, проверка подключения — «токен
+// не принят». Файл читается при каждой операции, поэтому e2e отзывает
+// токен на ходу, а замена токена другим возвращает подключение в работу.
+const FakeRevokedEnv = "RIVET_FAKE_SCM_REVOKED"
+
 // NewFake — fake-адаптер; git-режим включают переменные FakeGitDirEnv и
-// FakeGitReposEnv.
+// FakeGitReposEnv, имитацию отзыва токенов — FakeRevokedEnv.
 func NewFake() *Fake {
-	return NewFakeGit(os.Getenv(FakeGitDirEnv), strings.Split(os.Getenv(FakeGitReposEnv), ",")...)
+	f := NewFakeGit(os.Getenv(FakeGitDirEnv), strings.Split(os.Getenv(FakeGitReposEnv), ",")...)
+	f.revokedFile = os.Getenv(FakeRevokedEnv)
+	return f
 }
+
+// SetRevoked отзывает или возвращает доступ к репозиторию для любого
+// токена (тесты).
+func (f *Fake) SetRevoked(repo string, on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revoked == nil {
+		f.revoked = map[string]bool{}
+	}
+	f.revoked[repo] = on
+}
+
+// SetRevokedToken отзывает или возвращает токен (тесты).
+func (f *Fake) SetRevokedToken(token string, on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revokedTokens == nil {
+		f.revokedTokens = map[string]bool{}
+	}
+	f.revokedTokens[token] = on
+}
+
+// tokenRevoked — токен отозван тестом или файлом стенда.
+func (f *Fake) tokenRevoked(token string) bool {
+	f.mu.Lock()
+	on := f.revokedTokens[token]
+	f.mu.Unlock()
+	if on || f.revokedFile == "" || token == "" {
+		return on
+	}
+	raw, err := os.ReadFile(f.revokedFile)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) == token {
+			return true
+		}
+	}
+	return false
+}
+
+// refused — ответ хостинга 401 для репозитория с отозванным доступом,
+// иначе nil.
+func (f *Fake) refused(repo string) error {
+	f.mu.Lock()
+	on := f.revoked[repo]
+	f.mu.Unlock()
+	if !on {
+		return nil
+	}
+	return errFakeRevoked
+}
+
+var errFakeRevoked = &hostError{msg: "fake: 401: токен отозван", kind: ErrUnauthorized}
 
 // NewFakeGit — fake-адаптер в git-режиме для репозиториев repos из
 // каталога bare-репозиториев dir.
@@ -79,6 +148,9 @@ func NewFakeGit(dir string, repos ...string) *Fake {
 }
 
 func (f *Fake) CreatePR(ctx context.Context, repo, branch, base, title, body string) (PR, error) {
+	if err := f.refused(repo); err != nil {
+		return PR{}, err
+	}
 	dir, inGit := f.repoDir(repo)
 	var n int
 	if inGit {
@@ -136,6 +208,9 @@ func (f *Fake) raiseSeq(n int64) {
 }
 
 func (f *Fake) Diff(ctx context.Context, repo string, number int) (string, error) {
+	if err := f.refused(repo); err != nil {
+		return "", err
+	}
 	return "diff --git a/e2e b/e2e\n+e2e", nil
 }
 
@@ -144,6 +219,9 @@ func (f *Fake) Diff(ctx context.Context, repo string, number int) (string, error
 // доставка, которой нужна рабочая копия версии (Kubernetes), на стенде
 // работает. В git-режиме базовая ветка продвигается по-настоящему (gitMerge).
 func (f *Fake) Merge(ctx context.Context, repo string, number int) (string, error) {
+	if err := f.refused(repo); err != nil {
+		return "", err
+	}
 	key := fmt.Sprintf("%s#%d", repo, number)
 	f.mu.Lock()
 	conflict := f.conflicts[key]
@@ -174,6 +252,9 @@ func (f *Fake) Merge(ctx context.Context, repo string, number int) (string, erro
 // HeadSHA — без git-режима «вершина» ветки: для стенда это сама ветка
 // (см. Merge). В git-режиме настоящий SHA, пустая ветка — HEAD репозитория.
 func (f *Fake) HeadSHA(ctx context.Context, repo, branch string) (string, error) {
+	if err := f.refused(repo); err != nil {
+		return "", err
+	}
 	if dir, ok := f.repoDir(repo); ok {
 		return f.gitHead(ctx, dir, branch)
 	}
@@ -185,6 +266,9 @@ func (f *Fake) HeadSHA(ctx context.Context, repo, branch string) (string, error)
 
 // Probe в fake-режиме всегда успешен: стенд не ходит на хостинг.
 func (f *Fake) Probe(ctx context.Context, repo string) ProbeResult {
+	if repo != "" && f.refused(repo) != nil {
+		return probeFail(ReasonBadToken, "токен не принят хостингом")
+	}
 	if repo == "" {
 		return ProbeResult{OK: true, TokenOwner: "e2e-bot"}
 	}
@@ -213,6 +297,9 @@ func (f *Fake) RegisterWebhook(ctx context.Context, repo, url, secret string) (b
 // TriggerPipeline — фиктивный прогон пайплайна: сразу известен и сразу
 // успешен (e2e-стенд и отладка внешней доставки без хостинга).
 func (f *Fake) TriggerPipeline(ctx context.Context, repo, pipeline, ref string, vars map[string]string) (PipelineRun, error) {
+	if err := f.refused(repo); err != nil {
+		return PipelineRun{}, err
+	}
 	n := f.seq.Add(1)
 	return PipelineRun{
 		RunID: fmt.Sprintf("%d", n),
@@ -223,6 +310,9 @@ func (f *Fake) TriggerPipeline(ctx context.Context, repo, pipeline, ref string, 
 
 // PipelineRun — фиктивный прогон завершается успехом при первом же опросе.
 func (f *Fake) PipelineRun(ctx context.Context, repo, pipeline, ref, runID string, _ time.Time) (PipelineRun, error) {
+	if err := f.refused(repo); err != nil {
+		return PipelineRun{}, err
+	}
 	return PipelineRun{
 		RunID: runID,
 		URL:   fmt.Sprintf("https://fake.local/%s/pipelines/%s", repo, runID),
@@ -236,6 +326,9 @@ func (f *Fake) PipelineRun(ctx context.Context, repo, pipeline, ref, runID strin
 // адаптера, чего достаточно для сквозной проверки публикации GitOps. В
 // git-режиме файл читается из версии ref bare-репозитория стенда.
 func (f *Fake) ReadFile(ctx context.Context, repo, ref, path string) (FileContent, error) {
+	if err := f.refused(repo); err != nil {
+		return FileContent{}, err
+	}
 	if dir, inGit := f.repoDir(repo); inGit {
 		return f.gitRead(ctx, dir, repo, ref, path)
 	}
@@ -254,6 +347,9 @@ func (f *Fake) ReadFile(ctx context.Context, repo, ref, path string) (FileConten
 // (gitWrite): окружение GitOps e2e-стенда читает версию из git, как
 // GitOps-контроллер.
 func (f *Fake) WriteFile(ctx context.Context, repo, ref, path, prevID, content, message string) (Commit, error) {
+	if err := f.refused(repo); err != nil {
+		return Commit{}, err
+	}
 	if dir, inGit := f.repoDir(repo); inGit {
 		return f.gitWrite(ctx, dir, repo, ref, path, prevID, content, message)
 	}
@@ -283,5 +379,8 @@ func fakeCommitURL(repo, sha string) string {
 // BranchProtected — на стенде ветка считается защищённой: настоящих
 // правил хостинга у fake нет, а сценарии проверяют логику Rivet.
 func (f *Fake) BranchProtected(ctx context.Context, repo, branch string) (bool, error) {
+	if err := f.refused(repo); err != nil {
+		return false, err
+	}
 	return true, nil
 }

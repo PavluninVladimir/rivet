@@ -122,6 +122,14 @@ type Engine struct {
 	URLPolicy URLPolicy
 	urlOnce   sync.Once
 	urlClient *http.Client
+	// credRecheckAt и credRecheckRunning — последний запуск и признак
+	// идущей повторной проверки нерабочих учётных данных хостинга
+	// (fix-credential-state); под mu.
+	credRecheckAt      time.Time
+	credRecheckRunning bool
+	// credProbedOK — когда учётные данные (по id) последний раз прошли
+	// проверку подключения после неоднозначного отказа; под mu.
+	credProbedOK map[string]time.Time
 }
 
 func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, heartbeat time.Duration) *Engine {
@@ -202,6 +210,15 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("budget: %w", err)
 	}
+	// Нерабочие учётные данные хостинга (fix-credential-state): проекту
+	// ничего не назначается до восстановления подключения — стадия упала
+	// бы на clone или push и потратила попытку.
+	credExcluded, err := e.credentialExclusions(ctx)
+	if err != nil {
+		return fmt.Errorf("credentials: %w", err)
+	}
+	excluded = append(excluded, credExcluded...)
+	e.recheckCredentials(ctx)
 	// Бюджет Epic (спека orchestration «Бюджет Epic»): исчерпанные Epic
 	// исключаются из назначений до решения человека (поднять/снять бюджет).
 	excludedEpics, err := e.epicBudgetExclusions(ctx)
@@ -275,6 +292,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err := e.reconcileSteps(ctx); err != nil {
 		return err
 	}
+	e.resumeAwaitingCredentials(ctx)
 	return e.tickDeployments(ctx)
 }
 
@@ -413,12 +431,20 @@ func (e *Engine) epicBudgetExclusions(ctx context.Context) ([]string, error) {
 // SCMFor — адаптер хостинга проекта: провайдер, инстанс и учётные данные
 // живут у проекта (design add-repo-onboarding, решение 5). Проект без
 // собственных учётных данных работает на запасном адаптере установки.
+//
+// Итог каждой операции отмечается в состоянии учётных данных проекта: отказ
+// по авторизации делает их нерабочими (ошибка обёрнута в
+// ErrSCMCredentials), успех возвращает в работу (fix-credential-state).
 func (e *Engine) SCMFor(ctx context.Context, p domain.Project) (scm.Adapter, error) {
-	token, err := e.St.ProjectToken(ctx, p.ID, e.Box)
+	cred, err := e.St.ProjectTokenState(ctx, p.ID, e.Box)
 	if err != nil {
 		return nil, fmt.Errorf("учётные данные проекта %s: %w", p.ID, err)
 	}
-	return e.Adapters.For(scm.Provider(p.Provider), p.BaseURL, token)
+	a, err := e.Adapters.For(scm.Provider(p.Provider), p.BaseURL, cred.Token)
+	if err != nil {
+		return nil, err
+	}
+	return e.track(a, p, cred), nil
 }
 
 func (e *Engine) projectOf(ctx context.Context, task domain.Task) (domain.Project, domain.Epic, error) {
@@ -455,6 +481,9 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	if err != nil {
 		slog.Error("dispatch: project", "task", task.ID, "err", err)
 		return "", false, fmt.Errorf("проект задачи: %w", err)
+	}
+	if e.credentialsInvalid(ctx, p.ID) {
+		return "", false, ErrSCMCredentials
 	}
 	if runner.Agent == "" {
 		if r, err := e.St.GetRunner(ctx, runner.ID); err == nil {
@@ -519,7 +548,9 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	extra := ""
 	switch {
 	case step.Kind == policy.StepReview:
-		extra = e.reviewContext(ctx, task)
+		if extra, err = e.reviewContext(ctx, task); err != nil {
+			return "", false, err
+		}
 	case step.Kind == policy.StepCode && entry == policy.OutcomeChanges:
 		extra = e.peekStageContext(task.ID)
 	}
@@ -827,6 +858,22 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 	if !ok {
 		return fmt.Errorf("шаг %q запуска не найден в снимке процесса задачи %s", run.StepID, task.ID)
 	}
+	// Git на runner'е отклонён хостингом по авторизации (fix-credential-state):
+	// если проверка подключения подтверждает нерабочие учётные данные,
+	// запуск ждёт их восстановления без вердикта, попытка не расходуется.
+	if sr.Verdict == verdictSCMAuth {
+		handled, err := e.runnerAuthFailure(ctx, task, run, runnerID, sr.Detail)
+		if err != nil || handled {
+			return err
+		}
+		// Отзыв не подтвердился: сбой git разбирается, как раньше. На шаге
+		// test это сбой инфраструктуры (повтор без расхода попытки), на
+		// остальных — обычный неуспех стадии.
+		sr.Verdict = ""
+		if step.Kind == policy.StepTest {
+			sr.Verdict = verdictInfraError
+		}
+	}
 	// Сбой инфраструктуры шага test (add-agent-roles, add-native-agent):
 	// git, push, падение тестировщика, проверки без песочницы или упавшие
 	// из-за её окружения — не замечания разработчику. Шаг повторяется без
@@ -913,6 +960,9 @@ func (e *Engine) failParts(ctx context.Context, task domain.Task, reason domain.
 	}
 	ev := store.EventInput{ActorKind: actor, ActorID: actorID, Type: "task.status", Text: msg, Payload: failPayload}
 	return ev, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET wait_kind='', wait_reason='', wait_claimed_at=NULL, wait_failures=0 WHERE id=$1`, task.ID); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx,
 			`UPDATE runners SET status='idle', task_id=NULL WHERE task_id=$1`, task.ID); err != nil {
 			return err
@@ -973,6 +1023,11 @@ func (e *Engine) OnBlocked(ctx context.Context, runnerID string, b *pb.BlockedQu
 // review переводится в fixing на свободном runner'е, агент получает промпт
 // человека, результат идёт обычным конвейером. Попытка не расходуется.
 func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login string, private bool) (string, error) {
+	// Сессия на нерабочих учётных данных хостинга упала бы на clone или
+	// push, потратив работу агента (fix-credential-state).
+	if projectID, _, err := e.St.TaskRefs(ctx, taskID); err == nil && e.credentialsInvalid(ctx, projectID) {
+		return "", fmt.Errorf("%w: замените токен в настройках проекта, потом запускайте сессию", ErrSCMCredentials)
+	}
 	// Подключение модели проверяется по выбранному runner'у до изменений
 	// задачи: отказ по нему не закрывает эскалацию и не переводит задачу в
 	// fixing (fix-agent-without-connection).

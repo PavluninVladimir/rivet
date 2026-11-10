@@ -221,20 +221,30 @@ func (e *Engine) retryMergePRs(ctx context.Context) {
 		return
 	}
 	for _, task := range tasks {
+		projectID, _, err := e.St.TaskRefs(ctx, task.ID)
+		if err != nil || e.credentialsInvalid(ctx, projectID) {
+			continue
+		}
 		proc := store.TaskProcess(task)
 		if proc == nil {
 			continue
 		}
-		if step, ok := proc.Step(task.StepID); !ok || step.Kind != policy.StepMerge {
+		if step, ok := proc.Step(task.StepID); !ok || (step.Kind != policy.StepMerge && step.Kind != policy.StepReview) {
 			continue
 		}
 		p, _, err := e.projectOf(ctx, task)
+		if err == nil && e.credentialsInvalid(ctx, p.ID) {
+			continue
+		}
 		if err != nil {
 			continue
 		}
 		withPR, err := e.ensurePR(ctx, task)
 		if err != nil {
 			slog.Warn("PR задачи на merge: хостинг снова не ответил", "task", task.ID, "err", err)
+			continue
+		}
+		if step, ok := proc.Step(task.StepID); ok && step.Kind == policy.StepReview {
 			continue
 		}
 		eff, err := e.St.EffectivePolicy(ctx, p.ID)
@@ -252,6 +262,9 @@ func (e *Engine) retryMergePRs(ctx context.Context) {
 // merge и одна эскалация PR_NOT_CREATED: человек подтвердит merge, когда
 // хостинг ответит (подтверждение создаёт PR), или отменит задачу.
 func (e *Engine) prMissingAtMerge(ctx context.Context, task domain.Task, p domain.Project, cause error) error {
+	if errors.Is(cause, ErrSCMCredentials) {
+		return e.St.SetTaskWaitReason(ctx, task.ID, "учётные данные хостинга не работают: PR откроется после восстановления подключения")
+	}
 	slog.Error("create PR на шаге merge", "task", task.ID, "err", cause)
 	msg := fmt.Sprintf("merge не выполнен: PR ветки %s не создан: %v. Подтвердите merge, когда хостинг ответит. Если в ветке нет изменений, задачу можно доработать в сессии из консоли или отменить", task.Branch, cause)
 	if _, err := e.St.AppendEvent(ctx, store.EventInput{
@@ -295,6 +308,12 @@ func (e *Engine) prBeforeResume(ctx context.Context, task domain.Task, step poli
 		delete(e.prWait, task.ID)
 		e.mu.Unlock()
 		return withPR, true
+	}
+	if errors.Is(err, ErrSCMCredentials) {
+		if werr := e.St.SetTaskWaitReason(ctx, task.ID, "учётные данные хостинга не работают: PR откроется после восстановления подключения"); werr != nil {
+			slog.Error("ожидание PR", "err", werr)
+		}
+		return task, false
 	}
 	slog.Error("create PR перед review", "task", task.ID, "err", err)
 	st.fails++
@@ -360,6 +379,10 @@ func (e *Engine) ResumePendingPRs(ctx context.Context) {
 		return
 	}
 	for _, task := range tasks {
+		projectID, _, err := e.St.TaskRefs(ctx, task.ID)
+		if err != nil || e.credentialsInvalid(ctx, projectID) {
+			continue
+		}
 		proc := store.TaskProcess(task)
 		if proc == nil {
 			continue
