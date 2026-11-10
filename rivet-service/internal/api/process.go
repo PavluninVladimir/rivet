@@ -62,6 +62,41 @@ func runViews(runs []store.StepRun) []stepRunView {
 	return out
 }
 
+// maxStepHistory: сколько последних переходов отдаёт граф процесса.
+const maxStepHistory = 500
+
+// getTaskProcess отдаёт процесс задачи для графа в деталке (api-contract
+// fix-web-console-tails): снимок процесса, по которому идёт задача (null без
+// снимка), последние переходы по шагам и текущие шаг и статус задачи.
+// Отдельно от GET /tasks/{id}: деталка перечитывает задачу на каждое
+// событие проекта, а процесс только на переходы и смену статуса этой
+// задачи. История читается раньше задачи: если между запросами закоммитится
+// новый переход, позиция задачи окажется впереди истории, а не позади.
+// Граф принимает такое расхождение за вход на шаг без события; обратное
+// он показал бы ложной эскалацией.
+func (s *Server) getTaskProcess(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !s.requireTaskMember(w, r, id) {
+		return
+	}
+	history, err := s.St.TaskStepHistory(r.Context(), id, maxStepHistory)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	t, err := s.St.GetTask(r.Context(), id)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	var process any
+	if len(t.Process) > 0 {
+		process = t.Process
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"process": process, "step_history": history,
+		"step": t.StepID, "status": t.Status})
+}
+
 // stepItemView — элемент очереди «мои шаги» (api-contract StepItem).
 type stepItemView struct {
 	RunID       int64     `json:"run_id"`

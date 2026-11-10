@@ -153,8 +153,13 @@ func AgentWorkEvent(id, name string, busy bool) EventInput {
 }
 
 // RoleStreamTypes — события установки, которые идут и в потоки проектов.
+// Из потока берутся только события без проекта, поэтому policy.activated
+// здесь означает активацию политики установки (fix-web-console-tails): она
+// действует во всех проектах, и консоль любого проекта перечитывает по ней
+// действующую политику. Активация политики проекта идёт событием проекта.
 var RoleStreamTypes = []string{"role.created", "role.updated", "role.deleted", "runner.renamed",
-	"team.agent_created", "team.agent_updated", "team.agent_deleted", EventAgentBusy, EventAgentFree}
+	"team.agent_created", "team.agent_updated", "team.agent_deleted", EventAgentBusy, EventAgentFree,
+	"policy.activated"}
 
 // auditFeedSQL — лента аудита без фильтра по типу. Занятость агентов
 // служебная: пишется на каждую стадию и нужна потокам консоли, а не аудиту,

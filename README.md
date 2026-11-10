@@ -645,6 +645,23 @@ RIVET_ALLOW_PRIVATE_URLS». Наблюдение такого окружения
 Runner'ы стоит пересобрать: проверки наблюдения получают только runner'ы с
 feature `monitor`, URL-проверки — с `monitor_url`.
 
+**Индекс истории переходов (миграция 0044).** Миграция строит частичный
+индекс по журналу событий для графа процесса в деталке задачи. Пока он
+строится, запись в журнал ждёт, и на большой таблице `events` это
+заметная пауза при старте. На такой установке индекс можно создать заранее,
+при работающем rivetd, тогда миграция пройдёт мгновенно:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS events_task_step
+    ON events(task_id, id) WHERE type = 'task.step';
+```
+
+Если `CREATE INDEX CONCURRENTLY` прервался, он оставляет неготовый
+(INVALID) индекс с тем же именем: миграция его пропустит, а запросы его
+не используют. Проверьте `SELECT indisvalid FROM pg_index WHERE
+indexrelid = 'events_task_step'::regclass` и, если там `false`, удалите
+индекс (`DROP INDEX CONCURRENTLY events_task_step`) и создайте заново.
+
 ### Веб-консоль
 
 rivetd отдаёт консоль из `internal/webui/dist` (go:embed). Чтобы пересобрать

@@ -186,6 +186,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/environments/{id}/deployments", s.envDeployments)
 	mux.HandleFunc("GET /api/v1/deployments/{id}/log", s.deploymentLog)
 	mux.HandleFunc("GET /api/v1/tasks/{id}", s.getTask)
+	mux.HandleFunc("GET /api/v1/tasks/{id}/process", s.getTaskProcess)
 	mux.HandleFunc("GET /api/v1/me/steps", s.mySteps)
 	mux.HandleFunc("POST /api/v1/tasks/{id}/runs/{run}/verdict", s.runVerdict)
 	mux.HandleFunc("PATCH /api/v1/tasks/{id}", s.patchTask)
