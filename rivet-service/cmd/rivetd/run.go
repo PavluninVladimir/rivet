@@ -17,6 +17,7 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/api"
 	"github.com/PavluninVladimir/rivet/internal/blob"
 	"github.com/PavluninVladimir/rivet/internal/config"
+	"github.com/PavluninVladimir/rivet/internal/infra"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/runnertls"
@@ -148,6 +149,8 @@ func run(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	engine.URLPolicy = urlPolicy
+	// Провайдеры хостов окружений (add-environment-provisioning).
+	engine.Infra = &infra.Factory{RUVDSBaseURL: cfg.RUVDSAPIURL}
 	// RIVET_SCM=fake — установка без настоящих хостингов (e2e-стенд).
 	engine.Adapters.Force = cfg.SCM == "fake"
 

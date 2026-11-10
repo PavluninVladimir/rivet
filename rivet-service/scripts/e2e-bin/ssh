@@ -1,0 +1,26 @@
+#!/bin/sh
+# Подмена ssh для deploy-runner'а e2e-стенда (add-environment-provisioning).
+# Только тестовая инфраструктура: настоящего сервера RUVDS на стенде нет,
+# поэтому скрипт, который ушёл бы на хост, исполняется локально. При
+# первом подключении (StrictHostKeyChecking=accept-new) в known_hosts
+# задания пишется фиктивный ключ хоста, как сделал бы настоящий ssh.
+# Аргументы каждого вызова пишутся в $E2E_SSH_LOG для проверок сценария.
+known=""; accept=""; host=""
+log="${E2E_SSH_LOG:-/dev/null}"
+printf '%s\n' "$*" >> "$log"
+while [ $# -gt 1 ]; do
+  case "$1" in
+    -o)
+      case "$2" in
+        UserKnownHostsFile=*) known="${2#UserKnownHostsFile=}" ;;
+        StrictHostKeyChecking=accept-new) accept=1 ;;
+      esac
+      shift 2 ;;
+    -*) shift ;;
+    *) if [ -z "$host" ]; then host="$1"; shift; else break; fi ;;
+  esac
+done
+if [ -n "$accept" ] && [ -n "$known" ] && ! grep -q "^${host#*@} " "$known" 2>/dev/null; then
+  echo "${host#*@} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE2eFakeHostKeyOfTheStandOnly" >> "$known"
+fi
+exec /bin/sh -c "$1"

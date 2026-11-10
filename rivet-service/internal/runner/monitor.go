@@ -72,7 +72,7 @@ func validText(s string) string { return strings.ToValidUTF8(s, "�") }
 func (a *agent) runMonitorCmd(ctx context.Context, job *pb.MonitorJob, script string, timeout time.Duration) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	dj := &pb.DeployJob{Repo: job.Repo, EnvName: job.EnvName, Host: job.Host}
+	dj := &pb.DeployJob{Repo: job.Repo, EnvName: job.EnvName, Host: job.Host, HostKey: job.HostKey}
 	out := &maskedTail{}
 	_, err := a.runDeployCmd(cctx, dj, a.cfg.Workdir, script, out.feed)
 	text := out.String()
@@ -196,7 +196,7 @@ func (c Config) features() []string {
 	}
 	for _, cp := range c.Capabilities {
 		if cp == "deploy" {
-			return append(out, featureMonitor, featureMonitorURL)
+			return append(out, featureMonitor, featureMonitorURL, featureHostJobs)
 		}
 	}
 	return out

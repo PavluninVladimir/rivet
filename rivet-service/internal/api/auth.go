@@ -18,7 +18,12 @@ const sessionCookie = "rivet_session"
 
 type ctxKey int
 
-const userKey ctxKey = iota
+const (
+	userKey ctxKey = iota
+	// sessionKey: запрос аутентифицирован сессией консоли (cookie), а не
+	// personal access token (add-environment-provisioning).
+	sessionKey
+)
 
 // currentUser — идентичность запроса, положенная middleware.
 func currentUser(r *http.Request) domain.User {
@@ -32,6 +37,19 @@ func user(r *http.Request) string { return currentUser(r).Login }
 func unauthorized(w http.ResponseWriter) {
 	writeJSON(w, http.StatusUnauthorized,
 		map[string]apiError{"error": {Code: "unauthorized", Message: "требуется аутентификация"}})
+}
+
+// requireSession: действие только человека в консоли: деньги и
+// необратимые действия с инфраструктурой, ввод токена провайдера. Запрос с
+// personal access token отклоняется (спека access-policy «Траты и
+// необратимые действия с инфраструктурой»).
+func requireSession(w http.ResponseWriter, r *http.Request) bool {
+	if ok, _ := r.Context().Value(sessionKey).(bool); ok {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]apiError{"error": {Code: "session_required",
+		Message: "действие доступно только из сессии консоли, а не по personal access token"}})
+	return false
 }
 
 func forbidden(w http.ResponseWriter, msg string) {
@@ -95,7 +113,11 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 				Message: "нужно сменить пароль, чтобы продолжить: его сбросил администратор или он совпадает с паролем из документации Rivet"}})
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))
+		ctx := context.WithValue(r.Context(), userKey, u)
+		if viaCookie {
+			ctx = context.WithValue(ctx, sessionKey, true)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

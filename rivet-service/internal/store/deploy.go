@@ -121,6 +121,18 @@ func (s *Store) DeleteEnvironment(ctx context.Context, envID string) error {
 		if active {
 			return fmt.Errorf("идёт публикация: %w", ErrConflict)
 		}
+		// Сервер живёт, пока живёт окружение: окружение с живым хостом не
+		// удаляется, иначе сервер у провайдера остался бы без хозяина
+		// (add-environment-provisioning, design решение 8).
+		var live bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (SELECT 1 FROM env_hosts WHERE env_id=$1
+			AND state NOT IN ('deleted','rejected','failed'))`, envID).Scan(&live); err != nil {
+			return err
+		}
+		if live {
+			return fmt.Errorf("у окружения есть хост: сначала удалите его: %w", ErrConflict)
+		}
 		tag, err := tx.Exec(ctx, `DELETE FROM environments WHERE id=$1`, envID)
 		if err != nil {
 			return err
@@ -263,6 +275,11 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 			FROM deployments d
 			JOIN environments e ON e.id = d.env_id AND NOT e.paused
 				AND e.exec_type IN ('ssh','k8s')
+				-- Окружение с провайдером хоста ждёт готового хоста
+				-- (add-environment-provisioning): до него адреса нет, и
+				-- команды ушли бы на машину runner'а.
+				AND (e.config->'provision' IS NULL OR EXISTS (
+					SELECT 1 FROM env_hosts h WHERE h.env_id = e.id AND h.state = 'ready'))
 			JOIN LATERAL (
 				SELECT r.id FROM runners r
 				WHERE r.status = 'idle' AND NOT r.draining

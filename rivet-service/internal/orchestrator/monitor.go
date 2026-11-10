@@ -165,6 +165,19 @@ func (e *Engine) startMonitor(ctx context.Context, d store.MonitorDue) error {
 	if m.CheckCmd == "" && m.CheckURL == "" {
 		return e.St.MonitorUnknown(ctx, d.Env.ID, "не задана проверка")
 	}
+	// Хост от провайдера ещё не готов (add-environment-provisioning): адреса
+	// нет, и команда проверки ушла бы на машину runner'а.
+	prefix := ""
+	if d.Env.Config.Provision != nil {
+		h, live, err := e.St.LiveHost(ctx, d.Env.ID)
+		if err != nil {
+			return err
+		}
+		if !live || h.State != domain.HostReady {
+			return e.St.PostponeMonitor(ctx, d.Env.ID, store.MonitorPostpone)
+		}
+		prefix = exportPrefix(hostEnv(d.Env, hostAddress(d.Env.Config.Host)))
+	}
 	urlOnly := m.CheckCmd == ""
 	runnerID, ok, err := e.St.MonitorRunner(ctx, d.Env, urlOnly)
 	if err != nil {
@@ -177,9 +190,16 @@ func (e *Engine) startMonitor(ctx context.Context, d store.MonitorDue) error {
 	if err != nil || !started {
 		return err
 	}
+	checkCmd, logsCmd := m.CheckCmd, m.LogsCmd
+	if prefix != "" && checkCmd != "" {
+		checkCmd = prefix + checkCmd
+	}
+	if prefix != "" && logsCmd != "" {
+		logsCmd = prefix + logsCmd
+	}
 	job := &pb.MonitorJob{
 		CheckId: checkID, EnvName: d.Env.Name, Host: d.Env.Config.Host, Repo: d.Repo,
-		CheckCmd: m.CheckCmd, LogsCmd: m.LogsCmd,
+		CheckCmd: checkCmd, LogsCmd: logsCmd, HostKey: d.Env.Config.HostKey,
 		TimeoutS:     int32(monitorCmdTimeout.Seconds()),
 		LogsTimeoutS: int32(monitorLogsTimeout.Seconds()),
 		BudgetS:      int32(monitorBudget.Seconds()),
@@ -298,4 +318,5 @@ func (e *Engine) tickOps(ctx context.Context) {
 	if err := e.tickMonitors(ctx); err != nil {
 		slog.Error("планировщик наблюдения", "err", err)
 	}
+	e.tickHosts(ctx)
 }

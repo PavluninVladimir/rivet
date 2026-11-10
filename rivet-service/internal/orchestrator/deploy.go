@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
@@ -74,6 +75,21 @@ func (e *Engine) dispatchDeploy(a store.DeployAssignment, version, prevVersion s
 		checkout = true
 		repoURL, gitToken = e.deployRepoAccess(a)
 	}
+	if p := a.Env.Config.Provision; p != nil {
+		// Хост от провайдера (add-environment-provisioning): команды
+		// получают имя compose-проекта, порт и адрес хоста, а локальный
+		// хост исполняет их в рабочей копии на публикуемой версии, чтобы
+		// compose-файл брался из репозитория.
+		prefix := exportPrefix(hostEnv(a.Env, hostAddress(a.Env.Config.Host)))
+		deployCmd = prefix + deployCmd
+		if verifyCmd != "" {
+			verifyCmd = prefix + verifyCmd
+		}
+		if p.Provider == domain.ProvisionLocal {
+			checkout = true
+			repoURL, gitToken = e.deployRepoAccess(a)
+		}
+	}
 	msg := &pb.PlaneMsg{
 		MsgId: fmt.Sprintf("deploy-%s-%v-%d", a.Deployment.ID, rollback, time.Now().UnixNano()),
 		Kind: &pb.PlaneMsg_Deploy{Deploy: &pb.DeployJob{
@@ -83,6 +99,7 @@ func (e *Engine) dispatchDeploy(a store.DeployAssignment, version, prevVersion s
 			VerifyCmd: verifyCmd, VerifyUrl: a.Env.Config.VerifyURL,
 			TimeoutS: int32(deployTimeout.Seconds()),
 			Checkout: checkout, RepoUrl: repoURL, GitToken: gitToken,
+			HostKey: a.Env.Config.HostKey,
 		}},
 	}
 	if !e.Out.Send(a.RunnerID, msg) {
@@ -397,4 +414,12 @@ func (e *Engine) deployRepoAccess(a store.DeployAssignment) (repoURL, gitToken s
 		return p.WebURL(), ""
 	}
 	return p.WebURL(), token
+}
+
+// hostAddress: адрес хоста без логина: user@1.2.3.4 → 1.2.3.4.
+func hostAddress(host string) string {
+	if i := strings.LastIndex(host, "@"); i >= 0 {
+		return host[i+1:]
+	}
+	return host
 }

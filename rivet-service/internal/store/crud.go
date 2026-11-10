@@ -516,9 +516,11 @@ func (s *Store) SetRunnerDraining(ctx context.Context, id string, draining bool)
 func (s *Store) ListAttention(ctx context.Context, userID string) ([]domain.Attention, error) {
 	rows, err := s.Pool.Query(ctx, `
 		SELECT a.id, a.project_id, COALESCE(a.task_id::text,''), COALESCE(a.deployment_id::text,''),
+		       COALESCE(a.host_id::text,''), COALESCE(h.env_id::text,''),
 		       a.reason, a.message, a.status, COALESCE(a.claimed_by,''), a.created_at
 		FROM attention a
 		JOIN project_members m ON m.project_id = a.project_id AND m.user_id = $1
+		LEFT JOIN env_hosts h ON h.id = a.host_id
 		WHERE a.status <> 'resolved' ORDER BY a.created_at`, userID)
 	if err != nil {
 		return nil, err
@@ -527,8 +529,8 @@ func (s *Store) ListAttention(ctx context.Context, userID string) ([]domain.Atte
 	var out []domain.Attention
 	for rows.Next() {
 		var a domain.Attention
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.TaskID, &a.DeploymentID, &a.Reason, &a.Message,
-			&a.Status, &a.ClaimedBy, &a.Created); err != nil {
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.TaskID, &a.DeploymentID, &a.HostID, &a.EnvironmentID,
+			&a.Reason, &a.Message, &a.Status, &a.ClaimedBy, &a.Created); err != nil {
 			return nil, err
 		}
 		out = append(out, a)

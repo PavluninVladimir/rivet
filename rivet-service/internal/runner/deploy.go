@@ -100,25 +100,48 @@ func (a *agent) runDeployCmd(ctx context.Context, job *pb.DeployJob, dir, script
 		"RIVET_PREV_VERSION": job.PrevVersion,
 		"RIVET_ENV":          job.EnvName,
 	}
+	return runScript(ctx, scriptRun{Host: job.Host, HostKey: job.HostKey, Dir: dir, Script: script,
+		Env: rivetEnv}, transcript)
+}
+
+// scriptRun: скрипт окружения: локально в Dir или по ssh на Host.
+// HostKey: закреплённый ключ хоста; KnownHosts: файл known_hosts первого
+// подключения (принять новый ключ и вернуть его, add-environment-provisioning).
+type scriptRun struct {
+	Host       string
+	HostKey    string
+	KnownHosts string
+	Dir        string
+	Script     string
+	Env        map[string]string
+}
+
+// runScript исполняет скрипт с переменными окружения локально или по ssh.
+func runScript(ctx context.Context, r scriptRun, transcript func([]byte)) (string, error) {
 	var cmd *exec.Cmd
-	if job.Host == "" {
-		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", script)
-		cmd.Dir = dir
+	if r.Host == "" {
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", r.Script)
+		cmd.Dir = r.Dir
 		cmd.Env = os.Environ()
-		for k, v := range rivetEnv {
+		for k, v := range r.Env {
 			cmd.Env = append(cmd.Env, k+"="+v)
 		}
 	} else {
-		if strings.HasPrefix(job.Host, "-") {
-			return "", fmt.Errorf("недопустимый host %q", job.Host)
+		if strings.HasPrefix(r.Host, "-") {
+			return "", fmt.Errorf("недопустимый host %q", r.Host)
 		}
+		opts, cleanup, err := sshOptions(r.HostKey, r.KnownHosts)
+		if err != nil {
+			return "", err
+		}
+		defer cleanup()
 		// env-переменные уезжают внутри скрипта: ssh чужое окружение не передаёт.
 		var b strings.Builder
-		for k, v := range rivetEnv {
-			fmt.Fprintf(&b, "export %s=%s; ", k, shq(v))
+		for _, k := range sortedKeys(r.Env) {
+			fmt.Fprintf(&b, "export %s=%s; ", k, shq(r.Env[k]))
 		}
-		b.WriteString(script)
-		cmd = exec.CommandContext(ctx, "ssh", job.Host, b.String())
+		b.WriteString(r.Script)
+		cmd = exec.CommandContext(ctx, "ssh", append(opts, r.Host, b.String())...)
 	}
 	// Дедлайн убивает всю группу процессов: внук (curl, сервер, sleep),
 	// унаследовавший вывод, иначе держит pipe открытым, и команда не

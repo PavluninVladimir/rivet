@@ -302,6 +302,10 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 	if err := s.St.ReleaseMonitorChecks(ctx, req.RunnerId); err != nil {
 		slog.Warn("проверки наблюдения runner'а", "runner", req.RunnerId, "err", err)
 	}
+	// Задания хоста прежней сессии тоже прерваны: повторяются сразу.
+	if err := s.St.ReleaseHostJobs(ctx, req.RunnerId); err != nil {
+		slog.Warn("задания хоста runner'а", "runner", req.RunnerId, "err", err)
+	}
 	// Глубина данных — часть контракта v6: неизвестное значение — это
 	// несовместимый runner, а не повод молча записать minimal.
 	switch domain.SessionDepth(req.Depth) {
@@ -440,6 +444,9 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 			if s.Reg.Current(runnerID, sendCh) {
 				if rerr := s.St.ReleaseMonitorChecks(context.WithoutCancel(ctx), runnerID); rerr != nil {
 					slog.Warn("проверки наблюдения runner'а", "runner", runnerID, "err", rerr)
+				}
+				if rerr := s.St.ReleaseHostJobs(context.WithoutCancel(ctx), runnerID); rerr != nil {
+					slog.Warn("задания хоста runner'а", "runner", runnerID, "err", rerr)
 				}
 			}
 			return nil
@@ -828,6 +835,9 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 
 	case *pb.RunnerMsg_MonitorResult:
 		return s.Engine.OnMonitorResult(ctx, runnerID, k.MonitorResult)
+
+	case *pb.RunnerMsg_HostJobResult:
+		return s.Engine.OnHostJobResult(ctx, runnerID, k.HostJobResult)
 	}
 	return nil
 }

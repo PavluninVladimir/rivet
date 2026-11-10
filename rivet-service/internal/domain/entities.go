@@ -407,6 +407,12 @@ type EnvConfig struct {
 	// Monitor — наблюдение за работающим приложением (add-sdlc-cycle,
 	// спека operations «Настройки наблюдения окружения»). nil — не настроено.
 	Monitor *MonitorConfig `json:"monitor,omitempty"`
+	// Provision: привязка Linux-хоста к провайдеру инфраструктуры
+	// (add-environment-provisioning); nil: хост задаёт администратор.
+	Provision *ProvisionConfig `json:"provision,omitempty"`
+	// HostKey: закреплённый ключ хоста (строки known_hosts); у хоста от
+	// провайдера его пишет Rivet после первого подключения.
+	HostKey string `json:"host_key,omitempty"`
 }
 
 // MonitorConfig — настройки наблюдения окружения: периодическая
@@ -517,6 +523,9 @@ var envHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]+(@[A-Za-z0-9._-]+)?(:[0-9]{1
 // как сущность»): доставка и Verify обязательны, verify_url — только
 // http/https без userinfo, host — безопасный аргумент ssh.
 func (c EnvConfig) Validate(execType string) error {
+	if c.Provision != nil && execType != ExecSSH {
+		return &EnvFieldError{Field: "config.provision", Msg: "провайдер хоста доступен только окружению «Linux-хост»"}
+	}
 	if execType == ExecGitOps {
 		return c.validateGitOps()
 	}
@@ -567,6 +576,12 @@ func (c EnvConfig) Validate(execType string) error {
 	}
 	if c.Host != "" && (strings.HasPrefix(c.Host, "-") || !envHostRe.MatchString(c.Host)) {
 		return errors.New("host: ожидается [user@]hostname[:port]")
+	}
+	if err := ValidHostKey(c.HostKey); err != nil {
+		return err
+	}
+	if c.Provision != nil {
+		return c.Provision.Validate()
 	}
 	return nil
 }
@@ -810,6 +825,13 @@ const (
 	// записываются без задач-багов до решения человека (add-sdlc-cycle).
 	// Эскалация уровня проекта, одна открытая на проект.
 	AttOpsLimit AttentionReason = "OPS_LIMIT"
+	// AttHostCreate, AttHostDelete: решения о создании сервера с ценой и
+	// об удалении сервера или данных хоста; AttHostFailed: отказ
+	// провайдера, нехватка денег, bootstrap (add-environment-provisioning).
+	// Предмет: хост окружения, одна открытая на хост и причину.
+	AttHostCreate AttentionReason = "HOST_CREATE"
+	AttHostDelete AttentionReason = "HOST_DELETE"
+	AttHostFailed AttentionReason = "HOST_FAILED"
 )
 
 type Attention struct {
@@ -824,6 +846,11 @@ type Attention struct {
 	Status       string // open | claimed | resolved
 	ClaimedBy    string
 	Created      time.Time
+
+	// HostID и EnvironmentID: эскалация хоста окружения
+	// (add-environment-provisioning): задачи и публикации у неё нет.
+	HostID        string
+	EnvironmentID string
 }
 
 // RunnerToken — токен регистрации runner'ов (спека runners «Токены

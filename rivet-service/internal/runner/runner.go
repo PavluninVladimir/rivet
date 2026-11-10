@@ -670,6 +670,11 @@ func (a *agent) session(ctx context.Context) error {
 			// публикациями других окружений.
 			job := k.Monitor
 			go a.executeMonitor(sctx, job, emit)
+		case *pb.PlaneMsg_HostJob:
+			// Задание хоста (bootstrap, снятие) тоже не занимает runner:
+			// долгая настройка сервера не держит публикации других окружений.
+			job := k.HostJob
+			go a.executeHostJob(sctx, job, emit)
 		case *pb.PlaneMsg_Cancel:
 			a.mu.Lock()
 			if c := a.cancel[k.Cancel.TaskId]; c != nil {

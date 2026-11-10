@@ -2,6 +2,7 @@
 package api
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 	"reflect"
@@ -33,7 +34,10 @@ type environmentView struct {
 	// проверки: панелям хватает их без истории проверок.
 	MonitorReason string     `json:"monitor_reason"`
 	MonitorLastAt *time.Time `json:"monitor_last_at"`
-	CreatedAt     time.Time  `json:"created_at"`
+	// Host: хост от провайдера: живой или последний; null без привязки
+	// (add-environment-provisioning).
+	Host      *envHostView `json:"host"`
+	CreatedAt time.Time    `json:"created_at"`
 }
 
 // deploymentView — DTO Deployment контракта: created_at — очередь,
@@ -70,16 +74,24 @@ func (s *Server) environmentDTO(r *http.Request, e domain.Environment) environme
 	if err != nil {
 		states = nil
 	}
-	return s.environmentDTOWith(r, e, states)
+	hosts := map[string]domain.EnvHost{}
+	if h, err := s.St.CurrentHost(r.Context(), e.ID); err == nil {
+		hosts[e.ID] = h
+	}
+	return s.environmentDTOWith(r, e, states, hosts)
 }
 
-// environmentDTOWith — DTO окружения с состояниями наблюдения проекта,
-// прочитанными один раз на список.
-func (s *Server) environmentDTOWith(r *http.Request, e domain.Environment, states map[string]store.MonitorBrief) environmentView {
+// environmentDTOWith: DTO окружения с состояниями наблюдения и хостами
+// проекта, прочитанными один раз на список.
+func (s *Server) environmentDTOWith(r *http.Request, e domain.Environment, states map[string]store.MonitorBrief,
+	hosts map[string]domain.EnvHost) environmentView {
 	v := environmentView{
 		ID: e.ID, ProjectID: e.ProjectID, Name: e.Name, ExecType: e.ExecType,
 		Trigger: e.Trigger, Config: e.Config, Paused: e.Paused,
 		RunnerCaps: e.RunnerCaps, CreatedAt: e.Created,
+	}
+	if h, ok := hosts[e.ID]; ok {
+		v.Host = hostDTO(h)
 	}
 	if d, err := s.St.LastDeployment(r.Context(), e.ID); err == nil {
 		dto := deploymentDTO(d)
@@ -153,8 +165,13 @@ func (s *Server) listEnvironments(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	hosts, err := s.St.CurrentHosts(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	for _, e := range envs {
-		out = append(out, s.environmentDTOWith(r, e, states))
+		out = append(out, s.environmentDTOWith(r, e, states, hosts))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -173,6 +190,14 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 	if in.Trigger == "" {
 		in.Trigger = "manual"
 	}
+	if in.Config.Provision != nil {
+		// Адрес и ключ хоста от провайдера задаёт Rivet.
+		in.Config.Host, in.Config.HostKey = "", ""
+		if writeMonitorErr(w, in.Config.Provision.Validate()) || !s.assignLocalPort(w, r, &in.Config, "") ||
+			!s.checkInfraConn(w, r, in.Config.Provision) {
+			return
+		}
+	}
 	if msg := in.validate(); msg != "" {
 		unprocessable(w, msg)
 		return
@@ -189,6 +214,9 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.envEvent(r, env, "окружение создано")
+	if err := s.Engine.RequestHostIfNeeded(r.Context(), env, user(r)); err != nil {
+		slog.Error("хост окружения: запрос", "env", env.ID, "err", err)
+	}
 	writeJSON(w, http.StatusCreated, s.environmentDTO(r, env))
 }
 
@@ -221,12 +249,17 @@ func (s *Server) patchEnvironment(w http.ResponseWriter, r *http.Request) {
 		env.Trigger = *in.Trigger
 	}
 	prevMonitor := env.Config.Monitor
+	prevProvision := env.Config.Provision
 	if in.Config != nil {
 		// Конфигурацию нельзя менять под идущей публикацией: она читает её
 		// на ходу, и правка адреса проверки или пайплайна относилась бы уже
 		// к другой публикации. Проверку делает сам UPDATE — окно между
 		// проверкой и записью закрыто (ответ 409).
+		cur := env.Config
 		env.Config = *in.Config
+		if !s.applyProvision(w, r, env.ID, cur, &env.Config) {
+			return
+		}
 	}
 	if in.RunnerCaps != nil {
 		env.RunnerCaps = *in.RunnerCaps
@@ -254,7 +287,88 @@ func (s *Server) patchEnvironment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.envEvent(r, env, "конфигурация окружения изменена")
+	if p := env.Config.Provision; p != nil && (prevProvision == nil || !prevProvision.SameServer(*p)) {
+		if err := s.Engine.RequestHostIfNeeded(r.Context(), env, user(r)); err != nil {
+			slog.Error("хост окружения: запрос", "env", env.ID, "err", err)
+		}
+	}
 	writeJSON(w, http.StatusOK, s.environmentDTO(r, env))
+}
+
+// applyProvision: привязка к провайдеру в правке окружения: при живом
+// хосте сервер не меняется (только команды и скрипт), адрес и ключ хоста
+// остаются за Rivet.
+func (s *Server) applyProvision(w http.ResponseWriter, r *http.Request, envID string, cur domain.EnvConfig, next *domain.EnvConfig) bool {
+	if cur.Provision == nil && next.Provision == nil {
+		return true
+	}
+	h, live, err := s.St.LiveHost(r.Context(), envID)
+	if err != nil {
+		writeErr(w, err)
+		return false
+	}
+	if live {
+		if next.Provision == nil || cur.Provision == nil || !cur.Provision.SameServer(*next.Provision) {
+			writeJSON(w, http.StatusConflict, map[string]apiError{"error": {Code: "host_live",
+				Message: "у окружения есть хост (" + h.State + "): сначала удалите его, потом меняйте провайдера и ресурсы"}})
+			return false
+		}
+		next.Host, next.HostKey = cur.Host, cur.HostKey
+	} else if next.Provision != nil {
+		next.Host, next.HostKey = "", ""
+	}
+	if next.Provision == nil {
+		return true
+	}
+	return !writeMonitorErr(w, next.Provision.Validate()) && s.assignLocalPort(w, r, next, envID) &&
+		s.checkInfraConn(w, r, next.Provision)
+}
+
+// assignLocalPort: порт локального хоста: свободный из диапазона
+// установки, а заданный вручную не должен быть занят другим окружением.
+func (s *Server) assignLocalPort(w http.ResponseWriter, r *http.Request, cfg *domain.EnvConfig, envID string) bool {
+	p := cfg.Provision
+	if p == nil || p.Provider != domain.ProvisionLocal {
+		return true
+	}
+	used, err := s.St.UsedLocalPorts(r.Context(), envID)
+	if err != nil {
+		writeErr(w, err)
+		return false
+	}
+	if p.Port != 0 {
+		if other, ok := used[p.Port]; ok {
+			fieldErr(w, "invalid", "config.provision.port", "порт "+strconv.Itoa(p.Port)+" занят окружением "+other)
+			return false
+		}
+		return true
+	}
+	for port := domain.LocalPortFirst; port <= domain.LocalPortLast; port++ {
+		if _, ok := used[port]; !ok {
+			p.Port = port
+			return true
+		}
+	}
+	fieldErr(w, "invalid", "config.provision.port", "свободных портов в диапазоне не осталось: задайте порт")
+	return false
+}
+
+// checkInfraConn: подключение привязки существует, включено и того же
+// провайдера.
+func (s *Server) checkInfraConn(w http.ResponseWriter, r *http.Request, p *domain.ProvisionConfig) bool {
+	if p.Provider == domain.ProvisionLocal {
+		return true
+	}
+	c, err := s.St.GetInfraConnection(r.Context(), p.Connection)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && (c.Provider != p.Provider || !c.Enabled)) {
+		fieldErr(w, "invalid", "config.provision.connection", "подключение "+p.Connection+" не найдено или выключено")
+		return false
+	}
+	if err != nil {
+		writeErr(w, err)
+		return false
+	}
+	return true
 }
 
 // DELETE /environments/{id} — админ; 409 при выполняющейся публикации.

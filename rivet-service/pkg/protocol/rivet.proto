@@ -92,6 +92,7 @@ message RunnerMsg {
     BlockedQuestion blocked = 8;
     DeployResult deploy_result = 9;
     MonitorResult monitor_result = 10;
+    HostJobResult host_job_result = 11;
   }
 }
 
@@ -188,6 +189,7 @@ message PlaneMsg {
     DeployJob deploy = 7;
     Context context = 8;
     MonitorJob monitor = 9;
+    HostJob host_job = 10;
   }
 }
 
@@ -365,6 +367,10 @@ message DeployJob {
   bool checkout = 12;
   string repo_url = 13;
   string git_token = 14;
+  // Закреплённый ключ хоста (строки known_hosts): ssh проверяет ключ по нему,
+  // а не по known_hosts runner'а (add-environment-provisioning). Пусто:
+  // прежнее поведение.
+  string host_key = 15;
 }
 
 // DeployResult — итог этапа публикации; чужой/stale deployment_id
@@ -402,6 +408,7 @@ message MonitorJob {
   // Общий бюджет проверки: команда, логи и их завершение. Control plane
   // ждёт результат по тому же бюджету с запасом на доставку.
   int32 budget_s = 10;
+  string host_key = 11; // закреплённый ключ хоста, как в DeployJob
 }
 
 // MonitorResult — итог проверки; вывод уже замаскирован построчно.
@@ -411,4 +418,32 @@ message MonitorResult {
   string output = 3;    // хвост вывода check_cmd
   string logs = 4;      // хвост вывода logs_cmd (только при провале)
   int64 duration_ms = 5;
+}
+
+// HostJob: задание хоста окружения (add-environment-provisioning):
+// первичная настройка сервера от провайдера или снятие локального
+// окружения. Исполняет runner с capability deploy, объявивший возможность
+// host_jobs; задание runner не занимает. Скрипт идёт так же, как команды
+// выкатки: по ssh на host или локально при пустом host.
+message HostJob {
+  string job_id = 1;
+  string env_name = 2;
+  string host = 3;              // [user@]address; пусто: локально
+  string script = 4;
+  int32 timeout_s = 5;          // дедлайн задания
+  // Первое подключение к новому серверу: ключ хоста принимается в пустой
+  // known_hosts задания и возвращается в HostJobResult.host_key.
+  bool accept_new_host_key = 6;
+  string host_key = 7;          // закреплённый ключ хоста
+  map<string, string> env = 8;  // переменные скрипта (RIVET_*, COMPOSE_PROJECT_NAME)
+  int32 ssh_wait_s = 9;         // сколько ждать SSH нового сервера перед скриптом
+}
+
+// HostJobResult: итог задания хоста; чужой или устаревший job_id
+// отбрасывается control plane.
+message HostJobResult {
+  string job_id = 1;
+  bool ok = 2;
+  string output = 3;            // хвост вывода, замаскирован
+  string host_key = 4;          // строки known_hosts, принятые при первом подключении
 }

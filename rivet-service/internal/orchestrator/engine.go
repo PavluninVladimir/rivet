@@ -19,6 +19,7 @@ import (
 
 	"github.com/PavluninVladimir/rivet/internal/blob"
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/infra"
 	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/scm"
@@ -111,6 +112,10 @@ type Engine struct {
 	// URLPolicy — какие адреса доступны проверкам URL control plane'ом
 	// (RIVET_ALLOW_PRIVATE_URLS). Задаётся до первой проверки.
 	URLPolicy URLPolicy
+	// Infra: провайдеры инфраструктуры хостов окружений
+	// (add-environment-provisioning); nil: только встроенные с адресами
+	// по умолчанию.
+	Infra     *infra.Factory
 	urlOnce   sync.Once
 	urlClient *http.Client
 }
