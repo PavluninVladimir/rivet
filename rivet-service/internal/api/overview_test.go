@@ -185,3 +185,70 @@ func TestPatchEpicAtomic(t *testing.T) {
 	mustStatus(t, resp, http.StatusConflict, "архивный Epic")
 	unchanged("после 409")
 }
+
+// Отчёт по умолчанию строится до момента запроса без округления вниз до
+// минуты (fix-console-rivetd-tails): задача, завершённая за пару секунд до
+// запроса, считается сделанной, как и в обзоре.
+func TestReportDefaultIncludesLastMinute(t *testing.T) {
+	st, srv := testServer(t)
+	ctx := context.Background()
+	if _, err := st.CreateUser(ctx, "alice", "", "pw-alice-secret", false); err != nil {
+		t.Fatal(err)
+	}
+	alice := loginSession(t, srv, "alice", "pw-alice-secret")
+	resp, body := call(t, "POST", srv.URL+"/api/v1/projects", alice, "", map[string]string{"name": "Минута", "repo": "o/r"})
+	mustStatus(t, resp, http.StatusCreated, "проект")
+	var project struct{ ID string }
+	_ = json.Unmarshal(body, &project)
+	resp, body = call(t, "POST", srv.URL+"/api/v1/projects/"+project.ID+"/epics", alice, "", map[string]string{"title": "E"})
+	mustStatus(t, resp, http.StatusCreated, "epic")
+	var epic domain.Epic
+	_ = json.Unmarshal(body, &epic)
+	resp, body = call(t, "POST", srv.URL+"/api/v1/epics/"+epic.ID+"/tasks", alice, "", map[string]any{"title": "T", "criteria": []string{"c"}})
+	mustStatus(t, resp, http.StatusCreated, "задача")
+	var task domain.Task
+	_ = json.Unmarshal(body, &task)
+	// Статус отдельно: триггер ставит done_at на переходе в done. Время
+	// завершения — по часам процесса теста, как и момент запроса в API.
+	done := time.Now().Add(-2 * time.Second)
+	if _, err := st.Pool.Exec(ctx, `UPDATE tasks SET status='done' WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE tasks SET started_at=$2, done_at=$3 WHERE id=$1`, task.ID, done.Add(-time.Hour), done); err != nil {
+		t.Fatal(err)
+	}
+	resp, body = call(t, "GET", srv.URL+"/api/v1/projects/"+project.ID+"/report?tz=UTC", alice, "", nil)
+	mustStatus(t, resp, http.StatusOK, "отчёт по умолчанию")
+	if !strings.Contains(string(body), "- Завершено задач: 1 ") {
+		t.Fatalf("задача, завершённая в последнюю минуту, не попала в отчёт:\n%s", body)
+	}
+	if strings.Contains(string(body), "период ещё идёт") {
+		t.Fatalf("отчёт по умолчанию не должен говорить, что период идёт:\n%s", body)
+	}
+}
+
+func TestReportRange(t *testing.T) {
+	now := time.Date(2026, 11, 7, 12, 34, 27, 500_000_000, time.UTC)
+	from, to, live, field, _ := reportRange(url.Values{}, now)
+	if field != "" || !to.Equal(now) || !from.Equal(now.Add(-7*24*time.Hour)) || !live {
+		t.Fatalf("по умолчанию: from=%v to=%v live=%v field=%q", from, to, live, field)
+	}
+	past := now.Add(-48 * time.Hour).Truncate(time.Hour)
+	from, to, live, _, _ = reportRange(url.Values{"to": {past.Format(time.RFC3339)}}, now)
+	if !to.Equal(past) || !from.Equal(past.Add(-7*24*time.Hour)) || live {
+		t.Fatalf("прошедший to: from=%v to=%v live=%v", from, to, live)
+	}
+	future := now.Add(5 * 24 * time.Hour)
+	if _, _, live, _, _ = reportRange(url.Values{"to": {future.Format(time.RFC3339)}}, now); !live {
+		t.Fatal("to в будущем — отчёт текущий")
+	}
+	start := now.Add(-3 * 24 * time.Hour).Truncate(time.Hour)
+	if from, to, _, _, _ = reportRange(url.Values{"from": {start.Format(time.RFC3339)}}, now); !from.Equal(start) || !to.Equal(now) {
+		t.Fatalf("свой from: from=%v to=%v", from, to)
+	}
+	for q, want := range map[string]string{"to": "to", "from": "from"} {
+		if _, _, _, field, _ := reportRange(url.Values{q: {"вчера"}}, now); field != want {
+			t.Fatalf("%s=вчера: поле ошибки %q", q, field)
+		}
+	}
+}

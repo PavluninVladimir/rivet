@@ -208,8 +208,11 @@ func run(ctx context.Context, cfg config.Config) error {
 	root.Handle("/api/", apiSrv.Handler())
 	root.Handle("/", webui.Handler())
 	httpSrv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           root,
+		Addr: cfg.HTTPAddr,
+		// Общие заголовки безопасности и на ответах самого ServeMux
+		// (редиректы путей), CSP — у консоли и API (спека access-policy
+		// «Заголовки безопасности HTTP»).
+		Handler:           api.BaseHeaders(root),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

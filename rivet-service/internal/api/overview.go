@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 	// База часовых поясов внутри бинаря: в образе alpine системной нет, и
@@ -81,25 +82,10 @@ func (s *Server) getProjectReport(w http.ResponseWriter, r *http.Request) {
 	// now берётся один раз: от него считается to по умолчанию и признак
 	// текущего отчёта (design, решение 7).
 	now := time.Now()
-	q := r.URL.Query()
-	to := now.Truncate(time.Minute)
-	live := true
-	if raw := strings.TrimSpace(q.Get("to")); raw != "" {
-		t, err := time.Parse(time.RFC3339, raw)
-		if err != nil {
-			fieldInvalid(w, "to", "to: ожидается время RFC 3339")
-			return
-		}
-		to, live = t, !t.Before(now)
-	}
-	from := to.Add(-7 * 24 * time.Hour)
-	if raw := strings.TrimSpace(q.Get("from")); raw != "" {
-		t, err := time.Parse(time.RFC3339, raw)
-		if err != nil {
-			fieldInvalid(w, "from", "from: ожидается время RFC 3339")
-			return
-		}
-		from = t
+	from, to, live, field, msg := reportRange(r.URL.Query(), now)
+	if field != "" {
+		fieldInvalid(w, field, msg)
+		return
 	}
 	per, err := overview.CustomPeriod(from, to, loc)
 	if err != nil {
@@ -124,6 +110,32 @@ func (s *Server) getProjectReport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(body))
+}
+
+// reportRange — границы отчёта из запроса. to по умолчанию — момент
+// запроса без округления: события последней неполной минуты входят в
+// отчёт, как и в обзор (fix-console-rivetd-tails). Шапка печатает время до
+// минуты, поэтому «по 12:34» в 12:34:27 читается верно. from по умолчанию —
+// to минус 7 суток. live — отчёт текущий: to не задан или не раньше now.
+// Непустой field — ошибка разбора для 422 с текстом msg.
+func reportRange(q url.Values, now time.Time) (from, to time.Time, live bool, field, msg string) {
+	to, live = now, true
+	if raw := strings.TrimSpace(q.Get("to")); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return time.Time{}, time.Time{}, false, "to", "to: ожидается время RFC 3339"
+		}
+		to, live = t, !t.Before(now)
+	}
+	from = to.Add(-7 * 24 * time.Hour)
+	if raw := strings.TrimSpace(q.Get("from")); raw != "" {
+		t, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			return time.Time{}, time.Time{}, false, "from", "from: ожидается время RFC 3339"
+		}
+		from = t
+	}
+	return from, to, live, "", ""
 }
 
 // translit — латиница для русских букв в имени файла отчёта.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -209,7 +210,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/webhooks/github", s.githubWebhook)
 	mux.HandleFunc("POST /api/v1/webhooks/gitlab", s.gitlabWebhook)
 	mux.HandleFunc("POST /api/v1/webhooks/gitea", s.giteaWebhook)
-	return s.withAuth(mux)
+	return withSecurityHeaders(s.withAuth(mux))
 }
 
 type cachedEstimate struct {
@@ -1205,8 +1206,8 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 
 // ─── SSE ─────────────────────────────────────────────────────────────────
 
-// sse: события проекта из event log (реплей по Last-Event-ID, далее — поллинг)
-// плюс live-чанки session.log из hub (без реплея — по контракту).
+// sse: события проекта из event log (доигрывание по Last-Event-ID, далее —
+// поллинг) плюс live-чанки session.log из hub (без реплея — по контракту).
 func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project")
 	if projectID == "" {
@@ -1234,8 +1235,6 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 
-	var after int64
-	_, _ = fmt.Sscanf(r.Header.Get("Last-Event-ID"), "%d", &after)
 	// События установки (RoleStreamTypes) идут в поток только вживую, с
 	// момента подключения. Иначе поток любого проекта, даже нового, при
 	// каждом открытии проигрывал бы всю историю занятости агентов
@@ -1246,6 +1245,7 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	after := streamCursor(r.Header.Get("Last-Event-ID"), liveFrom)
 
 	logs, unsub := s.Hub.Subscribe(projectID)
 	defer unsub()
@@ -1286,6 +1286,11 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 		}
 		return true
 	}
+	// Первое сообщение — курсор начала потока без данных: EventSource его
+	// не диспатчит, но запоминает и пришлёт в Last-Event-ID при
+	// переподключении. Так разрыв доигрывается, даже если до него событий
+	// не было (fix-console-rivetd-tails).
+	fmt.Fprintf(w, "id: %d\n\n", after)
 	if !flushEvents() {
 		return
 	}
@@ -1313,6 +1318,25 @@ func (s *Server) sse(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// streamCursor — с какого события начинается поток проекта (спека
+// observability «Поток событий проекта»). Без Last-Event-ID — с момента
+// подключения (liveFrom): историю консоль читает запросами, а реплей
+// журнала повторял бы её событиями, и живые события ждали бы за ним в
+// очереди. Нечисловое значение — как отсутствие. Курсор больше последнего
+// события (база восстановлена из копии) сводится к нему, иначе поток молча
+// пропустил бы события до старого номера.
+func streamCursor(header string, liveFrom int64) int64 {
+	raw := strings.TrimSpace(header)
+	if raw == "" {
+		return liveFrom
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 || n > liveFrom {
+		return liveFrom
+	}
+	return n
 }
 
 // sseHidden — события event log, которых нет в контракте SSE: пропуск

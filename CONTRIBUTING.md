@@ -75,9 +75,14 @@ specifications stay in Russian. Contributions require signing the
 go build ./...
 go vet ./...
 RIVET_DATABASE_URL='postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable' go test ./...
-golangci-lint run ./...
+golangci-lint run ./...     # v2.15.0, как в CI
 make fuzz FUZZ_TIME=15s     # если трогали разборщики
 ```
+
+Версия golangci-lint закреплена в CI (v2.15.0), локально ставьте ту же:
+`go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0`.
+Встроенную консоль (`internal/webui/dist`) руками не правят: она обновляется
+командой `make ui-sync` после слияния консоли в `rivet-web`.
 
 Правили протокол runner'ов: `make proto`. Правили консоль: в `rivet-web`
 `npx tsc -b`, `npm test`, `npm run build`. Поведение, видимое в браузере,
