@@ -17,13 +17,15 @@ import (
 //
 // С каталогом bare-репозиториев стенда (FakeGitDirEnv) и списком
 // репозиториев (FakeGitReposEnv) fake работает поверх настоящего git для
-// репозиториев из списка: ReadFile читает файлы версии, HeadSHA отдаёт
-// настоящий SHA, Merge продвигает базовую ветку. Остальные репозитории
-// работают по-старому: e2e-проекты делят общий e2e/demo и ждут версию
-// «main», настоящий merge в нём ломал бы их сценарии.
+// репозиториев из списка: ReadFile читает файлы версии, WriteFile коммитит
+// в ветку, HeadSHA отдаёт настоящий SHA, Merge продвигает базовую ветку.
+// Остальные репозитории работают по-старому: e2e-проекты делят общий
+// e2e/demo и ждут версию «main», настоящий merge в нём ломал бы их
+// сценарии.
 type Fake struct {
 	seq atomic.Int64
-	// files — файлы фиктивного репозитория для публикации GitOps.
+	// files — файлы фиктивного репозитория для публикации GitOps вне
+	// git-режима.
 	mu    sync.Mutex
 	files map[string]string
 	// conflicts — PR с меткой FakeConflictMarker («repo#номер»), первый
@@ -37,8 +39,9 @@ type Fake struct {
 	prs map[string]fakePR
 	// prFiles — заданный тестом список файлов PR («repo#номер»).
 	prFiles map[string][]string
-	// gitMu — merge в git-режиме по одному: проверка предка и сдвиг ветки
-	// должны видеть одно состояние.
+	// gitMu — изменения git-режима по одному (создание PR, merge, запись
+	// файла): проверка состояния и сдвиг ref'а должны видеть одно
+	// состояние.
 	gitMu sync.Mutex
 }
 
@@ -231,55 +234,50 @@ func (f *Fake) PipelineRun(ctx context.Context, repo, pipeline, ref, runID strin
 
 // ReadFile — файл фиктивного репозитория: содержимое живёт в памяти
 // адаптера, чего достаточно для сквозной проверки публикации GitOps. В
-// git-режиме файл, которого нет в памяти, читается из версии ref
-// bare-репозитория стенда.
+// git-режиме файл читается из версии ref bare-репозитория стенда.
 func (f *Fake) ReadFile(ctx context.Context, repo, ref, path string) (FileContent, error) {
+	if dir, inGit := f.repoDir(repo); inGit {
+		return f.gitRead(ctx, dir, repo, ref, path)
+	}
 	f.mu.Lock()
 	content, ok := f.files[repo+"@"+ref+":"+path]
 	f.mu.Unlock()
 	if ok {
 		return FileContent{Content: content, FileID: "fake-file"}, nil
 	}
-	if dir, inGit := f.repoDir(repo); inGit {
-		return f.gitRead(ctx, dir, repo, ref, path)
-	}
 	return FileContent{}, ErrFileNotFound
 }
 
 // WriteFile — «коммит» в фиктивный репозиторий: как и настоящие хостинги,
 // проверяет идентификатор прочитанной версии файла. Записанное живёт в
-// памяти. В git-режиме файл, которого в памяти ещё нет, сверяется с
-// версией из git: prevID — sha его блоба (то, что отдал ReadFile). Ветки,
-// которой нет в git, запись не создаёт: хостинги так тоже не умеют.
+// памяти. В git-режиме запись — настоящий коммит в ветку bare-репозитория
+// (gitWrite): окружение GitOps e2e-стенда читает версию из git, как
+// GitOps-контроллер.
 func (f *Fake) WriteFile(ctx context.Context, repo, ref, path, prevID, content, message string) (Commit, error) {
-	key := repo + "@" + ref + ":" + path
-	// Версия файла в git читается до замка памяти: git медленный, а
-	// ReadFile под тем же замком ждал бы его.
-	gitID := ""
 	if dir, inGit := f.repoDir(repo); inGit {
-		fc, err := f.gitRead(ctx, dir, repo, ref, path)
-		switch {
-		case err == nil:
-			gitID = fc.FileID
-		case errors.Is(err, ErrFileNotFound): // новый файл
-		default: // в том числе ErrRefNotFound
-			return Commit{}, err
-		}
+		return f.gitWrite(ctx, dir, repo, ref, path, prevID, content, message)
 	}
+	key := repo + "@" + ref + ":" + path
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.files == nil {
 		f.files = map[string]string{}
 	}
+	// Новый файл пишется без версии, существующий — с версией из ReadFile.
 	_, exists := f.files[key]
-	switch {
-	case exists && prevID == "",
-		!exists && prevID != gitID:
-		return Commit{}, fmt.Errorf("fake: файл изменился с момента чтения")
+	if exists == (prevID == "") {
+		return Commit{}, errFakeStale
 	}
 	f.files[key] = content
 	sha := fmt.Sprintf("fake-commit-%04d", f.seq.Add(1))
-	return Commit{SHA: sha, URL: fmt.Sprintf("https://fake.local/%s/commit/%s", repo, sha)}, nil
+	return Commit{SHA: sha, URL: fakeCommitURL(repo, sha)}, nil
+}
+
+// errFakeStale — запись поверх версии файла, которую не читали.
+var errFakeStale = errors.New("fake: файл изменился с момента чтения")
+
+func fakeCommitURL(repo, sha string) string {
+	return fmt.Sprintf("https://fake.local/%s/commit/%s", repo, sha)
 }
 
 // BranchProtected — на стенде ветка считается защищённой: настоящих

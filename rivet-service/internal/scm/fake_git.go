@@ -52,10 +52,16 @@ func fakeGit(ctx context.Context, dir string, args ...string) (string, error) {
 // получает SIGTERM, а не SIGKILL: по SIGTERM он сам убирает lock-файлы
 // ref'ов, а убитый процесс оставил бы их и заблокировал репозиторий стенда.
 func fakeGitIn(ctx context.Context, dir, stdin string, args ...string) (string, error) {
+	return fakeGitEnv(ctx, dir, nil, stdin, args...)
+}
+
+// fakeGitEnv — fakeGitIn с дополнительными переменными окружения git
+// (временный индекс записи файла).
+func fakeGitEnv(ctx context.Context, dir string, env []string, stdin string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"--git-dir", dir}, args...)...)
 	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C"), env...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
@@ -185,13 +191,26 @@ func (f *Fake) gitHead(ctx context.Context, dir, branch string) (string, error) 
 	return sha, nil
 }
 
+// resolveCommit — коммит версии ref. Имя ветки разрешается в первую
+// очередь как ветка: по правилам git тег с тем же именем стоит раньше, и
+// тогда ReadFile и gitWrite смотрели бы на разные версии. SHA, HEAD и
+// остальные версии разрешаются как обычно.
+func resolveCommit(ctx context.Context, dir, ref string) (string, bool, error) {
+	if ref != "HEAD" {
+		if sha, ok, err := revParse(ctx, dir, "refs/heads/"+ref+"^{commit}"); err != nil || ok {
+			return sha, ok, err
+		}
+	}
+	return revParse(ctx, dir, ref+"^{commit}")
+}
+
 func (f *Fake) gitRead(ctx context.Context, dir, repo, ref, path string) (FileContent, error) {
 	if ref == "" {
 		ref = "HEAD"
 	} else if err := safeRef(ref); err != nil {
 		return FileContent{}, err
 	}
-	commit, ok, err := revParse(ctx, dir, ref+"^{commit}")
+	commit, ok, err := resolveCommit(ctx, dir, ref)
 	if err != nil {
 		return FileContent{}, err
 	}
@@ -226,6 +245,87 @@ func (f *Fake) gitRead(ctx context.Context, dir, repo, ref, path string) (FileCo
 		return FileContent{}, err
 	}
 	return FileContent{Content: content, FileID: obj}, nil
+}
+
+// gitWrite — запись файла коммитом в ветку ref bare-репозитория
+// (публикация GitOps на e2e-стенде): как API содержимого у хостингов, новая
+// версия файла ложится одним коммитом поверх вершины ветки. prevID — sha
+// блоба, который отдал ReadFile, для нового файла пустой: файл, изменённый
+// с момента чтения, не перезаписывается. Ветку, которой нет, запись не
+// создаёт. Пустой ref — ветка HEAD репозитория. Записи и merge идут по
+// одному, ветка сдвигается с проверкой прежней вершины.
+func (f *Fake) gitWrite(ctx context.Context, dir, repo, ref, path, prevID, content, message string) (Commit, error) {
+	f.gitMu.Lock()
+	defer f.gitMu.Unlock()
+	if ref == "" {
+		out, err := fakeGit(ctx, dir, "symbolic-ref", "--short", "HEAD")
+		if err != nil {
+			return Commit{}, err
+		}
+		ref = strings.TrimSpace(out)
+	}
+	if err := safeRef(ref); err != nil {
+		return Commit{}, err
+	}
+	path = strings.TrimPrefix(path, "/")
+	if path == "" || strings.HasPrefix(path, "-") {
+		return Commit{}, fmt.Errorf("fake git: некорректный путь файла %q", path)
+	}
+	parent, ok, err := revParse(ctx, dir, "refs/heads/"+ref+"^{commit}")
+	if err != nil {
+		return Commit{}, err
+	}
+	if !ok {
+		return Commit{}, fmt.Errorf("fake git %s@%s: %w", repo, ref, ErrRefNotFound)
+	}
+	cur, err := f.gitRead(ctx, dir, repo, parent, path)
+	switch {
+	case err == nil:
+		if prevID != cur.FileID {
+			return Commit{}, errFakeStale
+		}
+	case errors.Is(err, ErrFileNotFound):
+		if prevID != "" {
+			return Commit{}, errFakeStale
+		}
+	default:
+		return Commit{}, err
+	}
+	blob, err := fakeGitIn(ctx, dir, content, "hash-object", "-w", "--no-filters", "--stdin")
+	if err != nil {
+		return Commit{}, err
+	}
+	// Дерево собирается во временном индексе: у bare-репозитория своего
+	// индекса нет, а общий файл помешал бы параллельным стендам.
+	tmp, err := os.MkdirTemp("", "rivet-fake-index-")
+	if err != nil {
+		return Commit{}, err
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+	env := []string{"GIT_INDEX_FILE=" + filepath.Join(tmp, "index")}
+	if _, err := fakeGitEnv(ctx, dir, env, "", "read-tree", parent); err != nil {
+		return Commit{}, err
+	}
+	if _, err := fakeGitEnv(ctx, dir, env, "", "update-index", "--add",
+		"--cacheinfo", "100644,"+strings.TrimSpace(blob)+","+path); err != nil {
+		return Commit{}, err
+	}
+	tree, err := fakeGitEnv(ctx, dir, env, "", "write-tree")
+	if err != nil {
+		return Commit{}, err
+	}
+	commit, err := fakeGitIn(ctx, dir, message, "-c", "user.name=rivet-fake", "-c", "user.email=fake@rivet.local",
+		"commit-tree", strings.TrimSpace(tree), "-p", parent, "-F", "-")
+	if err != nil {
+		return Commit{}, err
+	}
+	sha := strings.TrimSpace(commit)
+	// Как и merge: ветку, сдвинутую кем-то ещё, запись не затирает, а
+	// отмена запроса сдвиг не прерывает.
+	if _, err := fakeGit(context.WithoutCancel(ctx), dir, "update-ref", "refs/heads/"+ref, sha, parent); err != nil {
+		return Commit{}, err
+	}
+	return Commit{SHA: sha, URL: fakeCommitURL(repo, sha)}, nil
 }
 
 // gitMerge продвигает базовую ветку PR: fast-forward, если ветка PR её

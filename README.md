@@ -680,7 +680,8 @@ RIVET_GITEA_IMAGE=codeberg.org/forgejo/forgejo:15 go test -tags gitea_integratio
 
 Сквозные тесты живут в [rivet-e2e](https://github.com/PavluninVladimir/rivet-e2e):
 стенд поднимает `rivet-service/scripts/e2e-stand.sh`. Это тестовая
-инфраструктура: модель там `cmd/fake-llm`, хостинг `RIVET_SCM=fake`, а
+инфраструктура: модель там `cmd/fake-llm`, хостинг `RIVET_SCM=fake`,
+окружение для публикации через GitOps `scripts/e2e-gitops-env`, а
 runner'ы стартуют с `RIVET_RUNNER_UNSANDBOXED=1`.
 
 ### Исходный код работающей версии
