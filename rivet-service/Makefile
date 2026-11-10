@@ -1,4 +1,4 @@
-.PHONY: build test lint fuzz up down image migrate proto ui e2e-stand third-party
+.PHONY: build test lint fuzz up down image migrate proto ui ui-sync ui-check e2e-stand third-party
 
 # Сведения о сборке попадают в бинарники через ldflags: версия для состояния
 # установки, версия, коммит и адрес исходников для ссылки «Исходный код»
@@ -86,8 +86,23 @@ proto:
 		--go-grpc_out=. --go-grpc_opt=module=github.com/PavluninVladimir/rivet \
 		pkg/protocol/rivet.proto
 
-# После make ui выполните make third-party: раздел консоли в NOTICE и
-# THIRD_PARTY берётся из встроенной сборки, CI сверяет их.
+# Встроенная консоль (internal/webui/dist) собирается из коммита main
+# rivet-web, его SHA лежит в internal/webui/REVISION. CI пересобирает этот
+# коммит и сверяет с dist побайтно (ui-check). Обновление после слияния
+# консоли: make ui-sync (или WEB_REF=<коммит main rivet-web>), затем
+# закоммитить dist, REVISION, NOTICE и THIRD_PARTY. Нужны Node 24 и
+# go-licenses (make third-party).
+WEB_REF ?= main
+ui-sync:
+	sh scripts/webui-dist.sh sync $(WEB_REF)
+	$(MAKE) third-party
+
+ui-check:
+	sh scripts/webui-dist.sh check
+
+# Локальная отладка: сборка из соседнего клона ../rivet-web как есть (любая
+# ветка, незакоммиченные правки). Такую сборку не коммитьте: REVISION она
+# не меняет, и CI (ui-check) её не примет.
 ui:
 	cd ../rivet-web && npm run build
 	rm -rf internal/webui/dist && cp -r ../rivet-web/dist internal/webui/dist
