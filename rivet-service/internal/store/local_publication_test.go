@@ -121,6 +121,9 @@ func TestLocalCASAndConfigurationSnapshot(t *testing.T) {
 	if _, _, e = s.AcceptLocalResult(ctx, q.ActiveDeploymentID, a.RunnerID, localdocker.Result{Status: "stopped"}); e != nil {
 		t.Fatal(e)
 	}
+	if e = s.RequestLocalDeletion(ctx, env.ID); e != nil {
+		t.Fatal("confirmed stop must allow queued deletion before lease finalization", e)
+	}
 	if e = s.FinishLocalOperation(ctx, q.ActiveDeploymentID, a.RunnerID); e != nil {
 		t.Fatal(e)
 	}
@@ -130,5 +133,69 @@ func TestLocalCASAndConfigurationSnapshot(t *testing.T) {
 	}
 	if _, e = s.QueueLocalOperation(ctx, env.ID, "restart", "admin"); !errors.Is(e, ErrPublicationStopped) {
 		t.Fatal(e)
+	}
+}
+
+func TestLocalHealthRequiresThreeDistinctChecks(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	env := seedLocal(t, s)
+	dockerRunner(t, s)
+	p, e := s.EnqueueLocalPublication(ctx, env.ID, "v1", "admin", false)
+	if e != nil {
+		t.Fatal(e)
+	}
+	a, ok, e := s.StartNextDeployment(ctx)
+	if e != nil || !ok {
+		t.Fatal(e)
+	}
+	for _, status := range []string{"building", "starting", "verifying", "running"} {
+		res := localdocker.Result{Status: status}
+		if status == "running" {
+			res.ContainerID = "container"
+			res.Image = "image"
+			res.Port = 20123
+		}
+		if _, _, e = s.AcceptLocalResult(ctx, p.ActiveDeploymentID, a.RunnerID, res); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, e = s.CompleteDeployment(ctx, p.ActiveDeploymentID, a.RunnerID); e != nil {
+		t.Fatal(e)
+	}
+	for n := 1; n <= 3; n++ {
+		op, e := s.QueueLocalOperation(ctx, env.ID, "reconcile", "platform")
+		if e != nil {
+			t.Fatal(e)
+		}
+		a, ok, e = s.StartNextDeployment(ctx)
+		if e != nil || !ok {
+			t.Fatal(e)
+		}
+		res := localdocker.Result{Status: "unhealthy", Reason: &localdocker.Failure{Code: "healthcheck_failed", Message: "not ready"}}
+		// Повтор одного результата до Ack не считается ещё одной проверкой.
+		for range 2 {
+			if _, _, e = s.AcceptLocalResult(ctx, op.ActiveDeploymentID, a.RunnerID, res); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if e = s.FinishLocalOperation(ctx, op.ActiveDeploymentID, a.RunnerID); e != nil {
+			t.Fatal(e)
+		}
+		got, e := s.LocalPublication(ctx, env.ID)
+		if e != nil {
+			t.Fatal(e)
+		}
+		want := "running"
+		if n == 3 {
+			want = "unhealthy"
+		}
+		if got.Status != want {
+			t.Fatalf("check %d: %s want %s", n, got.Status, want)
+		}
+	}
+	view, e := s.GetMonitor(ctx, env)
+	if e != nil || view.State != MonitorFail || view.ConsecutiveFail != 3 || len(view.Runs) != 3 {
+		t.Fatalf("monitor %+v %v", view, e)
 	}
 }

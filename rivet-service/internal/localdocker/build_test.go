@@ -29,7 +29,7 @@ func TestPrepareRecipes(t *testing.T) {
 		data        map[string]string
 		want, entry string
 	}{
-		{"go", map[string]string{"go.mod": "module app\ngo 1.26\n", "cmd/web/main.go": "package main"}, "go", "./cmd/web"},
+		{"go", map[string]string{"go.mod": "module app\ngo 1.26\n", "cmd/web/main.go": "package main", "package.json": "invalid unrelated frontend manifest"}, "go", "./cmd/web"},
 		{"node", map[string]string{"package.json": `{"scripts":{"start":"node server.js","build":"echo build"}}`}, "node", "npm run build"},
 		{"static", map[string]string{"index.html": "hello", "Dockerfile": "FROM malicious", ".env": "secret", ".git/config": "secret", "node_modules/a": "junk"}, "static", "nginx"},
 		{"spa", map[string]string{"package.json": `{"scripts":{"build":"vite build"}}`}, "static", "/src/dist"},

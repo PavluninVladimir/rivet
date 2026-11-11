@@ -41,7 +41,7 @@ func regular(p string) bool { s, e := os.Stat(p); return e == nil && s.Mode().Is
 func recipe(root string, selected string) (string, string, bool, error) {
 	var pkg packageJSON
 	hasPackage := regular(filepath.Join(root, "package.json"))
-	if hasPackage {
+	if hasPackage && selected != "go" && !(selected == "auto" && regular(filepath.Join(root, "go.mod"))) {
 		b, e := os.ReadFile(filepath.Join(root, "package.json"))
 		if e != nil {
 			return "", "", false, e

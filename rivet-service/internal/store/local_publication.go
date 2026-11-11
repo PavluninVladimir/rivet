@@ -237,6 +237,9 @@ func (s *Store) QueueLocalOperation(ctx context.Context, envID, action, initiato
 		if e != nil {
 			return e
 		}
+		if action == "restart" {
+			p.Status = "starting"
+		}
 		if action == "stop" {
 			p.DesiredState = "stopped"
 			p.Status = "stopping"
@@ -369,7 +372,7 @@ func (s *Store) AcceptLocalResult(ctx context.Context, depID, runnerID string, r
 			res.HealthURL = ""
 		}
 		oldStatus := p.Status
-		p, e = scanLocal(tx.QueryRow(ctx, `UPDATE local_publications SET completed_operation_id=CASE WHEN $2 IN('building','starting','verifying') THEN completed_operation_id ELSE active_deployment_id END,status=$2,runner_id=$3,container_id=$4,image_digest=$5,host_port=NULLIF($6,0),health_url=$7,reason=$8,attempt=$9,checked_at=now(),started_at=COALESCE(started_at,now()),deadline_at=now()+interval '35 minutes',finished_at=CASE WHEN $2 IN('running','failed','stopped') THEN now() ELSE finished_at END,health_failures=CASE WHEN $2='running' THEN 0 ELSE health_failures END,container_log=CASE WHEN $10<>'' THEN $10 ELSE container_log END WHERE id=$1 RETURNING `+localCols, p.ID, status, runnerID, p.ContainerID, p.Image, p.Port, p.HealthURL, reason, res.Attempt, localTail(res.Logs)))
+		p, e = scanLocal(tx.QueryRow(ctx, `UPDATE local_publications SET completed_operation_id=CASE WHEN $2 IN('building','starting','verifying') THEN completed_operation_id ELSE active_deployment_id END,status=$2,runner_id=$3,container_id=$4,image_digest=$5,host_port=NULLIF($6,0),health_url=$7,reason=$8,attempt=$9,checked_at=now(),started_at=COALESCE(started_at,now()),deadline_at=now()+interval '35 minutes',finished_at=CASE WHEN $2 IN('running','failed','stopped') THEN now() ELSE finished_at END,health_failures=CASE WHEN $11 THEN 0 ELSE health_failures END,container_log=CASE WHEN $10<>'' THEN $10 ELSE container_log END WHERE id=$1 RETURNING `+localCols, p.ID, status, runnerID, p.ContainerID, p.Image, p.Port, p.HealthURL, reason, res.Attempt, localTail(res.Logs), res.Status == "running"))
 		if e != nil {
 			return e
 		}
@@ -455,6 +458,10 @@ func (s *Store) DueLocalPublications(ctx context.Context) ([]string, error) {
 }
 
 func (s *Store) FailLocalByDeployment(ctx context.Context, depID, detail string) error {
+	if _, e := s.Pool.Exec(ctx, `UPDATE local_environment_preparations SET status='failed',reason=$2,updated_at=now() WHERE deployment_id=$1 AND status IN('queued','preparing')`, depID, detail); e != nil {
+		return e
+	}
+
 	reason, _ := json.Marshal(&localdocker.Failure{Code: "agent_lost", Message: detail})
 	_, e := s.Pool.Exec(ctx, `UPDATE local_publications SET status=CASE WHEN operation='publish' THEN 'failed' ELSE 'unknown' END,reason=CASE WHEN reason IS NULL OR reason='null'::jsonb THEN $2::jsonb ELSE reason END,finished_at=now(),checked_at=now() WHERE active_deployment_id=$1 AND status NOT IN('failed','running','stopped')`, depID, reason)
 	return e
@@ -559,7 +566,8 @@ func (s *Store) RequestLocalDeletion(ctx context.Context, envID string) error {
 		if _, e := tx.Exec(ctx, `SELECT id FROM environments WHERE id=$1 FOR UPDATE`, envID); e != nil {
 			return e
 		}
-		busy, e := localBusy(ctx, tx, envID)
+		var busy bool
+		e := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM deployments d LEFT JOIN local_publications p ON p.active_deployment_id=d.id WHERE d.env_id=$1 AND d.status IN('queued','deploying','verifying') AND NOT COALESCE(p.operation IN('reconcile','logs','cleanup','stop','remove'),false))`, envID).Scan(&busy)
 		if e != nil {
 			return e
 		}

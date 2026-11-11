@@ -83,6 +83,13 @@ func (e *Engine) onLocalDockerResult(ctx context.Context, runnerID string, dr *p
 		}
 		return e.failDeploy(ctx, dr.DeploymentId, runnerID, reason, false)
 	}
+	if p.Operation == "reconcile" && res.Status == "failed" {
+		detail := "контейнер публикации не восстановился"
+		if res.Reason != nil {
+			detail = res.Reason.Code + ": " + res.Reason.Message
+		}
+		return e.failDeployInfra(ctx, dr.DeploymentId, runnerID, detail)
+	}
 	// Технические сверки не создают релизы или инциденты кода.
 	if err = e.St.FinishLocalOperation(ctx, dr.DeploymentId, runnerID); err != nil {
 		return err

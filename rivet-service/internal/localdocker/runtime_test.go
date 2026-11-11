@@ -265,3 +265,29 @@ func TestDockerRecipes(t *testing.T) {
 		})
 	}
 }
+
+func TestEnvironmentCleanupRejectsForeignLabels(t *testing.T) {
+	j := fixtureJob()
+	j.RemoveData = true
+	foreign := j
+	foreign.ProjectID = "another-project"
+	raw := inspection(foreign, "127.0.0.1", "bridge")
+	mutated := false
+	r := Runtime{Command: func(ctx context.Context, a []string, w io.Writer) (string, error) {
+		if a[0] == "info" {
+			return "ok", nil
+		}
+		if a[0] == "container" && a[1] == "ls" {
+			return strings.Repeat("a", 64), nil
+		}
+		if a[0] == "container" && a[1] == "inspect" {
+			return raw, nil
+		}
+		mutated = true
+		return "", nil
+	}}
+	v := r.Operate(context.Background(), "remove", j)
+	if v.Status != "unknown" || v.Reason == nil || v.Reason.Code != "config_invalid" || mutated {
+		t.Fatalf("foreign cleanup: %+v mutation=%v", v, mutated)
+	}
+}

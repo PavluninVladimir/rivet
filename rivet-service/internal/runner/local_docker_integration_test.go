@@ -136,7 +136,7 @@ func main(){http.HandleFunc("/",func(w http.ResponseWriter,r *http.Request){b,_:
 		t.Fatal(e)
 	}
 	srv := httptest.NewServer((&api.Server{St: st, Engine: engine, Hub: stream.NewHub()}).Handler())
-	defer srv.Close()
+	defer func() { srv.CloseClientConnections(); srv.Close() }()
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar, Timeout: 10 * time.Second}
 	call := func(method, path string, body any, want int) []byte {
@@ -266,7 +266,24 @@ func main(){http.HandleFunc("/",func(w http.ResponseWriter,r *http.Request){b,_:
 		if e = os.WriteFile(preview, data, 0600); e != nil {
 			t.Fatal(e)
 		}
+		brokenWritten := false
 		for {
+			if os.Getenv("RIVET_DOCKER_E2E_PREVIEW_DRIVER") == "1" {
+				if _, e = os.Stat(preview + ".broken"); e == nil && !brokenWritten {
+					if e = os.WriteFile(filepath.Join(seed, "main.go"), []byte("syntax error"), 0644); e != nil {
+						t.Fatal(e)
+					}
+					git(seed, "add", ".")
+					git(seed, "commit", "-m", "broken browser fixture")
+					git(seed, "push", bare, "main")
+					brokenWritten = true
+					if e = os.WriteFile(preview+".broken.ready", []byte("ready"), 0600); e != nil {
+						t.Fatal(e)
+					}
+				}
+				pump()
+			}
+
 			if _, e = st.TouchRunner(ctx, "docker-fixture", nil); e != nil {
 				t.Fatal(e)
 			}
@@ -278,6 +295,9 @@ func main(){http.HandleFunc("/",func(w http.ResponseWriter,r *http.Request){b,_:
 				t.Fatal("preview deadline")
 			case <-time.After(time.Second):
 			}
+		}
+		if os.Getenv("RIVET_DOCKER_E2E_PREVIEW_DRIVER") == "1" {
+			return
 		}
 	}
 	call("POST", path+"/restart", nil, 202)
