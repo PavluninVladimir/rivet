@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,5 +81,35 @@ func TestSandboxROFlagReplacesEnv(t *testing.T) {
 	}
 	if err := p.Set(" "); err == nil {
 		t.Fatal("пустой путь должен быть ошибкой")
+	}
+}
+
+func TestRunnerHelpNeverPrintsRegistrationToken(t *testing.T) {
+	for _, args := range [][]string{{"-h"}, {"-unknown-option"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			output, err := os.CreateTemp(t.TempDir(), "usage")
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := os.Stderr
+			os.Stderr = output
+			t.Cleanup(func() { os.Stderr = previous; _ = output.Close() })
+			token := "BENIGN-REGISTRATION-TOKEN-MARKER"
+			err = run(args, map[string]string{tokenEnv: token})
+			os.Stderr = previous
+			if err == nil || (args[0] == "-h" && !errors.Is(err, flag.ErrHelp)) {
+				t.Fatalf("unexpected help result: %v", err)
+			}
+			data, readErr := os.ReadFile(output.Name())
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !strings.Contains(string(data), "-token string") {
+				t.Fatal("usage did not describe token option")
+			}
+			if strings.Contains(string(data), token) {
+				t.Fatal("usage exposed registration token")
+			}
+		})
 	}
 }
