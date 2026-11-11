@@ -50,7 +50,9 @@ func (e *Engine) tickDeployments(ctx context.Context) error {
 		if !ok {
 			break
 		}
-		e.dispatchDeploy(a, a.Deployment.Version, "", false)
+		if !e.dispatchDeploy(a, a.Deployment.Version, "", false) {
+			break
+		}
 	}
 	// Окружения с внешней доставкой идут своим путём: runner им не нужен.
 	if err := e.tickLocalDocker(ctx); err != nil {
@@ -60,11 +62,11 @@ func (e *Engine) tickDeployments(ctx context.Context) error {
 }
 
 // dispatchDeploy отправляет деплой-джобу runner'у публикации.
-// Недоступный runner доведёт watchdog (как heartbeat у задач).
-func (e *Engine) dispatchDeploy(a store.DeployAssignment, version, prevVersion string, rollback bool) {
+// Недоставленный local_docker возвращается в очередь без расхода попытки.
+// Остальные публикации восстанавливает watchdog.
+func (e *Engine) dispatchDeploy(a store.DeployAssignment, version, prevVersion string, rollback bool) bool {
 	if a.Env.ExecType == domain.ExecLocalDocker {
-		e.dispatchLocalDocker(a)
-		return
+		return e.dispatchLocalDocker(a)
 	}
 	e.mu.Lock()
 	e.deployOwner[a.Deployment.ID] = a.RunnerID
@@ -96,6 +98,7 @@ func (e *Engine) dispatchDeploy(a store.DeployAssignment, version, prevVersion s
 		slog.Warn("deploy dispatch: runner недоступен, публикацию доведёт watchdog",
 			"runner", a.RunnerID, "deployment", a.Deployment.ID)
 	}
+	return true
 }
 
 // DeployMatches — принадлежит ли сообщение активной публикации этого
