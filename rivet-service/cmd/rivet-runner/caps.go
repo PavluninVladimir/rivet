@@ -17,7 +17,7 @@ func withArchitectureCapability(caps []string) []string {
 		if c == "architecture" {
 			has = true
 		}
-		if c != "deploy" {
+		if c != "deploy" && c != "docker" {
 			onlyDeploy = false
 		}
 		out = append(out, c)
@@ -26,4 +26,19 @@ func withArchitectureCapability(caps []string) []string {
 		out = append(out, "architecture")
 	}
 	return out
+}
+
+// deliveryOnly исключает агентский цикл у детерминированного Docker-driver.
+func deliveryOnly(caps []string) bool {
+	has := false
+	for _, c := range caps {
+		switch strings.TrimSpace(c) {
+		case "deploy":
+			has = true
+		case "docker", "":
+		default:
+			return false
+		}
+	}
+	return has
 }

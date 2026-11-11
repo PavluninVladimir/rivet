@@ -324,6 +324,11 @@ func (s *Store) TransitionEpic(ctx context.Context, epicID string, to domain.Epi
 				return err
 			}
 		}
+		if to == domain.EpicRunning && kind == domain.KindWork {
+			if err := prepareLocalStandTx(ctx, tx, projectID); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx, `UPDATE epics SET status=$2 WHERE id=$1`, epicID, to); err != nil {
 			return err
 		}

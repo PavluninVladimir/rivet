@@ -191,6 +191,12 @@ func (a *agent) executeMonitor(ctx context.Context, job *pb.MonitorJob, emit fun
 // функция для всех feature, чтобы регистрация не теряла ни одну.
 func (c Config) features() []string {
 	out := []string{featureRoles}
+	for _, cp := range c.Capabilities {
+		if cp == "docker" {
+			out = append(out, "local_docker_v1")
+			break
+		}
+	}
 	if c.Adapter == AdapterNative {
 		out = append(out, featureNative)
 	}

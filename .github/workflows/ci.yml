@@ -142,3 +142,39 @@ jobs:
           go-version-file: rivet-service/go.mod
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.2.0
       - run: govulncheck ./...
+
+  local-docker:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rivet-service
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: rivet
+          POSTGRES_PASSWORD: rivet
+          POSTGRES_DB: rivet
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U rivet"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: rivet-service/go.mod
+      - name: API, очередь, сборка, redeploy и очистка на изолированной БД
+        run: go test -v ./internal/runner ./internal/localdocker -run 'TestLocalDockerAPIToContainer|TestDockerLifecycle|TestDockerRecipes' -count=1
+        env:
+          RIVET_DOCKER_TEST: "1"
+          RIVET_DATABASE_URL: postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable
+      # Здесь VM одноразовая. Общий Docker пользователя этот тест не трогает.
+      - name: Восстановление после перезапуска Docker
+        run: go test -v ./internal/localdocker -run '^TestDockerDaemonRecovery$' -count=1
+        env:
+          RIVET_DOCKER_DAEMON_RESTART_TEST: "1"

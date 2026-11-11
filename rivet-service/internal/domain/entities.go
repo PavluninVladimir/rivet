@@ -373,16 +373,18 @@ const (
 	ExecK8s = "k8s"
 	// ExecGitOps — версия меняется коммитом в репозиторий конфигурации,
 	// выкат делает контроллер кластера; Rivet ждёт синхронизации.
-	ExecGitOps = "gitops"
+	ExecGitOps      = "gitops"
+	ExecLocalDocker = "local_docker"
 )
 
 // EnvConfig — конфигурация исполнения окружения. Для ssh значимы Host и
 // команды, для внешнего пайплайна — Pipeline, Ref и Vars.
 type EnvConfig struct {
-	Host      string `json:"host,omitempty"`
-	DeployCmd string `json:"deploy_cmd,omitempty"`
-	VerifyCmd string `json:"verify_cmd,omitempty"`
-	VerifyURL string `json:"verify_url,omitempty"`
+	LocalDocker *LocalDockerEnvironmentConfig `json:"local_docker,omitempty"`
+	Host        string                        `json:"host,omitempty"`
+	DeployCmd   string                        `json:"deploy_cmd,omitempty"`
+	VerifyCmd   string                        `json:"verify_cmd,omitempty"`
+	VerifyURL   string                        `json:"verify_url,omitempty"`
 	// Pipeline — идентификатор пайплайна хостинга (файл workflow у GitHub
 	// Actions; у GitLab CI необязателен), Ref — ветка запуска (пусто —
 	// базовая ветка проекта), Vars — переменные прогона.
@@ -457,6 +459,9 @@ func (c EnvConfig) ValidateMonitor(execType string) error {
 	if m.IntervalMin != 0 && (m.IntervalMin < MonitorIntervalMin || m.IntervalMin > MonitorIntervalMax) {
 		return &EnvFieldError{"config.monitor.interval_min", "интервал от 1 до 1440 минут"}
 	}
+	if execType == ExecLocalDocker {
+		return c.validateLocalDocker()
+	}
 	if !m.Enabled {
 		if u, err := url.Parse(m.CheckURL); err == nil && u.User != nil {
 			return &EnvFieldError{"config.monitor.check_url", "userinfo в URL запрещён"}
@@ -517,6 +522,12 @@ var envHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]+(@[A-Za-z0-9._-]+)?(:[0-9]{1
 // как сущность»): доставка и Verify обязательны, verify_url — только
 // http/https без userinfo, host — безопасный аргумент ssh.
 func (c EnvConfig) Validate(execType string) error {
+	if execType == ExecLocalDocker {
+		return c.validateLocalDocker()
+	}
+	if c.LocalDocker != nil {
+		return &EnvFieldError{"config.local_docker", "допустим только для exec_type local_docker"}
+	}
 	if execType == ExecGitOps {
 		return c.validateGitOps()
 	}
