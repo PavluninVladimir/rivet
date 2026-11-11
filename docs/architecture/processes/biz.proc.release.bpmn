@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:rivet="urn:rivet:architecture:1"
+                  id="defs-release" targetNamespace="urn:rivet:process">
+  <bpmn:process id="biz.proc.release" name="Релиз и наблюдение" isExecutable="false">
+    <bpmn:laneSet id="release-lanes">
+      <bpmn:lane id="lane-devops" name="Релиз-инженер" rivet:ref="biz.devops">
+        <bpmn:flowNodeRef>start</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>deploy</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>releaseNotes</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="lane-sre" name="Инженер сопровождения" rivet:ref="biz.sre">
+        <bpmn:flowNodeRef>verify</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>gate</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>incident</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="lane-owner" name="Владелец проекта" rivet:ref="biz.owner">
+        <bpmn:flowNodeRef>done</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>needsHuman</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="start" name="Изменения готовы к публикации"/>
+    <bpmn:serviceTask id="deploy" name="Опубликовать окружение" rivet:ref="app.orchestration-service"/>
+    <bpmn:serviceTask id="verify" name="Проверить наблюдение" rivet:ref="app.release-service"/>
+    <bpmn:exclusiveGateway id="gate" name="Окружение стабильно?"/>
+    <bpmn:serviceTask id="releaseNotes" name="Оформить release notes" rivet:ref="app.release-service"/>
+    <bpmn:serviceTask id="incident" name="Описать инцидент" rivet:ref="app.release-service"/>
+    <bpmn:endEvent id="done" name="Релиз оформлен"/>
+    <bpmn:endEvent id="needsHuman" name="Передано человеку"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="deploy"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="deploy" targetRef="verify"/>
+    <bpmn:sequenceFlow id="f3" sourceRef="verify" targetRef="gate"/>
+    <bpmn:sequenceFlow id="f4" name="да" sourceRef="gate" targetRef="releaseNotes"/>
+    <bpmn:sequenceFlow id="f5" name="нет" sourceRef="gate" targetRef="incident"/>
+    <bpmn:sequenceFlow id="f6" sourceRef="releaseNotes" targetRef="done"/>
+    <bpmn:sequenceFlow id="f7" sourceRef="incident" targetRef="needsHuman"/>
+  </bpmn:process>
+</bpmn:definitions>

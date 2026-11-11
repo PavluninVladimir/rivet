@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:rivet="urn:rivet:architecture:1"
+                  id="defs-epic" targetNamespace="urn:rivet:process">
+  <bpmn:process id="biz.proc.epic" name="Выполнение Epic" isExecutable="false">
+    <bpmn:laneSet id="epic-lanes">
+      <bpmn:lane id="lane-owner" name="Владелец проекта" rivet:ref="biz.owner">
+        <bpmn:flowNodeRef>start</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>approve</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>done</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="lane-lead" name="Тимлид" rivet:ref="biz.lead">
+        <bpmn:flowNodeRef>plan</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="lane-developer" name="Разработчик" rivet:ref="biz.developer">
+        <bpmn:flowNodeRef>run</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>fix</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="lane-reviewer" name="Ревьюер" rivet:ref="biz.reviewer">
+        <bpmn:flowNodeRef>reviewGate</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>merge</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="start" name="Epic принят в работу"/>
+    <bpmn:userTask id="approve" name="Утвердить цель Epic"/>
+    <bpmn:serviceTask id="plan" name="Декомпозировать Epic" rivet:ref="app.planning-service"/>
+    <bpmn:serviceTask id="run" name="Выполнить этап по роли" rivet:ref="app.orchestration-service"/>
+    <bpmn:exclusiveGateway id="reviewGate" name="Изменения приняты?"/>
+    <bpmn:serviceTask id="fix" name="Доработать задачу" rivet:ref="app.orchestration-service"/>
+    <bpmn:serviceTask id="merge" name="Слить в базовую ветку" rivet:ref="app.orchestration-service"/>
+    <bpmn:endEvent id="done" name="Epic выполнен"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="approve"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="approve" targetRef="plan"/>
+    <bpmn:sequenceFlow id="f3" sourceRef="plan" targetRef="run"/>
+    <bpmn:sequenceFlow id="f4" sourceRef="run" targetRef="reviewGate"/>
+    <bpmn:sequenceFlow id="f5" name="да" sourceRef="reviewGate" targetRef="merge"/>
+    <bpmn:sequenceFlow id="f6" name="нет" sourceRef="reviewGate" targetRef="fix"/>
+    <bpmn:sequenceFlow id="f7" sourceRef="fix" targetRef="reviewGate"/>
+    <bpmn:sequenceFlow id="f8" sourceRef="merge" targetRef="done"/>
+  </bpmn:process>
+</bpmn:definitions>

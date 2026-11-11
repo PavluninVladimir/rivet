@@ -1,0 +1,729 @@
+elements:
+  # ── Проект и доставка ───────────────────────────────────────────────────
+  - id: data.project
+    type: data-object
+    name: Проект
+    props: {table: projects}
+    relations:
+      - {type: realization, to: biz.project}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: name, type: text, description: имя репозитория в консоли}
+      - {name: checks, type: jsonb, description: массив проверок политики проекта}
+      - {name: created_at, type: timestamptz}
+      - {name: provider, type: text, description: "github, gitlab или gitea"}
+      - {name: base_url, type: text}
+      - {name: repo_path, type: text, description: owner/repo или путь в инстансе}
+      - {name: default_branch, type: text}
+      - {name: webhook_secret, type: text, nullable: true}
+      - {name: webhook_registered, type: boolean}
+      - {name: credential_id, type: uuid, nullable: true, fk: {to: data.scm-credential, attribute: id}}
+      - {name: architecture_auto_at, type: timestamptz, nullable: true}
+      - {name: webhook_events, type: integer}
+      - {name: webhook_registered_at, type: timestamptz, nullable: true}
+      - {name: policy_source, type: text, description: "store или file"}
+      - {name: policy_file_id, type: text}
+
+  - id: data.epic
+    type: data-object
+    name: Epic
+    props: {table: epics}
+    relations:
+      - {type: realization, to: biz.epic}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
+      - {name: title, type: text}
+      - {name: goal, type: text}
+      - {name: status, type: text, description: "planned, active, blocked, done, cancelled"}
+      - {name: created_at, type: timestamptz}
+      - {name: token_budget, type: bigint, nullable: true}
+      - {name: kind, type: text, description: "work, architecture, discovery"}
+      - {name: priority, type: text, nullable: true}
+      - {name: discovery_run_id, type: uuid, nullable: true, fk: {to: data.discovery-run, attribute: id}}
+      - {name: source_key, type: text, nullable: true}
+      - {name: started_at, type: timestamptz, nullable: true}
+      - {name: done_at, type: timestamptz, nullable: true}
+      - {name: due_at, type: timestamptz, nullable: true}
+
+  - id: data.task
+    type: data-object
+    name: Задача
+    props: {table: tasks}
+    relations:
+      - {type: realization, to: biz.task}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: epic_id, type: uuid, fk: {to: data.epic, attribute: id}}
+      - {name: num, type: bigint, unique: true, description: номер задачи в рамках Epic}
+      - {name: title, type: text}
+      - {name: description, type: text}
+      - {name: status, type: text, description: "queued, running, review, done, blocked, cancelled"}
+      - {name: estimate, type: integer}
+      - {name: capabilities, type: "text[]"}
+      - {name: criteria, type: jsonb}
+      - {name: attempt_used, type: integer}
+      - {name: attempt_limit, type: integer}
+      - {name: runner_id, type: text, nullable: true}
+      - {name: branch, type: text, nullable: true}
+      - {name: pr_url, type: text, nullable: true}
+      - {name: block_reason, type: text, nullable: true}
+      - {name: created_at, type: timestamptz}
+      - {name: updated_at, type: timestamptz}
+      - {name: reviewer_id, type: text, nullable: true}
+      - {name: blocked_by, type: uuid, nullable: true, fk: {to: data.task, attribute: id}}
+      - {name: review_rejections, type: integer}
+      - {name: step_id, type: text}
+      - {name: step_entry, type: text}
+      - {name: process, type: jsonb, nullable: true}
+      - {name: process_hash, type: text}
+      - {name: step_rejections, type: jsonb}
+      - {name: wait_reason, type: text}
+      - {name: step_gen, type: integer}
+      - {name: step_closed_gen, type: integer}
+      - {name: kind, type: text, description: "work, architecture, review, delivery, monitor"}
+      - {name: checked_sha, type: text}
+      - {name: merged_at, type: timestamptz, nullable: true}
+      - {name: incident_id, type: uuid, nullable: true, fk: {to: data.incident, attribute: id}}
+      - {name: source_ord, type: integer, nullable: true}
+      - {name: started_at, type: timestamptz, nullable: true}
+      - {name: done_at, type: timestamptz, nullable: true}
+      - {name: wait_since, type: timestamptz, nullable: true}
+      - {name: wait_kind, type: text}
+
+  - id: data.task-dep
+    type: data-object
+    name: Зависимость задач
+    props: {table: task_deps}
+    attributes:
+      - {name: task_id, type: uuid, pk: true, fk: {to: data.task, attribute: id}}
+      - {name: dep_id, type: uuid, pk: true, fk: {to: data.task, attribute: id}}
+    relations:
+      - {type: association, to: data.task, cardinality: many-to-many, label: зависит от}
+
+  - id: data.task-step-run
+    type: data-object
+    name: Этап задачи
+    props: {table: task_step_runs}
+    relations:
+      - {type: realization, to: biz.step-run}
+    attributes:
+      - {name: id, type: bigserial, pk: true}
+      - {name: task_id, type: uuid, fk: {to: data.task, attribute: id}}
+      - {name: step_id, type: text}
+      - {name: step_kind, type: text, description: "code, test, review, merge"}
+      - {name: pass, type: integer}
+      - {name: participant, type: text, description: имя роли-участника}
+      - {name: agent_kind, type: text}
+      - {name: model, type: text}
+      - {name: capabilities, type: "text[]"}
+      - {name: runner_id, type: text, nullable: true, fk: {to: data.runner, attribute: id}}
+      - {name: session_id, type: uuid, nullable: true}
+      - {name: verdict, type: text, nullable: true}
+      - {name: detail, type: text}
+      - {name: created_at, type: timestamptz}
+      - {name: finished_at, type: timestamptz, nullable: true}
+      - {name: user_login, type: text}
+      - {name: user_role, type: text}
+      - {name: verdict_by, type: text}
+      - {name: role, type: text}
+      - {name: role_agent, type: text}
+      - {name: pref_agent, type: text}
+      - {name: pref_model, type: text}
+      - {name: agent_verdict, type: text}
+      - {name: assigned_model, type: text}
+      - {name: not_before, type: timestamptz, nullable: true}
+      - {name: defer_count, type: integer}
+      - {name: agent_id, type: text, nullable: true, fk: {to: data.team-agent, attribute: id}}
+      - {name: deferred_since, type: timestamptz, nullable: true}
+
+  # ── Сессии и журнал ─────────────────────────────────────────────────────
+  - id: data.session
+    type: data-object
+    name: Сессия агента
+    props: {table: sessions}
+    relations:
+      - {type: realization, to: biz.session}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: task_id, type: uuid, nullable: true, fk: {to: data.task, attribute: id}}
+      - {name: attempt, type: integer, nullable: true}
+      - {name: driver_kind, type: text}
+      - {name: driver_id, type: text}
+      - {name: agent, type: text}
+      - {name: model, type: text}
+      - {name: depth, type: text}
+      - {name: scope, type: text, nullable: true}
+      - {name: transcript_ref, type: text, nullable: true, description: ссылка s3:// на транскрипт}
+      - {name: tokens, type: bigint, nullable: true}
+      - {name: started_at, type: timestamptz}
+      - {name: ended_at, type: timestamptz, nullable: true}
+      - {name: files, type: "text[]", nullable: true}
+      - {name: step_id, type: text}
+      - {name: participant, type: text}
+      - {name: policy_hash, type: text}
+      - {name: prompt, type: text}
+      - {name: outcome, type: text}
+      - {name: last_step, type: text}
+      - {name: private, type: boolean}
+
+  - id: data.event
+    type: data-object
+    name: Событие журнала
+    props: {table: events}
+    relations:
+      - {type: realization, to: biz.event}
+    attributes:
+      - {name: id, type: bigserial, pk: true}
+      - {name: ts, type: timestamptz}
+      - {name: actor_kind, type: text}
+      - {name: actor_id, type: text}
+      - {name: type, type: text}
+      - {name: project_id, type: uuid, nullable: true, fk: {to: data.project, attribute: id}}
+      - {name: epic_id, type: uuid, nullable: true, fk: {to: data.epic, attribute: id}}
+      - {name: task_id, type: uuid, nullable: true, fk: {to: data.task, attribute: id}}
+      - {name: text, type: text}
+      - {name: payload, type: jsonb}
+
+  - id: data.attention
+    type: data-object
+    name: Запрос внимания
+    props: {table: attention}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
+      - {name: task_id, type: uuid, nullable: true, fk: {to: data.task, attribute: id}}
+      - {name: reason, type: text}
+      - {name: message, type: text}
+      - {name: status, type: text, description: "open, claimed, resolved"}
+      - {name: claimed_by, type: text, nullable: true}
+      - {name: created_at, type: timestamptz}
+      - {name: resolved_at, type: timestamptz, nullable: true}
+      - {name: deployment_id, type: uuid, nullable: true, fk: {to: data.deployment, attribute: id}}
+      - {name: code, type: text}
+
+  - id: data.usage-record
+    type: data-object
+    name: Запись использования модели
+    props: {table: usage_records}
+    attributes:
+      - {name: id, type: bigserial, pk: true}
+      - {name: ts, type: timestamptz}
+      - {name: source_msg_id, type: text, unique: true, nullable: true}
+      - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
+      - {name: epic_id, type: uuid, nullable: true, fk: {to: data.epic, attribute: id}}
+      - {name: task_id, type: uuid, nullable: true, fk: {to: data.task, attribute: id}}
+      - {name: runner_id, type: text, nullable: true}
+      - {name: model, type: text}
+      - {name: tokens_in, type: bigint, nullable: true}
+      - {name: tokens_out, type: bigint, nullable: true}
+      - {name: cost_usd, type: "numeric(12,6)", nullable: true}
+      - {name: duration_s, type: integer}
+      - {name: role, type: text, nullable: true}
+      - {name: session_id, type: uuid, nullable: true}
+      - {name: tokens_cached, type: bigint, nullable: true}
+      - {name: tokens_cache_write, type: bigint, nullable: true}
+
+  # ── Пользователи и доступ ───────────────────────────────────────────────
+  - id: data.user
+    type: data-object
+    name: Пользователь
+    props: {table: users}
+    relations:
+      - {type: realization, to: biz.user}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: login, type: text, unique: true}
+      - {name: name, type: text}
+      - {name: password_hash, type: text}
+      - {name: is_admin, type: boolean}
+      - {name: disabled, type: boolean}
+      - {name: created_at, type: timestamptz}
+      - {name: must_change_password, type: boolean}
+
+  - id: data.project-member
+    type: data-object
+    name: Участник проекта
+    props: {table: project_members}
+    attributes:
+      - {name: project_id, type: uuid, pk: true, fk: {to: data.project, attribute: id}}
+      - {name: user_id, type: uuid, pk: true, fk: {to: data.user, attribute: id}}
+      - {name: added_at, type: timestamptz}
+      - {name: role, type: text}
+    relations:
+      - {type: association, to: data.user, cardinality: many-to-many, label: участники}
+
+  - id: data.auth-session
+    type: data-object
+    name: Сессия входа
+    props: {table: auth_sessions}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: user_id, type: uuid, fk: {to: data.user, attribute: id}}
+      - {name: token_hash, type: text, unique: true}
+      - {name: created_at, type: timestamptz}
+      - {name: expires_at, type: timestamptz}
+
+  - id: data.access-token
+    type: data-object
+    name: Токен доступа
+    props: {table: access_tokens}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: user_id, type: uuid, fk: {to: data.user, attribute: id}}
+      - {name: name, type: text}
+      - {name: prefix, type: text}
+      - {name: token_hash, type: text, unique: true}
+      - {name: created_at, type: timestamptz}
+      - {name: expires_at, type: timestamptz, nullable: true}
+      - {name: last_used_at, type: timestamptz, nullable: true}
+
+  # ── Публикации и наблюдение ─────────────────────────────────────────────
+  - id: data.environment
+    type: data-object
+    name: Окружение
+    props: {table: environments}
+    relations:
+      - {type: realization, to: biz.environment}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
+      - {name: name, type: text, unique: true}
+      - {name: exec_type, type: text, description: "ssh, script, k8s"}
+      - {name: trigger, type: text, description: "manual, auto, merge"}
+      - {name: config, type: jsonb}
+      - {name: paused, type: boolean}
+      - {name: created_at, type: timestamptz}
+      - {name: runner_caps, type: "text[]"}
+
+  - id: data.deployment
+    type: data-object
+    name: Публикация
+    props: {table: deployments}
+    relations:
+      - {type: realization, to: biz.deployment}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: env_id, type: uuid, fk: {to: data.environment, attribute: id}}
+      - {name: version, type: text}
+      - {name: status, type: text, description: "queued, running, done, failed"}
+      - {name: initiator, type: text, description: "auto, manual, rollback"}
+      - {name: runner_id, type: text}
+      - {name: detail, type: text}
+      - {name: rollback, type: boolean}
+      - {name: log_ref, type: text, nullable: true}
+      - {name: created_at, type: timestamptz}
+      - {name: started_at, type: timestamptz, nullable: true}
+      - {name: ended_at, type: timestamptz, nullable: true}
+      - {name: version_at, type: timestamptz}
+      - {name: incident_pending, type: boolean}
+      - {name: incident_attempts, type: integer}
+      - {name: incident_retry_at, type: timestamptz, nullable: true}
+      - {name: external_run_id, type: text}
+      - {name: external_url, type: text}
+
+  - id: data.release
+    type: data-object
+    name: Релиз
+    props: {table: releases}
+    relations:
+      - {type: realization, to: biz.release}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
+      - {name: env_id, type: uuid, fk: {to: data.environment, attribute: id}}
+      - {name: deployment_id, type: uuid, unique: true, fk: {to: data.deployment, attribute: id}}
+      - {name: version, type: text}
+      - {name: prev_version, type: text}
+      - {name: initiator, type: text}
+      - {name: created_at, type: timestamptz}
+      - {name: composition, type: jsonb}
+      - {name: notes_md, type: text}
+      - {name: notes_status, type: text, description: "pending, ready, failed"}
+      - {name: notes_agent_id, type: text, nullable: true, fk: {to: data.team-agent, attribute: id}}
+      - {name: notes_model, type: text}
+      - {name: dropped_items, type: integer}
+      - {name: notes_requested_at, type: timestamptz}
+      - {name: notes_attempts, type: integer}
+      - {name: by_time, type: boolean}
+
+  - id: data.incident
+    type: data-object
+    name: Инцидент
+    props: {table: incidents}
+    relations:
+      - {type: realization, to: biz.incident}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
+      - {name: env_id, type: uuid, fk: {to: data.environment, attribute: id}}
+      - {name: source, type: text}
+      - {name: fingerprint, type: text}
+      - {name: status, type: text, description: "open, mitigated, resolved, dismissed"}
+      - {name: severity, type: text}
+      - {name: title, type: text}
+      - {name: error_line, type: text}
+      - {name: first_seen, type: timestamptz}
+      - {name: last_seen, type: timestamptz}
+      - {name: occurrences, type: integer}
+      - {name: evidence, type: jsonb}
+      - {name: description, type: jsonb}
+      - {name: description_status, type: text}
+      - {name: description_agent_id, type: text, nullable: true, fk: {to: data.team-agent, attribute: id}}
+      - {name: description_requested_at, type: timestamptz}
+      - {name: description_attempts, type: integer}
+      - {name: bug_task_id, type: uuid, nullable: true, fk: {to: data.task, attribute: id}}
+      - {name: bug_cancelled_by, type: text}
+      - {name: skipped_daily, type: boolean}
+      - {name: needs_human, type: boolean}
+      - {name: deployment_id, type: uuid, nullable: true, fk: {to: data.deployment, attribute: id}}
+      - {name: mitigated_at, type: timestamptz, nullable: true}
+      - {name: occurrences_at_mitigation, type: integer}
+      - {name: mitigated_release_id, type: uuid, nullable: true, fk: {to: data.release, attribute: id}}
+      - {name: resolved_at, type: timestamptz, nullable: true}
+      - {name: resolution, type: text}
+      - {name: bug_pending, type: boolean}
+
+  - id: data.incident-event
+    type: data-object
+    name: Событие инцидента
+    props: {table: incident_events}
+    attributes:
+      - {name: id, type: bigserial, pk: true}
+      - {name: incident_id, type: uuid, fk: {to: data.incident, attribute: id}}
+      - {name: at, type: timestamptz}
+      - {name: status, type: text}
+      - {name: actor, type: text}
+      - {name: note, type: text}
+
+  - id: data.monitor-state
+    type: data-object
+    name: Состояние наблюдения
+    props: {table: monitor_state}
+    attributes:
+      - {name: env_id, type: uuid, pk: true, fk: {to: data.environment, attribute: id}}
+      - {name: state, type: text, description: "unknown, ok, fail"}
+      - {name: reason, type: text}
+      - {name: next_at, type: timestamptz}
+      - {name: pending_check_id, type: text}
+      - {name: pending_runner, type: text}
+      - {name: pending_since, type: timestamptz, nullable: true}
+      - {name: last_at, type: timestamptz, nullable: true}
+      - {name: last_output, type: text}
+      - {name: consecutive_fail, type: integer}
+      - {name: consecutive_ok, type: integer}
+      - {name: last_change_at, type: timestamptz}
+      - {name: recheck_at, type: timestamptz, nullable: true}
+
+  - id: data.monitor-run
+    type: data-object
+    name: Проверка наблюдения
+    props: {table: monitor_runs}
+    attributes:
+      - {name: id, type: bigserial, pk: true}
+      - {name: env_id, type: uuid, fk: {to: data.environment, attribute: id}}
+      - {name: at, type: timestamptz}
+      - {name: ok, type: boolean}
+      - {name: duration_ms, type: integer}
+      - {name: output, type: text}
+
+  # ── Подключения и агенты ────────────────────────────────────────────────
+  - id: data.scm-credential
+    type: data-object
+    name: Учётные данные SCM
+    props: {table: scm_credentials}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: provider, type: text}
+      - {name: base_url, type: text}
+      - {name: owner, type: text}
+      - {name: token_prefix, type: text}
+      - {name: token_enc, type: bytea}
+      - {name: state, type: text, description: "unchecked, ok, fail"}
+      - {name: checked_at, type: timestamptz, nullable: true}
+      - {name: created_at, type: timestamptz}
+
+  - id: data.runner
+    type: data-object
+    name: Runner
+    props: {table: runners}
+    relations:
+      - {type: realization, to: biz.runner}
+    attributes:
+      - {name: id, type: text, pk: true}
+      - {name: agent, type: text}
+      - {name: model, type: text}
+      - {name: host, type: text}
+      - {name: capabilities, type: "text[]"}
+      - {name: status, type: text, description: "idle, busy, draining, offline"}
+      - {name: task_id, type: uuid, nullable: true, fk: {to: data.task, attribute: id}}
+      - {name: ctx_pct, type: integer, nullable: true}
+      - {name: draining, type: boolean}
+      - {name: last_seen, type: timestamptz}
+      - {name: deployment_id, type: uuid, nullable: true, fk: {to: data.deployment, attribute: id}}
+      - {name: token_id, type: uuid, nullable: true, fk: {to: data.runner-token, attribute: id}}
+      - {name: adapter, type: text}
+      - {name: depth, type: text}
+      - {name: context_channel, type: boolean}
+      - {name: models, type: "text[]"}
+      - {name: catalog, type: boolean}
+      - {name: secure, type: boolean}
+      - {name: declared_models, type: "text[]"}
+      - {name: declared_capabilities, type: "text[]"}
+      - {name: protocol, type: text}
+      - {name: display_name, type: text}
+      - {name: display_name_locked, type: boolean}
+      - {name: registered_name, type: text}
+      - {name: features, type: "text[]"}
+      - {name: boot_id, type: text}
+      - {name: offline_reason, type: text}
+      - {name: network_isolated, type: boolean}
+      - {name: retired, type: boolean}
+      - {name: stages, type: "text[]"}
+
+  - id: data.runner-token
+    type: data-object
+    name: Токен runner'а
+    props: {table: runner_tokens}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: name, type: text}
+      - {name: prefix, type: text}
+      - {name: token_hash, type: text, unique: true}
+      - {name: created_by, type: uuid, fk: {to: data.user, attribute: id}}
+      - {name: created_at, type: timestamptz}
+      - {name: expires_at, type: timestamptz, nullable: true}
+      - {name: last_used_at, type: timestamptz, nullable: true}
+      - {name: revoked_at, type: timestamptz, nullable: true}
+
+  - id: data.runner-token-binding
+    type: data-object
+    name: Привязка токена runner'а
+    props: {table: runner_token_bindings}
+    attributes:
+      - {name: token_id, type: uuid, pk: true, fk: {to: data.runner-token, attribute: id}}
+      - {name: runner_id, type: text, pk: true}
+      - {name: source, type: text}
+      - {name: bound_at, type: timestamptz}
+
+  - id: data.policy-version
+    type: data-object
+    name: Версия политики
+    props: {table: policy_versions}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: scope, type: text}
+      - {name: project_id, type: uuid, nullable: true, fk: {to: data.project, attribute: id}}
+      - {name: version, type: integer}
+      - {name: hash, type: text}
+      - {name: content, type: jsonb}
+      - {name: created_at, type: timestamptz}
+      - {name: created_by, type: text}
+
+  - id: data.model-connection
+    type: data-object
+    name: Подключение модели
+    props: {table: model_connections}
+    relations:
+      - {type: realization, to: biz.model-connection}
+    attributes:
+      - {name: id, type: text, pk: true}
+      - {name: name, type: text}
+      - {name: kind, type: text, description: "openai, anthropic, deepseek, openrouter, ollama, lmstudio"}
+      - {name: api, type: text}
+      - {name: base_url, type: text}
+      - {name: key_prefix, type: text}
+      - {name: key_enc, type: bytea, nullable: true}
+      - {name: headers, type: jsonb}
+      - {name: models, type: jsonb}
+      - {name: enabled, type: boolean}
+      - {name: state, type: text}
+      - {name: check_detail, type: text}
+      - {name: checked_at, type: timestamptz, nullable: true}
+      - {name: updated_at, type: timestamptz}
+      - {name: updated_by, type: uuid, fk: {to: data.user, attribute: id}}
+
+  - id: data.installation-setting
+    type: data-object
+    name: Настройка установки
+    props: {table: installation_settings}
+    attributes:
+      - {name: key, type: text, pk: true}
+      - {name: value, type: jsonb}
+      - {name: updated_at, type: timestamptz}
+      - {name: updated_by, type: uuid, nullable: true, fk: {to: data.user, attribute: id}}
+
+  - id: data.agent
+    type: data-object
+    name: Агент
+    props: {table: agents}
+    attributes:
+      - {name: id, type: text, pk: true}
+      - {name: name, type: text}
+      - {name: adapter, type: text}
+      - {name: command, type: text}
+      - {name: capabilities, type: "text[]"}
+      - {name: models, type: jsonb}
+      - {name: default_model, type: jsonb, nullable: true}
+      - {name: env, type: jsonb}
+      - {name: args, type: jsonb}
+      - {name: secrets, type: text}
+      - {name: enabled, type: boolean}
+      - {name: preset, type: boolean}
+      - {name: updated_at, type: timestamptz}
+      - {name: updated_by, type: uuid, nullable: true, fk: {to: data.user, attribute: id}}
+      - {name: limits, type: jsonb}
+
+  - id: data.agent-role
+    type: data-object
+    name: Роль агента
+    props: {table: agent_roles}
+    attributes:
+      - {name: id, type: text, pk: true}
+      - {name: title, type: text}
+      - {name: description, type: text}
+      - {name: instruction, type: text}
+      - {name: color, type: text}
+      - {name: capability, type: text}
+      - {name: agent, type: text}
+      - {name: default_model, type: jsonb, nullable: true}
+      - {name: enabled, type: boolean}
+      - {name: builtin, type: boolean}
+      - {name: position, type: integer}
+      - {name: updated_at, type: timestamptz}
+      - {name: updated_by, type: uuid, nullable: true, fk: {to: data.user, attribute: id}}
+
+  - id: data.team-agent
+    type: data-object
+    name: Агент команды
+    props: {table: team_agents}
+    attributes:
+      - {name: id, type: text, pk: true}
+      - {name: name, type: text}
+      - {name: role_id, type: text, fk: {to: data.agent-role, attribute: id}}
+      - {name: agent, type: text}
+      - {name: connection_id, type: text}
+      - {name: model, type: text}
+      - {name: instruction_extra, type: text}
+      - {name: enabled, type: boolean}
+      - {name: position, type: integer}
+      - {name: updated_at, type: timestamptz}
+      - {name: updated_by, type: uuid, nullable: true, fk: {to: data.user, attribute: id}}
+
+  # ── Архитектура и исследование ──────────────────────────────────────────
+  - id: data.project-architecture
+    type: data-object
+    name: Снимок архитектуры
+    props: {table: project_architecture}
+    relations:
+      - {type: realization, to: biz.architecture-snapshot}
+    attributes:
+      - {name: project_id, type: uuid, pk: true, fk: {to: data.project, attribute: id}}
+      - {name: status, type: text}
+      - {name: sha, type: text}
+      - {name: read_at, type: timestamptz, nullable: true}
+      - {name: error, type: text}
+      - {name: defects, type: jsonb}
+      - {name: data, type: jsonb, nullable: true}
+      - {name: valid_sha, type: text}
+      - {name: valid_read_at, type: timestamptz, nullable: true}
+      - {name: valid_data, type: jsonb, nullable: true}
+      - {name: updated_at, type: timestamptz}
+      - {name: error_kind, type: text}
+      - {name: tree_sha, type: text}
+
+  - id: data.discovery-interview
+    type: data-object
+    name: Интервью и отзыв
+    props: {table: discovery_interviews}
+    relations:
+      - {type: realization, to: biz.interview}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
+      - {name: title, type: text}
+      - {name: respondent_role, type: text}
+      - {name: held_at, type: date, nullable: true}
+      - {name: text, type: text}
+      - {name: sha256, type: text}
+      - {name: chars, type: integer}
+      - {name: lines, type: integer}
+      - {name: created_by, type: uuid, nullable: true, fk: {to: data.user, attribute: id}}
+      - {name: created_at, type: timestamptz}
+      - {name: deleted_at, type: timestamptz, nullable: true}
+      - {name: kind, type: text, description: "interview, feedback"}
+
+  - id: data.discovery-run
+    type: data-object
+    name: Запуск исследования
+    props: {table: discovery_runs}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
+      - {name: version, type: integer}
+      - {name: status, type: text}
+      - {name: stage, type: text, description: "summaries, synthesis, backlog"}
+      - {name: progress_done, type: integer}
+      - {name: progress_total, type: integer}
+      - {name: interviews, type: jsonb}
+      - {name: agent_id, type: text}
+      - {name: agent_name, type: text}
+      - {name: role_title, type: text}
+      - {name: model, type: text}
+      - {name: connection_id, type: text}
+      - {name: instruction_sha, type: text}
+      - {name: result, type: jsonb, nullable: true}
+      - {name: dropped, type: jsonb}
+      - {name: defects, type: jsonb}
+      - {name: backlog, type: jsonb, nullable: true}
+      - {name: backlog_rev, type: integer}
+      - {name: outdated, type: boolean}
+      - {name: error, type: text}
+      - {name: tokens_in, type: bigint, nullable: true}
+      - {name: tokens_out, type: bigint, nullable: true}
+      - {name: cost_usd, type: "numeric(12,6)", nullable: true}
+      - {name: duration_s, type: integer}
+      - {name: approved_epics, type: jsonb, nullable: true}
+      - {name: decompose, type: jsonb}
+      - {name: started_at, type: timestamptz}
+      - {name: finished_at, type: timestamptz, nullable: true}
+      - {name: approved_at, type: timestamptz, nullable: true}
+      - {name: approved_by, type: uuid, nullable: true, fk: {to: data.user, attribute: id}}
+      - {name: feedback_total, type: integer, nullable: true}
+      - {name: feedback_synthesized, type: integer, nullable: true}
+      - {name: feedback_without_findings, type: integer, nullable: true}
+
+  - id: data.discovery-summary
+    type: data-object
+    name: Конспект исследования
+    props: {table: discovery_summaries}
+    attributes:
+      - {name: interview_sha256, type: text, pk: true}
+      - {name: model, type: text, pk: true}
+      - {name: instruction_sha, type: text, pk: true}
+      - {name: summary, type: jsonb}
+      - {name: dropped, type: jsonb}
+      - {name: created_at, type: timestamptz}
+
+  - id: data.epic-need
+    type: data-object
+    name: Потребность Epic
+    props: {table: epic_needs}
+    attributes:
+      - {name: epic_id, type: uuid, pk: true, fk: {to: data.epic, attribute: id}}
+      - {name: run_id, type: uuid, pk: true, fk: {to: data.discovery-run, attribute: id}}
+      - {name: need_id, type: text, pk: true}
+      - {name: need, type: jsonb}
+    relations:
+      - {type: association, to: data.epic, cardinality: many-to-many, label: потребности}
+      - {type: realization, to: biz.need}
+
+  - id: data.epic-dep
+    type: data-object
+    name: Зависимость Epic'ов
+    props: {table: epic_deps}
+    attributes:
+      - {name: epic_id, type: uuid, pk: true, fk: {to: data.epic, attribute: id}}
+      - {name: depends_on, type: uuid, pk: true, fk: {to: data.epic, attribute: id}}
+    relations:
+      - {type: association, to: data.epic, cardinality: many-to-many, label: зависит от}
