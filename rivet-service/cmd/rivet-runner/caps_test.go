@@ -13,6 +13,7 @@ func TestWithArchitectureCapability(t *testing.T) {
 		{"coding,review", "coding,review,architecture"},
 		{" coding , ", "coding,architecture"},
 		{"deploy", "deploy"},
+		{"deploy,docker", "deploy,docker"},
 		{"deploy,coding", "deploy,coding,architecture"},
 		{"coding,architecture", "coding,architecture"},
 		{"", ""},
@@ -21,6 +22,19 @@ func TestWithArchitectureCapability(t *testing.T) {
 		got := strings.Join(withArchitectureCapability(strings.Split(c.in, ",")), ",")
 		if got != c.want {
 			t.Errorf("%q: %q, ожидалось %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestDeliveryOnly(t *testing.T) {
+	for _, s := range []string{"deploy", "deploy,docker"} {
+		if !deliveryOnly(strings.Split(s, ",")) {
+			t.Fatal(s)
+		}
+	}
+	for _, s := range []string{"coding", "deploy,coding", "docker", ""} {
+		if deliveryOnly(strings.Split(s, ",")) {
+			t.Fatal(s)
 		}
 	}
 }

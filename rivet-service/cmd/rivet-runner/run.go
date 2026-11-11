@@ -116,7 +116,7 @@ func run(args []string, secrets map[string]string) error {
 	}
 	// Runner выкатки (единственная capability deploy) работает без агента:
 	// он исполняет только задания выкатки.
-	deployOnly := len(cfg.Capabilities) == 1 && strings.TrimSpace(cfg.Capabilities[0]) == "deploy"
+	deployOnly := deliveryOnly(cfg.Capabilities)
 	switch {
 	case deployOnly && (cfg.Agent == "" || cfg.Agent == runner.AgentRivet):
 		cfg.Agent, cfg.Adapter = "", ""

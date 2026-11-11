@@ -116,7 +116,7 @@ func (s *Store) DueMonitors(ctx context.Context) ([]MonitorDue, error) {
 		FROM monitor_state ms
 		JOIN environments e ON e.id = ms.env_id
 		JOIN projects p ON p.id = e.project_id
-		WHERE COALESCE((e.config->'monitor'->>'enabled')::boolean, false)
+		WHERE e.exec_type<>'local_docker' AND COALESCE((e.config->'monitor'->>'enabled')::boolean, false)
 		  AND (ms.next_at <= now() OR ms.recheck_at <= now())
 		  AND (ms.pending_check_id = '' OR ms.pending_since < now() - $1::interval)
 		ORDER BY LEAST(ms.next_at, COALESCE(ms.recheck_at, ms.next_at))`, monitorPendingStale.String())
@@ -537,6 +537,9 @@ type MonitorView struct {
 
 // GetMonitor — состояние наблюдения и последние 20 проверок.
 func (s *Store) GetMonitor(ctx context.Context, env domain.Environment) (MonitorView, error) {
+	if env.ExecType == domain.ExecLocalDocker {
+		return s.LocalMonitorView(ctx, env.ID)
+	}
 	v := MonitorView{EnvID: env.ID, State: MonitorDisabled, Runs: []MonitorRun{}}
 	var next time.Time
 	err := s.Pool.QueryRow(ctx, `

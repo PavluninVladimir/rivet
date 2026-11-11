@@ -365,6 +365,10 @@ message DeployJob {
   bool checkout = 12;
   string repo_url = 13;
   string git_token = 14;
+  // Типизированная конфигурация фиксированного драйвера localdocker.Job.
+  // Отправляется только runner-у с feature local_docker_v1.
+  bytes local_docker_job = 15;
+  string local_docker_action = 16;
 }
 
 // DeployResult — итог этапа публикации; чужой/stale deployment_id
@@ -375,6 +379,8 @@ message DeployResult {
   bool ok = 3;
   string detail = 4;   // хвост вывода команд / причина
   bool rollback = 5;   // эхо DeployJob.rollback: результат фазы отката
+  // localdocker.Result; CAS привязан к deployment_id операции.
+  bytes local_docker_result = 6;
 
   enum Stage {
     STAGE_UNSPECIFIED = 0;
