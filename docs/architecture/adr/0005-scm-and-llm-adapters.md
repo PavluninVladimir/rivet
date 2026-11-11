@@ -10,8 +10,9 @@ elements: [ext.github, ext.gitlab, ext.gitea, ext.llm, app.scm, app.llm, data.mo
 
 Rivet должен работать с разными хостингами репозиториев и разными API моделей.
 Адаптеры SCM перечислены в `internal/scm` (`github`, `gitlab`, `gitea`),
-а клиенты моделей — в `internal/llm` (`openai`, `anthropic`, `deepseek`,
-`openrouter`, `ollama`, `lmstudio`). Подключения и учётные данные хранятся в
+а клиенты моделей — в `internal/llm/chat_openai.go` и
+`internal/llm/chat_anthropic.go`. Пресеты OpenAI, Anthropic, DeepSeek,
+OpenRouter, Ollama и LM Studio заданы в `internal/llm/presets.go`. Подключения и учётные данные хранятся в
 таблицах `model_connections` и `scm_credentials`.
 
 ## Решение

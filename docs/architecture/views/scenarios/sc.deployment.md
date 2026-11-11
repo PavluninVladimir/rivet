@@ -17,7 +17,7 @@ sequenceDiagram
   n_app_api->>n_tech_postgres: создать deployment
   n_app_orchestrator-)n_app_stream: PlaneMsg с задачей публикации
   n_app_stream-)n_app_runner_engine: назначение по gRPC-потоку
-  n_app_runner_engine-)n_app_stream: PlaneMsg с результатом публикации
+  n_app_runner_engine-)n_app_stream: RunnerMsg с результатом публикации
   n_app_stream-)n_app_orchestrator: результат публикации
   n_app_orchestrator->>n_tech_postgres: обновить deployment и release
   n_app_orchestrator-)n_app_ops: сформировать release notes

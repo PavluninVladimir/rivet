@@ -21,7 +21,7 @@ steps:
     kind: async
   - from: app.runner.engine
     to: app.stream
-    message: PlaneMsg с результатом публикации
+    message: RunnerMsg с результатом публикации
     kind: async
   - from: app.stream
     to: app.orchestrator
