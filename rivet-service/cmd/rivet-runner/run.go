@@ -25,7 +25,7 @@ func run(args []string, secrets map[string]string) error {
 	fs := flag.NewFlagSet("rivet-runner", flag.ContinueOnError)
 	var cfg runner.Config
 	fs.StringVar(&cfg.PlaneAddr, "plane", envDef("RIVET_PLANE_ADDR", "localhost:8090"), "адрес gRPC control plane")
-	fs.StringVar(&cfg.Token, "token", secrets[tokenEnv],
+	fs.StringVar(&cfg.Token, "token", "",
 		"устарел: токен регистрации виден в списке процессов; передавай его файлом 0600 в "+tokenFileEnv+" (или в "+tokenEnv+")")
 	fs.BoolVar(&cfg.TLS, "tls", os.Getenv("RIVET_PLANE_TLS") == "1", "подключаться к control plane по TLS")
 	fs.StringVar(&cfg.TLSCA, "tls-ca", os.Getenv("RIVET_PLANE_TLS_CA"), "корневой сертификат control plane (пусто — системные корни)")
@@ -58,6 +58,10 @@ func run(args []string, secrets map[string]string) error {
 			"в RIVET_RUNNER_SANDBOX_RO — список через "+string(os.PathListSeparator)+". Нельзя $HOME и каталоги выше, файл токена и его каталог, рабочий каталог runner'а")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// Секрет не регистрируется как default флага: usage печатает defaults.
+	if cfg.Token == "" {
+		cfg.Token = secrets[tokenEnv]
 	}
 	// Идентификатор по тем же правилам, что у control plane
 	// (add-runner-identity): недопустимый отклонился бы при регистрации.
