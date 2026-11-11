@@ -1,0 +1,41 @@
+id: sc.runner-execution
+title: Назначение и выполнение этапа runner'ом
+process: biz.proc.epic
+participants: [app.orchestrator, app.stream, app.runner.engine, app.runner.agent, ext.llm, tech.postgres]
+steps:
+  - from: app.orchestrator
+    to: app.stream
+    message: PlaneMsg с назначением этапа
+    kind: async
+  - from: app.stream
+    to: app.runner.engine
+    message: назначение по gRPC-потоку
+    kind: async
+  - from: app.runner.engine
+    to: app.runner.agent
+    message: выполнить этап по роли
+    kind: sync
+  - from: app.runner.agent
+    to: ext.llm
+    message: запрос к модели с инструментами
+    kind: sync
+  - from: ext.llm
+    to: app.runner.agent
+    message: ответ модели
+    kind: return
+  - from: app.runner.agent
+    to: app.runner.engine
+    message: вердикт и артефакты
+    kind: return
+  - from: app.runner.engine
+    to: app.stream
+    message: PlaneMsg с вердиктом
+    kind: async
+  - from: app.stream
+    to: app.orchestrator
+    message: вердикт и usage
+    kind: async
+  - from: app.orchestrator
+    to: tech.postgres
+    message: обновить статус задачи и этапа
+    kind: sync

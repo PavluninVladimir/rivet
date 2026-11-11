@@ -1,0 +1,48 @@
+id: sc.epic-decompose
+title: Декомпозиция Epic в план задач
+process: biz.proc.epic
+participants: [biz.owner, app.api, app.planner, app.llm, ext.llm, tech.postgres]
+steps:
+  - from: biz.owner
+    to: app.api
+    message: "POST /api/v1/epics/{id}/decompose"
+    kind: sync
+  - from: app.api
+    to: app.planner
+    message: "requestPlan(Epic)"
+    kind: sync
+  - from: app.planner
+    to: app.llm
+    message: составить план задач
+    kind: sync
+  - from: app.llm
+    to: ext.llm
+    message: REST-запрос к модели
+    kind: sync
+  - from: ext.llm
+    to: app.llm
+    message: ответ модели
+    kind: return
+  - from: app.llm
+    to: app.planner
+    message: план
+    kind: return
+  - opt:
+      when: план не прошёл проверку
+      steps:
+        - from: app.planner
+          to: app.llm
+          message: запросить исправление плана
+          kind: sync
+  - from: app.planner
+    to: app.api
+    message: план задач
+    kind: return
+  - from: app.api
+    to: tech.postgres
+    message: материализовать задачи
+    kind: sync
+  - from: app.api
+    to: biz.owner
+    message: задачи созданы
+    kind: return

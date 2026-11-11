@@ -1,0 +1,53 @@
+id: sc.architecture-describe
+title: Описание архитектуры проекта
+process: biz.proc.architecture
+participants: [biz.owner, app.api, app.orchestrator, app.stream, app.runner.engine, app.runner.agent, ext.llm, app.architecture, tech.postgres]
+steps:
+  - from: biz.owner
+    to: app.api
+    message: "POST /api/v1/projects/{id}/architecture/describe"
+    kind: sync
+  - from: app.api
+    to: app.orchestrator
+    message: запустить pipeline архитектуры
+    kind: sync
+  - from: app.orchestrator
+    to: app.stream
+    message: PlaneMsg с задачей Архитектора
+    kind: async
+  - from: app.stream
+    to: app.runner.engine
+    message: назначение по gRPC-потоку
+    kind: async
+  - from: app.runner.engine
+    to: app.runner.agent
+    message: выполнить роль Архитектора
+    kind: sync
+  - from: app.runner.agent
+    to: ext.llm
+    message: запрос к модели с инструментами
+    kind: sync
+  - from: ext.llm
+    to: app.runner.agent
+    message: ответ модели
+    kind: return
+  - from: app.runner.agent
+    to: app.runner.engine
+    message: изменения в docs/architecture
+    kind: return
+  - from: app.runner.engine
+    to: app.stream
+    message: PlaneMsg с отчётом
+    kind: async
+  - from: app.stream
+    to: app.orchestrator
+    message: отчёт и diff
+    kind: async
+  - from: app.orchestrator
+    to: app.architecture
+    message: проверить описание и представления
+    kind: sync
+  - from: app.architecture
+    to: tech.postgres
+    message: сохранить снимок архитектуры
+    kind: sync

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:rivet="urn:rivet:architecture:1"
+                  id="defs-architecture" targetNamespace="urn:rivet:process">
+  <bpmn:process id="biz.proc.architecture" name="Описание архитектуры" isExecutable="false">
+    <bpmn:laneSet id="architecture-lanes">
+      <bpmn:lane id="lane-owner" name="Владелец проекта" rivet:ref="biz.owner">
+        <bpmn:flowNodeRef>start</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>task</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>done</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="lane-architect" name="Архитектор" rivet:ref="biz.architect">
+        <bpmn:flowNodeRef>describe</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>validate</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="start" name="Нужно описание архитектуры"/>
+    <bpmn:serviceTask id="task" name="Поставить задачу Архитектору" rivet:ref="app.orchestration-service"/>
+    <bpmn:serviceTask id="describe" name="Описать архитектуру" rivet:ref="app.architecture-service"/>
+    <bpmn:serviceTask id="validate" name="Проверить описание" rivet:ref="app.architecture-service"/>
+    <bpmn:endEvent id="done" name="Описание актуально"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="task"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="task" targetRef="describe"/>
+    <bpmn:sequenceFlow id="f3" sourceRef="describe" targetRef="validate"/>
+    <bpmn:sequenceFlow id="f4" sourceRef="validate" targetRef="done"/>
+  </bpmn:process>
+</bpmn:definitions>

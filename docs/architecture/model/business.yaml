@@ -1,0 +1,191 @@
+elements:
+  - id: biz.owner
+    type: actor
+    name: Владелец проекта
+    description: Человек, который ставит цели, утверждает бэклог и следит за результатом.
+    props: {external: true}
+
+  - id: biz.member
+    type: actor
+    name: Участник проекта
+    description: Человек с доступом к задачам, релизам и сессиям проекта.
+    props: {external: true}
+
+  - id: biz.admin
+    type: actor
+    name: Администратор установки
+    description: Управляет пользователями, подключениями моделей, агентами и окружениями.
+    props: {external: true}
+
+  - id: biz.analyst
+    type: role
+    name: Аналитик
+    description: "Роль агента: исследует интервью и отзывы, формирует потребности и бэклог."
+
+  - id: biz.architect
+    type: role
+    name: Архитектор
+    description: "Роль агента: описывает и проверяет архитектуру проекта в формате Rivet."
+
+  - id: biz.lead
+    type: role
+    name: Тимлид
+    description: "Роль агента: раскладывает Epic на план задач и руководит процессом."
+
+  - id: biz.developer
+    type: role
+    name: Разработчик
+    description: "Роль агента: пишет код задачи в рабочей ветке."
+
+  - id: biz.tester
+    type: role
+    name: Тестировщик
+    description: "Роль агента: проверяет результат задачи и фиксирует вердикт."
+
+  - id: biz.reviewer
+    type: role
+    name: Ревьюер
+    description: "Роль агента: проверяет изменения перед слиянием в базовую ветку."
+
+  - id: biz.devops
+    type: role
+    name: Релиз-инженер
+    description: "Роль агента: публикует изменения в окружения и оформляет релиз."
+
+  - id: biz.sre
+    type: role
+    name: Инженер сопровождения
+    description: "Роль агента: наблюдает за окружениями и описывает инциденты."
+
+  - id: biz.delivery
+    type: business-service
+    name: Доставка Epic
+    description: Ведёт Epic от плана до слияния выполненных задач.
+    relations:
+      - {type: serving, to: biz.owner}
+
+  - id: biz.discovery
+    type: business-service
+    name: Исследование продукта
+    description: Собирает интервью и отзывы, извлекает потребности и готовит бэклог Epic'ов.
+    relations:
+      - {type: serving, to: biz.owner}
+
+  - id: biz.release-ops
+    type: business-service
+    name: Релизы и сопровождение
+    description: Публикует изменения, оформляет релизы и разбирает инциденты.
+    relations:
+      - {type: serving, to: biz.owner}
+      - {type: serving, to: biz.admin}
+
+  - id: biz.architecture
+    type: business-service
+    name: Управление описанием архитектуры
+    description: Поддерживает актуальное описание архитектуры проекта в docs/architecture.
+    relations:
+      - {type: serving, to: biz.owner}
+      - {type: serving, to: biz.member}
+
+  - id: biz.proc.epic
+    type: process
+    name: Выполнение Epic
+    description: Планирование Epic, выполнение задач по ролям и слияние результата.
+    relations:
+      - {type: realization, to: biz.delivery}
+      - {type: access, to: biz.epic, mode: readwrite}
+      - {type: access, to: biz.task, mode: readwrite}
+      - {type: access, to: biz.session, mode: read}
+
+  - id: biz.proc.discovery
+    type: process
+    name: Исследование продукта
+    description: Загрузка интервью, анализ Аналитиком и утверждение бэклога владельцем.
+    relations:
+      - {type: realization, to: biz.discovery}
+      - {type: access, to: biz.interview, mode: read}
+      - {type: access, to: biz.need, mode: read}
+      - {type: access, to: biz.epic, mode: write}
+
+  - id: biz.proc.release
+    type: process
+    name: Релиз и наблюдение
+    description: Публикация окружений, формирование релиза и обработка инцидентов.
+    relations:
+      - {type: realization, to: biz.release-ops}
+      - {type: access, to: biz.environment, mode: read}
+      - {type: access, to: biz.release, mode: readwrite}
+      - {type: access, to: biz.incident, mode: readwrite}
+
+  - id: biz.proc.architecture
+    type: process
+    name: Описание архитектуры
+    description: Постановка задачи описания архитектуры и проверка результата в формате Rivet.
+    relations:
+      - {type: realization, to: biz.architecture}
+      - {type: access, to: biz.architecture-snapshot, mode: readwrite}
+      - {type: access, to: biz.task, mode: read}
+
+  - id: biz.project
+    type: business-object
+    name: Проект
+
+  - id: biz.epic
+    type: business-object
+    name: Epic
+
+  - id: biz.task
+    type: business-object
+    name: Задача
+
+  - id: biz.step-run
+    type: business-object
+    name: Этап задачи
+
+  - id: biz.session
+    type: business-object
+    name: Сессия агента
+
+  - id: biz.event
+    type: business-object
+    name: Событие журнала
+
+  - id: biz.user
+    type: business-object
+    name: Пользователь
+
+  - id: biz.environment
+    type: business-object
+    name: Окружение
+
+  - id: biz.deployment
+    type: business-object
+    name: Публикация
+
+  - id: biz.release
+    type: business-object
+    name: Релиз
+
+  - id: biz.incident
+    type: business-object
+    name: Инцидент
+
+  - id: biz.runner
+    type: business-object
+    name: Runner
+
+  - id: biz.model-connection
+    type: business-object
+    name: Подключение модели
+
+  - id: biz.interview
+    type: business-object
+    name: Интервью и отзыв
+
+  - id: biz.need
+    type: business-object
+    name: Потребность
+
+  - id: biz.architecture-snapshot
+    type: business-object
+    name: Снимок архитектуры

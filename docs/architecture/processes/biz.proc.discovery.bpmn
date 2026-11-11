@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:rivet="urn:rivet:architecture:1"
+                  id="defs-discovery" targetNamespace="urn:rivet:process">
+  <bpmn:process id="biz.proc.discovery" name="Исследование продукта" isExecutable="false">
+    <bpmn:laneSet id="discovery-lanes">
+      <bpmn:lane id="lane-owner" name="Владелец проекта" rivet:ref="biz.owner">
+        <bpmn:flowNodeRef>start</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>approve</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>done</bpmn:flowNodeRef>
+      </bpmn:lane>
+      <bpmn:lane id="lane-analyst" name="Аналитик" rivet:ref="biz.analyst">
+        <bpmn:flowNodeRef>analyze</bpmn:flowNodeRef>
+        <bpmn:flowNodeRef>create</bpmn:flowNodeRef>
+      </bpmn:lane>
+    </bpmn:laneSet>
+    <bpmn:startEvent id="start" name="Материал интервью собран"/>
+    <bpmn:serviceTask id="analyze" name="Проанализировать интервью" rivet:ref="app.discovery-service"/>
+    <bpmn:userTask id="approve" name="Утвердить бэклог"/>
+    <bpmn:serviceTask id="create" name="Создать Epic'и из бэклога" rivet:ref="app.discovery-service"/>
+    <bpmn:endEvent id="done" name="Бэклог принят"/>
+    <bpmn:sequenceFlow id="f1" sourceRef="start" targetRef="analyze"/>
+    <bpmn:sequenceFlow id="f2" sourceRef="analyze" targetRef="approve"/>
+    <bpmn:sequenceFlow id="f3" sourceRef="approve" targetRef="create"/>
+    <bpmn:sequenceFlow id="f4" sourceRef="create" targetRef="done"/>
+  </bpmn:process>
+</bpmn:definitions>

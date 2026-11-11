@@ -1,0 +1,67 @@
+elements:
+  - id: tech.postgres
+    type: system-software
+    name: PostgreSQL
+    description: "Реляционная база с изменяемой моделью Rivet: проекты, эпики, задачи, сессии, релизы, агенты и настройки."
+    props: {c4: database, technology: "PostgreSQL 17"}
+    relations:
+      - {type: access, to: data.project, mode: readwrite}
+      - {type: access, to: data.epic, mode: readwrite}
+      - {type: access, to: data.task, mode: readwrite}
+      - {type: access, to: data.task-dep, mode: readwrite}
+      - {type: access, to: data.task-step-run, mode: readwrite}
+      - {type: access, to: data.session, mode: readwrite}
+      - {type: access, to: data.event, mode: readwrite}
+      - {type: access, to: data.attention, mode: readwrite}
+      - {type: access, to: data.usage-record, mode: readwrite}
+      - {type: access, to: data.user, mode: readwrite}
+      - {type: access, to: data.project-member, mode: readwrite}
+      - {type: access, to: data.auth-session, mode: readwrite}
+      - {type: access, to: data.access-token, mode: readwrite}
+      - {type: access, to: data.environment, mode: readwrite}
+      - {type: access, to: data.deployment, mode: readwrite}
+      - {type: access, to: data.release, mode: readwrite}
+      - {type: access, to: data.incident, mode: readwrite}
+      - {type: access, to: data.incident-event, mode: readwrite}
+      - {type: access, to: data.monitor-state, mode: readwrite}
+      - {type: access, to: data.monitor-run, mode: readwrite}
+      - {type: access, to: data.scm-credential, mode: readwrite}
+      - {type: access, to: data.runner, mode: readwrite}
+      - {type: access, to: data.runner-token, mode: readwrite}
+      - {type: access, to: data.runner-token-binding, mode: readwrite}
+      - {type: access, to: data.policy-version, mode: readwrite}
+      - {type: access, to: data.model-connection, mode: readwrite}
+      - {type: access, to: data.installation-setting, mode: readwrite}
+      - {type: access, to: data.agent, mode: readwrite}
+      - {type: access, to: data.agent-role, mode: readwrite}
+      - {type: access, to: data.team-agent, mode: readwrite}
+      - {type: access, to: data.project-architecture, mode: readwrite}
+      - {type: access, to: data.discovery-interview, mode: readwrite}
+      - {type: access, to: data.discovery-run, mode: readwrite}
+      - {type: access, to: data.discovery-summary, mode: readwrite}
+      - {type: access, to: data.epic-need, mode: readwrite}
+      - {type: access, to: data.epic-dep, mode: readwrite}
+
+  - id: tech.s3
+    type: system-software
+    name: Объектное хранилище
+    description: Хранит тяжёлые артефакты сессий — транскрипты; в базе остаются только ссылки s3://.
+    props: {c4: database, technology: "S3-совместимое хранилище (RustFS в dev, S3 в проде)"}
+
+  - id: tech.node.plane
+    type: node
+    name: Сервер установки Rivet
+    description: Docker-хост, на котором разворачиваются rivetd, PostgreSQL и объектное хранилище.
+    props: {technology: "Docker Compose (Linux)"}
+    relations:
+      - {type: serving, to: app.rivetd}
+      - {type: serving, to: tech.postgres}
+      - {type: serving, to: tech.s3}
+
+  - id: tech.node.runner
+    type: node
+    name: Машина runner'а
+    description: Рабочая машина пользователя, где runner'у доступны репозиторий и песочница.
+    props: {technology: "Linux"}
+    relations:
+      - {type: serving, to: app.runner}
