@@ -18,7 +18,7 @@ erDiagram
   }
   n_data_agent["Агент"] {
     text id PK
-    text adapter
+    text adapter "native"
     jsonb args
     text capabilities "тип: text[]"
     text command
@@ -29,7 +29,7 @@ erDiagram
     jsonb models
     text name
     boolean preset
-    text secrets
+    text secrets "never, secure, always"
     timestamptz updated_at
     uuid updated_by FK "→ data.user.id, может быть пустым"
   }
@@ -79,12 +79,12 @@ erDiagram
     integer incident_attempts
     boolean incident_pending
     timestamptz incident_retry_at "может быть пустым"
-    text initiator "auto, manual, rollback"
+    text initiator "auto или логин участника"
     text log_ref "может быть пустым"
     boolean rollback
     text runner_id
     timestamptz started_at "может быть пустым"
-    text status "queued, running, done, failed"
+    text status "queued, deploying, verifying, done, failed, rolled_back"
     text version
     timestamptz version_at
   }
@@ -132,9 +132,9 @@ erDiagram
     uuid project_id FK "→ data.project.id"
     jsonb result "может быть пустым"
     text role_title
-    text stage "summaries, synthesis, backlog"
+    text stage "summaries, synthesis, done"
     timestamptz started_at
-    text status
+    text status "running, ready, failed, approved, superseded"
     bigint tokens_in "может быть пустым"
     bigint tokens_out "может быть пустым"
     integer version
@@ -151,12 +151,12 @@ erDiagram
     uuid id PK
     jsonb config
     timestamptz created_at
-    text exec_type "ssh, script, k8s"
-    text name UK
+    text exec_type "ssh, pipeline, k8s, gitops"
+    text name "уникально в рамках проекта (UNIQUE(project_id, name))"
     boolean paused
     uuid project_id FK "→ data.project.id"
     text runner_caps "тип: text[]"
-    text trigger "manual, auto, merge"
+    text trigger "auto, manual"
   }
   n_data_epic["Epic"] {
     uuid id PK
@@ -165,12 +165,12 @@ erDiagram
     timestamptz done_at "может быть пустым"
     timestamptz due_at "может быть пустым"
     text goal
-    text kind "work, architecture, discovery"
+    text kind "work, architecture, explore, maintenance"
     text priority "может быть пустым"
     uuid project_id FK "→ data.project.id"
     text source_key "может быть пустым"
     timestamptz started_at "может быть пустым"
-    text status "planned, active, blocked, done, cancelled"
+    text status "planned, running, paused, done, archived"
     text title
     bigint token_budget "может быть пустым"
   }
@@ -206,7 +206,7 @@ erDiagram
     text description_agent_id FK "→ data.team-agent.id, может быть пустым"
     integer description_attempts
     timestamptz description_requested_at
-    text description_status
+    text description_status "pending, ready, template"
     uuid env_id FK "→ data.environment.id"
     text error_line
     jsonb evidence
@@ -219,12 +219,12 @@ erDiagram
     integer occurrences
     integer occurrences_at_mitigation
     uuid project_id FK "→ data.project.id"
-    text resolution
+    text resolution "fixed, self, manual или пусто"
     timestamptz resolved_at "может быть пустым"
-    text severity
+    text severity "medium, high"
     boolean skipped_daily
-    text source
-    text status "open, mitigated, resolved, dismissed"
+    text source "monitor, release"
+    text status "open, mitigated, resolved"
     text title
   }
   n_data_incident_event["Событие инцидента"] {
@@ -243,7 +243,7 @@ erDiagram
   }
   n_data_model_connection["Подключение модели"] {
     text id PK
-    text api
+    text api "anthropic, openai"
     text base_url
     text check_detail
     timestamptz checked_at "может быть пустым"
@@ -251,10 +251,10 @@ erDiagram
     jsonb headers
     bytea key_enc "может быть пустым"
     text key_prefix
-    text kind "openai, anthropic, deepseek, openrouter, ollama, lmstudio"
+    text kind "vendor, aggregator, local"
     jsonb models
     text name
-    text state
+    text state "ok, invalid, unchecked"
     timestamptz updated_at
     uuid updated_by FK "→ data.user.id"
   }
@@ -279,7 +279,7 @@ erDiagram
     timestamptz pending_since "может быть пустым"
     text reason
     timestamptz recheck_at "может быть пустым"
-    text state "unknown, ok, fail"
+    text state "ok, fail, unknown, disabled"
   }
   n_data_policy_version["Версия политики"] {
     uuid id PK
@@ -302,7 +302,7 @@ erDiagram
     text name "имя репозитория в консоли"
     text policy_file_id
     text policy_source "store или file"
-    text provider "github, gitlab или gitea"
+    text provider "github, gitlab, gitea или fake"
     text repo_path "owner/repo или путь в инстансе"
     integer webhook_events
     boolean webhook_registered
@@ -317,7 +317,7 @@ erDiagram
     text error_kind
     timestamptz read_at "может быть пустым"
     text sha
-    text status
+    text status "absent, ok, invalid, error"
     text tree_sha
     timestamptz updated_at
     jsonb valid_data "может быть пустым"
@@ -344,14 +344,14 @@ erDiagram
     text notes_md
     text notes_model
     timestamptz notes_requested_at
-    text notes_status "pending, ready, failed"
+    text notes_status "pending, ready, template"
     text prev_version
     uuid project_id FK "→ data.project.id"
     text version
   }
   n_data_runner["Runner"] {
     text id PK
-    text adapter
+    text adapter "native, wrap"
     text agent
     text boot_id
     text capabilities "тип: text[]"
@@ -361,7 +361,7 @@ erDiagram
     text declared_capabilities "тип: text[]"
     text declared_models "тип: text[]"
     uuid deployment_id FK "→ data.deployment.id, может быть пустым"
-    text depth
+    text depth "full, partial, minimal"
     text display_name
     boolean display_name_locked
     boolean draining
@@ -377,7 +377,7 @@ erDiagram
     boolean retired
     boolean secure
     text stages "тип: text[]"
-    text status "idle, busy, draining, offline"
+    text status "idle, running, testing, review, deploying, offline"
     uuid task_id FK "→ data.task.id, может быть пустым"
     uuid token_id FK "→ data.runner-token.id, может быть пустым"
   }
@@ -396,7 +396,7 @@ erDiagram
     text runner_id PK
     uuid token_id PK, FK "→ data.runner-token.id"
     timestamptz bound_at
-    text source
+    text source "issue, first_use, migration"
   }
   n_data_scm_credential["Учётные данные SCM"] {
     uuid id PK
@@ -404,8 +404,8 @@ erDiagram
     timestamptz checked_at "может быть пустым"
     timestamptz created_at
     text owner
-    text provider
-    text state "unchecked, ok, fail"
+    text provider "github, gitlab, gitea, fake"
+    text state "ok, invalid, unchecked"
     bytea token_enc
     text token_prefix
   }
@@ -413,9 +413,9 @@ erDiagram
     uuid id PK
     text agent
     integer attempt "может быть пустым"
-    text depth
+    text depth "full, partial, minimal"
     text driver_id
-    text driver_kind
+    text driver_kind "user, scheduler"
     timestamptz ended_at "может быть пустым"
     text files "тип: text[], может быть пустым"
     text last_step
@@ -448,7 +448,7 @@ erDiagram
     uuid epic_id FK "→ data.epic.id"
     integer estimate
     uuid incident_id FK "→ data.incident.id, может быть пустым"
-    text kind "work, architecture, review, delivery, monitor"
+    text kind "work, architecture, explore, bug"
     timestamptz merged_at "может быть пустым"
     bigint num UK "номер задачи в рамках Epic"
     text pr_url "может быть пустым"
@@ -459,7 +459,7 @@ erDiagram
     text runner_id "может быть пустым"
     integer source_ord "может быть пустым"
     timestamptz started_at "может быть пустым"
-    text status "queued, running, review, done, blocked, cancelled"
+    text status "queued, ready, running, testing, review, fixing, blocked, failed, done, cancelled"
     integer step_closed_gen
     text step_entry
     integer step_gen
@@ -498,7 +498,7 @@ erDiagram
     text runner_id FK "→ data.runner.id, может быть пустым"
     uuid session_id "может быть пустым"
     text step_id
-    text step_kind "code, test, review, merge"
+    text step_kind "code, test, review, merge, deploy, prompt"
     uuid task_id FK "→ data.task.id"
     text user_login
     text user_role
@@ -629,7 +629,7 @@ erDiagram
 | Атрибут | Тип | Ключ | Пусто | Описание |
 |---|---|---|---|---|
 | `id` | text | PK | нет |  |
-| `adapter` | text |  | нет |  |
+| `adapter` | text |  | нет | native |
 | `args` | jsonb |  | нет |  |
 | `capabilities` | text[] |  | нет |  |
 | `command` | text |  | нет |  |
@@ -640,7 +640,7 @@ erDiagram
 | `models` | jsonb |  | нет |  |
 | `name` | text |  | нет |  |
 | `preset` | boolean |  | нет |  |
-| `secrets` | text |  | нет |  |
+| `secrets` | text |  | нет | never, secure, always |
 | `updated_at` | timestamptz |  | нет |  |
 | `updated_by` | uuid | FK → `data.user.id` | да |  |
 
@@ -710,12 +710,12 @@ erDiagram
 | `incident_attempts` | integer |  | нет |  |
 | `incident_pending` | boolean |  | нет |  |
 | `incident_retry_at` | timestamptz |  | да |  |
-| `initiator` | text |  | нет | auto, manual, rollback |
+| `initiator` | text |  | нет | auto или логин участника |
 | `log_ref` | text |  | да |  |
 | `rollback` | boolean |  | нет |  |
 | `runner_id` | text |  | нет |  |
 | `started_at` | timestamptz |  | да |  |
-| `status` | text |  | нет | queued, running, done, failed |
+| `status` | text |  | нет | queued, deploying, verifying, done, failed, rolled_back |
 | `version` | text |  | нет |  |
 | `version_at` | timestamptz |  | нет |  |
 
@@ -773,9 +773,9 @@ erDiagram
 | `project_id` | uuid | FK → `data.project.id` | нет |  |
 | `result` | jsonb |  | да |  |
 | `role_title` | text |  | нет |  |
-| `stage` | text |  | нет | summaries, synthesis, backlog |
+| `stage` | text |  | нет | summaries, synthesis, done |
 | `started_at` | timestamptz |  | нет |  |
-| `status` | text |  | нет |  |
+| `status` | text |  | нет | running, ready, failed, approved, superseded |
 | `tokens_in` | bigint |  | да |  |
 | `tokens_out` | bigint |  | да |  |
 | `version` | integer |  | нет |  |
@@ -802,12 +802,12 @@ erDiagram
 | `id` | uuid | PK | нет |  |
 | `config` | jsonb |  | нет |  |
 | `created_at` | timestamptz |  | нет |  |
-| `exec_type` | text |  | нет | ssh, script, k8s |
-| `name` | text | UK | нет |  |
+| `exec_type` | text |  | нет | ssh, pipeline, k8s, gitops |
+| `name` | text |  | нет | уникально в рамках проекта (UNIQUE(project_id, name)) |
 | `paused` | boolean |  | нет |  |
 | `project_id` | uuid | FK → `data.project.id` | нет |  |
 | `runner_caps` | text[] |  | нет |  |
-| `trigger` | text |  | нет | manual, auto, merge |
+| `trigger` | text |  | нет | auto, manual |
 
 ## Epic (`data.epic`)
 
@@ -821,12 +821,12 @@ erDiagram
 | `done_at` | timestamptz |  | да |  |
 | `due_at` | timestamptz |  | да |  |
 | `goal` | text |  | нет |  |
-| `kind` | text |  | нет | work, architecture, discovery |
+| `kind` | text |  | нет | work, architecture, explore, maintenance |
 | `priority` | text |  | да |  |
 | `project_id` | uuid | FK → `data.project.id` | нет |  |
 | `source_key` | text |  | да |  |
 | `started_at` | timestamptz |  | да |  |
-| `status` | text |  | нет | planned, active, blocked, done, cancelled |
+| `status` | text |  | нет | planned, running, paused, done, archived |
 | `title` | text |  | нет |  |
 | `token_budget` | bigint |  | да |  |
 
@@ -882,7 +882,7 @@ erDiagram
 | `description_agent_id` | text | FK → `data.team-agent.id` | да |  |
 | `description_attempts` | integer |  | нет |  |
 | `description_requested_at` | timestamptz |  | нет |  |
-| `description_status` | text |  | нет |  |
+| `description_status` | text |  | нет | pending, ready, template |
 | `env_id` | uuid | FK → `data.environment.id` | нет |  |
 | `error_line` | text |  | нет |  |
 | `evidence` | jsonb |  | нет |  |
@@ -895,12 +895,12 @@ erDiagram
 | `occurrences` | integer |  | нет |  |
 | `occurrences_at_mitigation` | integer |  | нет |  |
 | `project_id` | uuid | FK → `data.project.id` | нет |  |
-| `resolution` | text |  | нет |  |
+| `resolution` | text |  | нет | fixed, self, manual или пусто |
 | `resolved_at` | timestamptz |  | да |  |
-| `severity` | text |  | нет |  |
+| `severity` | text |  | нет | medium, high |
 | `skipped_daily` | boolean |  | нет |  |
-| `source` | text |  | нет |  |
-| `status` | text |  | нет | open, mitigated, resolved, dismissed |
+| `source` | text |  | нет | monitor, release |
+| `status` | text |  | нет | open, mitigated, resolved |
 | `title` | text |  | нет |  |
 
 ## Событие инцидента (`data.incident-event`)
@@ -934,7 +934,7 @@ erDiagram
 | Атрибут | Тип | Ключ | Пусто | Описание |
 |---|---|---|---|---|
 | `id` | text | PK | нет |  |
-| `api` | text |  | нет |  |
+| `api` | text |  | нет | anthropic, openai |
 | `base_url` | text |  | нет |  |
 | `check_detail` | text |  | нет |  |
 | `checked_at` | timestamptz |  | да |  |
@@ -942,10 +942,10 @@ erDiagram
 | `headers` | jsonb |  | нет |  |
 | `key_enc` | bytea |  | да |  |
 | `key_prefix` | text |  | нет |  |
-| `kind` | text |  | нет | openai, anthropic, deepseek, openrouter, ollama, lmstudio |
+| `kind` | text |  | нет | vendor, aggregator, local |
 | `models` | jsonb |  | нет |  |
 | `name` | text |  | нет |  |
-| `state` | text |  | нет |  |
+| `state` | text |  | нет | ok, invalid, unchecked |
 | `updated_at` | timestamptz |  | нет |  |
 | `updated_by` | uuid | FK → `data.user.id` | нет |  |
 
@@ -980,7 +980,7 @@ erDiagram
 | `pending_since` | timestamptz |  | да |  |
 | `reason` | text |  | нет |  |
 | `recheck_at` | timestamptz |  | да |  |
-| `state` | text |  | нет | unknown, ok, fail |
+| `state` | text |  | нет | ok, fail, unknown, disabled |
 
 ## Версия политики (`data.policy-version`)
 
@@ -1013,7 +1013,7 @@ erDiagram
 | `name` | text |  | нет | имя репозитория в консоли |
 | `policy_file_id` | text |  | нет |  |
 | `policy_source` | text |  | нет | store или file |
-| `provider` | text |  | нет | github, gitlab или gitea |
+| `provider` | text |  | нет | github, gitlab, gitea или fake |
 | `repo_path` | text |  | нет | owner/repo или путь в инстансе |
 | `webhook_events` | integer |  | нет |  |
 | `webhook_registered` | boolean |  | нет |  |
@@ -1033,7 +1033,7 @@ erDiagram
 | `error_kind` | text |  | нет |  |
 | `read_at` | timestamptz |  | да |  |
 | `sha` | text |  | нет |  |
-| `status` | text |  | нет |  |
+| `status` | text |  | нет | absent, ok, invalid, error |
 | `tree_sha` | text |  | нет |  |
 | `updated_at` | timestamptz |  | нет |  |
 | `valid_data` | jsonb |  | да |  |
@@ -1070,7 +1070,7 @@ erDiagram
 | `notes_md` | text |  | нет |  |
 | `notes_model` | text |  | нет |  |
 | `notes_requested_at` | timestamptz |  | нет |  |
-| `notes_status` | text |  | нет | pending, ready, failed |
+| `notes_status` | text |  | нет | pending, ready, template |
 | `prev_version` | text |  | нет |  |
 | `project_id` | uuid | FK → `data.project.id` | нет |  |
 | `version` | text |  | нет |  |
@@ -1082,7 +1082,7 @@ erDiagram
 | Атрибут | Тип | Ключ | Пусто | Описание |
 |---|---|---|---|---|
 | `id` | text | PK | нет |  |
-| `adapter` | text |  | нет |  |
+| `adapter` | text |  | нет | native, wrap |
 | `agent` | text |  | нет |  |
 | `boot_id` | text |  | нет |  |
 | `capabilities` | text[] |  | нет |  |
@@ -1092,7 +1092,7 @@ erDiagram
 | `declared_capabilities` | text[] |  | нет |  |
 | `declared_models` | text[] |  | нет |  |
 | `deployment_id` | uuid | FK → `data.deployment.id` | да |  |
-| `depth` | text |  | нет |  |
+| `depth` | text |  | нет | full, partial, minimal |
 | `display_name` | text |  | нет |  |
 | `display_name_locked` | boolean |  | нет |  |
 | `draining` | boolean |  | нет |  |
@@ -1108,7 +1108,7 @@ erDiagram
 | `retired` | boolean |  | нет |  |
 | `secure` | boolean |  | нет |  |
 | `stages` | text[] |  | нет |  |
-| `status` | text |  | нет | idle, busy, draining, offline |
+| `status` | text |  | нет | idle, running, testing, review, deploying, offline |
 | `task_id` | uuid | FK → `data.task.id` | да |  |
 | `token_id` | uuid | FK → `data.runner-token.id` | да |  |
 
@@ -1137,7 +1137,7 @@ erDiagram
 | `runner_id` | text | PK | нет |  |
 | `token_id` | uuid | PK, FK → `data.runner-token.id` | нет |  |
 | `bound_at` | timestamptz |  | нет |  |
-| `source` | text |  | нет |  |
+| `source` | text |  | нет | issue, first_use, migration |
 
 ## Учётные данные SCM (`data.scm-credential`)
 
@@ -1150,8 +1150,8 @@ erDiagram
 | `checked_at` | timestamptz |  | да |  |
 | `created_at` | timestamptz |  | нет |  |
 | `owner` | text |  | нет |  |
-| `provider` | text |  | нет |  |
-| `state` | text |  | нет | unchecked, ok, fail |
+| `provider` | text |  | нет | github, gitlab, gitea, fake |
+| `state` | text |  | нет | ok, invalid, unchecked |
 | `token_enc` | bytea |  | нет |  |
 | `token_prefix` | text |  | нет |  |
 
@@ -1164,9 +1164,9 @@ erDiagram
 | `id` | uuid | PK | нет |  |
 | `agent` | text |  | нет |  |
 | `attempt` | integer |  | да |  |
-| `depth` | text |  | нет |  |
+| `depth` | text |  | нет | full, partial, minimal |
 | `driver_id` | text |  | нет |  |
-| `driver_kind` | text |  | нет |  |
+| `driver_kind` | text |  | нет | user, scheduler |
 | `ended_at` | timestamptz |  | да |  |
 | `files` | text[] |  | да |  |
 | `last_step` | text |  | нет |  |
@@ -1204,7 +1204,7 @@ erDiagram
 | `epic_id` | uuid | FK → `data.epic.id` | нет |  |
 | `estimate` | integer |  | нет |  |
 | `incident_id` | uuid | FK → `data.incident.id` | да |  |
-| `kind` | text |  | нет | work, architecture, review, delivery, monitor |
+| `kind` | text |  | нет | work, architecture, explore, bug |
 | `merged_at` | timestamptz |  | да |  |
 | `num` | bigint | UK | нет | номер задачи в рамках Epic |
 | `pr_url` | text |  | да |  |
@@ -1215,7 +1215,7 @@ erDiagram
 | `runner_id` | text |  | да |  |
 | `source_ord` | integer |  | да |  |
 | `started_at` | timestamptz |  | да |  |
-| `status` | text |  | нет | queued, running, review, done, blocked, cancelled |
+| `status` | text |  | нет | queued, ready, running, testing, review, fixing, blocked, failed, done, cancelled |
 | `step_closed_gen` | integer |  | нет |  |
 | `step_entry` | text |  | нет |  |
 | `step_gen` | integer |  | нет |  |
@@ -1264,7 +1264,7 @@ erDiagram
 | `runner_id` | text | FK → `data.runner.id` | да |  |
 | `session_id` | uuid |  | да |  |
 | `step_id` | text |  | нет |  |
-| `step_kind` | text |  | нет | code, test, review, merge |
+| `step_kind` | text |  | нет | code, test, review, merge, deploy, prompt |
 | `task_id` | uuid | FK → `data.task.id` | нет |  |
 | `user_login` | text |  | нет |  |
 | `user_role` | text |  | нет |  |

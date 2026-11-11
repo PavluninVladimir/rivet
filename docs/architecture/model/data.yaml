@@ -11,7 +11,7 @@ elements:
       - {name: name, type: text, description: имя репозитория в консоли}
       - {name: checks, type: jsonb, description: массив проверок политики проекта}
       - {name: created_at, type: timestamptz}
-      - {name: provider, type: text, description: "github, gitlab или gitea"}
+      - {name: provider, type: text, description: "github, gitlab, gitea или fake"}
       - {name: base_url, type: text}
       - {name: repo_path, type: text, description: owner/repo или путь в инстансе}
       - {name: default_branch, type: text}
@@ -35,10 +35,10 @@ elements:
       - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
       - {name: title, type: text}
       - {name: goal, type: text}
-      - {name: status, type: text, description: "planned, active, blocked, done, cancelled"}
+      - {name: status, type: text, description: "planned, running, paused, done, archived"}
       - {name: created_at, type: timestamptz}
       - {name: token_budget, type: bigint, nullable: true}
-      - {name: kind, type: text, description: "work, architecture, discovery"}
+      - {name: kind, type: text, description: "work, architecture, explore, maintenance"}
       - {name: priority, type: text, nullable: true}
       - {name: discovery_run_id, type: uuid, nullable: true, fk: {to: data.discovery-run, attribute: id}}
       - {name: source_key, type: text, nullable: true}
@@ -58,7 +58,7 @@ elements:
       - {name: num, type: bigint, unique: true, description: номер задачи в рамках Epic}
       - {name: title, type: text}
       - {name: description, type: text}
-      - {name: status, type: text, description: "queued, running, review, done, blocked, cancelled"}
+      - {name: status, type: text, description: "queued, ready, running, testing, review, fixing, blocked, failed, done, cancelled"}
       - {name: estimate, type: integer}
       - {name: capabilities, type: "text[]"}
       - {name: criteria, type: jsonb}
@@ -81,7 +81,7 @@ elements:
       - {name: wait_reason, type: text}
       - {name: step_gen, type: integer}
       - {name: step_closed_gen, type: integer}
-      - {name: kind, type: text, description: "work, architecture, review, delivery, monitor"}
+      - {name: kind, type: text, description: "work, architecture, explore, bug"}
       - {name: checked_sha, type: text}
       - {name: merged_at, type: timestamptz, nullable: true}
       - {name: incident_id, type: uuid, nullable: true, fk: {to: data.incident, attribute: id}}
@@ -111,7 +111,7 @@ elements:
       - {name: id, type: bigserial, pk: true}
       - {name: task_id, type: uuid, fk: {to: data.task, attribute: id}}
       - {name: step_id, type: text}
-      - {name: step_kind, type: text, description: "code, test, review, merge"}
+      - {name: step_kind, type: text, description: "code, test, review, merge, deploy, prompt"}
       - {name: pass, type: integer}
       - {name: participant, type: text, description: имя роли-участника}
       - {name: agent_kind, type: text}
@@ -148,11 +148,11 @@ elements:
       - {name: id, type: uuid, pk: true}
       - {name: task_id, type: uuid, nullable: true, fk: {to: data.task, attribute: id}}
       - {name: attempt, type: integer, nullable: true}
-      - {name: driver_kind, type: text}
+      - {name: driver_kind, type: text, description: "user, scheduler"}
       - {name: driver_id, type: text}
       - {name: agent, type: text}
       - {name: model, type: text}
-      - {name: depth, type: text}
+      - {name: depth, type: text, description: "full, partial, minimal"}
       - {name: scope, type: text, nullable: true}
       - {name: transcript_ref, type: text, nullable: true, description: ссылка s3:// на транскрипт}
       - {name: tokens, type: bigint, nullable: true}
@@ -288,9 +288,9 @@ elements:
     attributes:
       - {name: id, type: uuid, pk: true}
       - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
-      - {name: name, type: text, unique: true}
-      - {name: exec_type, type: text, description: "ssh, script, k8s"}
-      - {name: trigger, type: text, description: "manual, auto, merge"}
+      - {name: name, type: text, description: "уникально в рамках проекта (UNIQUE(project_id, name))"}
+      - {name: exec_type, type: text, description: "ssh, pipeline, k8s, gitops"}
+      - {name: trigger, type: text, description: "auto, manual"}
       - {name: config, type: jsonb}
       - {name: paused, type: boolean}
       - {name: created_at, type: timestamptz}
@@ -306,8 +306,8 @@ elements:
       - {name: id, type: uuid, pk: true}
       - {name: env_id, type: uuid, fk: {to: data.environment, attribute: id}}
       - {name: version, type: text}
-      - {name: status, type: text, description: "queued, running, done, failed"}
-      - {name: initiator, type: text, description: "auto, manual, rollback"}
+      - {name: status, type: text, description: "queued, deploying, verifying, done, failed, rolled_back"}
+      - {name: initiator, type: text, description: "auto или логин участника"}
       - {name: runner_id, type: text}
       - {name: detail, type: text}
       - {name: rollback, type: boolean}
@@ -339,7 +339,7 @@ elements:
       - {name: created_at, type: timestamptz}
       - {name: composition, type: jsonb}
       - {name: notes_md, type: text}
-      - {name: notes_status, type: text, description: "pending, ready, failed"}
+      - {name: notes_status, type: text, description: "pending, ready, template"}
       - {name: notes_agent_id, type: text, nullable: true, fk: {to: data.team-agent, attribute: id}}
       - {name: notes_model, type: text}
       - {name: dropped_items, type: integer}
@@ -357,10 +357,10 @@ elements:
       - {name: id, type: uuid, pk: true}
       - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
       - {name: env_id, type: uuid, fk: {to: data.environment, attribute: id}}
-      - {name: source, type: text}
+      - {name: source, type: text, description: "monitor, release"}
       - {name: fingerprint, type: text}
-      - {name: status, type: text, description: "open, mitigated, resolved, dismissed"}
-      - {name: severity, type: text}
+      - {name: status, type: text, description: "open, mitigated, resolved"}
+      - {name: severity, type: text, description: "medium, high"}
       - {name: title, type: text}
       - {name: error_line, type: text}
       - {name: first_seen, type: timestamptz}
@@ -368,7 +368,7 @@ elements:
       - {name: occurrences, type: integer}
       - {name: evidence, type: jsonb}
       - {name: description, type: jsonb}
-      - {name: description_status, type: text}
+      - {name: description_status, type: text, description: "pending, ready, template"}
       - {name: description_agent_id, type: text, nullable: true, fk: {to: data.team-agent, attribute: id}}
       - {name: description_requested_at, type: timestamptz}
       - {name: description_attempts, type: integer}
@@ -381,7 +381,7 @@ elements:
       - {name: occurrences_at_mitigation, type: integer}
       - {name: mitigated_release_id, type: uuid, nullable: true, fk: {to: data.release, attribute: id}}
       - {name: resolved_at, type: timestamptz, nullable: true}
-      - {name: resolution, type: text}
+      - {name: resolution, type: text, description: "fixed, self, manual или пусто"}
       - {name: bug_pending, type: boolean}
 
   - id: data.incident-event
@@ -402,7 +402,7 @@ elements:
     props: {table: monitor_state}
     attributes:
       - {name: env_id, type: uuid, pk: true, fk: {to: data.environment, attribute: id}}
-      - {name: state, type: text, description: "unknown, ok, fail"}
+      - {name: state, type: text, description: "ok, fail, unknown, disabled"}
       - {name: reason, type: text}
       - {name: next_at, type: timestamptz}
       - {name: pending_check_id, type: text}
@@ -434,12 +434,12 @@ elements:
     props: {table: scm_credentials}
     attributes:
       - {name: id, type: uuid, pk: true}
-      - {name: provider, type: text}
+      - {name: provider, type: text, description: "github, gitlab, gitea, fake"}
       - {name: base_url, type: text}
       - {name: owner, type: text}
       - {name: token_prefix, type: text}
       - {name: token_enc, type: bytea}
-      - {name: state, type: text, description: "unchecked, ok, fail"}
+      - {name: state, type: text, description: "ok, invalid, unchecked"}
       - {name: checked_at, type: timestamptz, nullable: true}
       - {name: created_at, type: timestamptz}
 
@@ -455,15 +455,15 @@ elements:
       - {name: model, type: text}
       - {name: host, type: text}
       - {name: capabilities, type: "text[]"}
-      - {name: status, type: text, description: "idle, busy, draining, offline"}
+      - {name: status, type: text, description: "idle, running, testing, review, deploying, offline"}
       - {name: task_id, type: uuid, nullable: true, fk: {to: data.task, attribute: id}}
       - {name: ctx_pct, type: integer, nullable: true}
       - {name: draining, type: boolean}
       - {name: last_seen, type: timestamptz}
       - {name: deployment_id, type: uuid, nullable: true, fk: {to: data.deployment, attribute: id}}
       - {name: token_id, type: uuid, nullable: true, fk: {to: data.runner-token, attribute: id}}
-      - {name: adapter, type: text}
-      - {name: depth, type: text}
+      - {name: adapter, type: text, description: "native, wrap"}
+      - {name: depth, type: text, description: "full, partial, minimal"}
       - {name: context_channel, type: boolean}
       - {name: models, type: "text[]"}
       - {name: catalog, type: boolean}
@@ -503,7 +503,7 @@ elements:
     attributes:
       - {name: token_id, type: uuid, pk: true, fk: {to: data.runner-token, attribute: id}}
       - {name: runner_id, type: text, pk: true}
-      - {name: source, type: text}
+      - {name: source, type: text, description: "issue, first_use, migration"}
       - {name: bound_at, type: timestamptz}
 
   - id: data.policy-version
@@ -529,15 +529,15 @@ elements:
     attributes:
       - {name: id, type: text, pk: true}
       - {name: name, type: text}
-      - {name: kind, type: text, description: "openai, anthropic, deepseek, openrouter, ollama, lmstudio"}
-      - {name: api, type: text}
+      - {name: kind, type: text, description: "vendor, aggregator, local"}
+      - {name: api, type: text, description: "anthropic, openai"}
       - {name: base_url, type: text}
       - {name: key_prefix, type: text}
       - {name: key_enc, type: bytea, nullable: true}
       - {name: headers, type: jsonb}
       - {name: models, type: jsonb}
       - {name: enabled, type: boolean}
-      - {name: state, type: text}
+      - {name: state, type: text, description: "ok, invalid, unchecked"}
       - {name: check_detail, type: text}
       - {name: checked_at, type: timestamptz, nullable: true}
       - {name: updated_at, type: timestamptz}
@@ -560,14 +560,14 @@ elements:
     attributes:
       - {name: id, type: text, pk: true}
       - {name: name, type: text}
-      - {name: adapter, type: text}
+      - {name: adapter, type: text, description: "native"}
       - {name: command, type: text}
       - {name: capabilities, type: "text[]"}
       - {name: models, type: jsonb}
       - {name: default_model, type: jsonb, nullable: true}
       - {name: env, type: jsonb}
       - {name: args, type: jsonb}
-      - {name: secrets, type: text}
+      - {name: secrets, type: text, description: "never, secure, always"}
       - {name: enabled, type: boolean}
       - {name: preset, type: boolean}
       - {name: updated_at, type: timestamptz}
@@ -619,7 +619,7 @@ elements:
       - {type: realization, to: biz.architecture-snapshot}
     attributes:
       - {name: project_id, type: uuid, pk: true, fk: {to: data.project, attribute: id}}
-      - {name: status, type: text}
+      - {name: status, type: text, description: "absent, ok, invalid, error"}
       - {name: sha, type: text}
       - {name: read_at, type: timestamptz, nullable: true}
       - {name: error, type: text}
@@ -661,8 +661,8 @@ elements:
       - {name: id, type: uuid, pk: true}
       - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
       - {name: version, type: integer}
-      - {name: status, type: text}
-      - {name: stage, type: text, description: "summaries, synthesis, backlog"}
+      - {name: status, type: text, description: "running, ready, failed, approved, superseded"}
+      - {name: stage, type: text, description: "summaries, synthesis, done"}
       - {name: progress_done, type: integer}
       - {name: progress_total, type: integer}
       - {name: interviews, type: jsonb}
