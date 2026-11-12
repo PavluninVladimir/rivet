@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
 )
@@ -324,6 +325,10 @@ func (s *Store) DeleteTeamAgent(ctx context.Context, id, actorLogin string) erro
 			return nf(err)
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM team_agents WHERE id=$1`, id); err != nil {
+			var pg *pgconn.PgError
+			if errors.As(err, &pg) && pg.ConstraintName == "tasks_developer_agent_id_fkey" {
+				return fmt.Errorf("%w: агент закреплён за задачами; сначала снимите доступные закрепления", ErrConflict)
+			}
 			return err
 		}
 		_, err := appendEvent(ctx, tx, EventInput{
@@ -450,6 +455,7 @@ func (s *Store) WaitingTeamRuns(ctx context.Context, excludedProjects, excludedE
 			AND e.project_id <> ALL($1::uuid[]) AND e.id <> ALL($2::uuid[])
 		JOIN agent_roles ar ON ar.id = r.role AND ar.enabled AND ar.capability <> ''
 		WHERE r.runner_id IS NULL AND r.verdict IS NULL AND t.wait_reason = '' AND `+agentRunsOnly+`
+		  AND (r.step_kind<>'code' OR t.developer_agent_id IS NULL)
 		  AND EXISTS (SELECT 1 FROM team_agents ta WHERE ta.role_id = r.role AND ta.enabled)
 		  -- ни одному свободному агенту роли не подходит ни один подключённый
 		  -- runner (занятый подходящий runner — обычное ожидание без причины)

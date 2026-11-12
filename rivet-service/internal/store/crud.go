@@ -282,7 +282,8 @@ const taskCols = `t.id, t.epic_id, t.num, t.title, t.description, t.status, t.es
 	COALESCE(t.blocked_by::text,''), t.step_id, t.step_entry, t.process, t.process_hash, t.step_rejections,
 	t.wait_reason, t.step_gen, t.created_at, t.updated_at,
 	COALESCE(cur.role, ''), COALESCE(cur.runner_name, ''), COALESCE(cur.agent_id, ''), COALESCE(cur.agent_name, ''),
-	t.kind, COALESCE(t.incident_id::text, ''), t.merged_at, t.started_at, t.done_at`
+	t.kind, COALESCE(t.incident_id::text, ''), t.merged_at, t.started_at, t.done_at,
+	COALESCE(t.developer_agent_id,''), COALESCE((SELECT name FROM team_agents pin WHERE pin.id=t.developer_agent_id),'')`
 
 // taskFrom — задачи с текущим исполнителем (add-agent-roles): роль и имя
 // runner'а открытого запуска агента с назначенным runner'ом.
@@ -301,7 +302,7 @@ func scanTask(row pgx.Row) (domain.Task, error) {
 		&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,
 		&t.StepID, &t.StepEntry, &proc, &t.ProcessHash, &rej, &t.WaitReason, &t.StepGen, &t.Created, &t.Updated,
 		&t.RoleID, &t.RunnerName, &t.AgentID, &t.AgentName,
-		&t.Kind, &t.IncidentID, &t.MergedAt, &t.StartedAt, &t.DoneAt)
+		&t.Kind, &t.IncidentID, &t.MergedAt, &t.StartedAt, &t.DoneAt, &t.DeveloperAgentID, &t.DeveloperAgentName)
 	if err != nil {
 		return t, err
 	}

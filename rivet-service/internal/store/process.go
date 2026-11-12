@@ -675,6 +675,11 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 				  -- переопределения проекта — только предпочтение (ниже)
 				  AND x.agent = COALESCE(NULLIF(ag.agent, ''), NULLIF(r.role_agent, ''), x.agent)
 				  AND (r.model = '' OR r.model = ANY(x.models))
+				  -- A named developer is a strict code/fix constraint, never a
+				  -- preference or a template fallback. Explicit step models can
+				  -- override the agent's connection, so they must wait as well.
+				  AND (r.step_kind <> 'code' OR t.developer_agent_id IS NULL OR
+				       (ag.id=t.developer_agent_id AND r.model='' AND ag.id <> ALL($5::text[])))
 				  AND (r.step_kind <> 'prompt' OR 'PROMPT' = ANY(x.stages))
 				  AND (r.step_kind <> 'review' OR x.id IS DISTINCT FROM t.runner_id)
 				  -- у роли есть команда — нужен свободный подходящий агент; без
@@ -728,6 +733,16 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 				return err
 			}
 			if busy {
+				return nil
+			}
+			var pinValid bool
+			if err = tx.QueryRow(ctx, `SELECT t.developer_agent_id IS NULL OR $2<>'code' OR
+				(ag.id=t.developer_agent_id AND ag.enabled AND ag.role_id='developer'
+				AND NOT EXISTS(SELECT 1 FROM task_step_runs o WHERE o.agent_id=ag.id AND o.verdict IS NULL))
+				FROM tasks t JOIN team_agents ag ON ag.id=$3 WHERE t.id=$1`, taskID, kind, agentID).Scan(&pinValid); err != nil {
+				return err
+			}
+			if !pinValid {
 				return nil
 			}
 		}
@@ -875,6 +890,7 @@ func (s *Store) WaitingRuns(ctx context.Context) ([]StepRun, error) {
 		JOIN tasks t ON t.id=r.task_id
 		JOIN epics e ON e.id=t.epic_id AND e.status='running'
 		WHERE r.runner_id IS NULL AND r.verdict IS NULL AND t.wait_reason='' AND `+agentRunsOnly+`
+		  AND (r.step_kind<>'code' OR t.developer_agent_id IS NULL)
 		  -- роли с командой разбирает WaitingTeamRuns (агенты и их профили)
 		  AND (r.role = '' OR NOT EXISTS (SELECT 1 FROM team_agents ta WHERE ta.role_id = r.role AND ta.enabled))
 		  AND NOT EXISTS (
@@ -1308,7 +1324,7 @@ func (s *Store) MySteps(ctx context.Context, userID, login string) ([]StepItem, 
 			&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,
 			&t.StepID, &t.StepEntry, &proc, &t.ProcessHash, &rej, &t.WaitReason, &t.StepGen, &t.Created, &t.Updated,
 			&t.RoleID, &t.RunnerName, &t.AgentID, &t.AgentName,
-			&t.Kind, &t.IncidentID, &t.MergedAt, &t.StartedAt, &t.DoneAt,
+			&t.Kind, &t.IncidentID, &t.MergedAt, &t.StartedAt, &t.DoneAt, &t.DeveloperAgentID, &t.DeveloperAgentName,
 			&it.ProjectID, &it.Project, &it.EpicID, &it.Epic); err != nil {
 			return nil, err
 		}
