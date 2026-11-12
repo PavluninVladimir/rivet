@@ -255,6 +255,18 @@ func TestEndpointFromAssignmentKey(t *testing.T) {
 	if _, err := endpointFromAssignment(&pb.ModelEndpoint{Api: "openai", BaseUrl: "http://localhost:11434/v1"}, nil); err != nil {
 		t.Fatalf("локальный адрес без ключа: %v", err)
 	}
+	for _, base := range []string{"http://host.docker.internal:8001/v1", "https://HOST.DOCKER.INTERNAL./v1"} {
+		ep, err := endpointFromAssignment(&pb.ModelEndpoint{Api: "openai", BaseUrl: base, ConnectionId: "mtplx-local"}, nil)
+		if err != nil || ep.client.Key != "" || ep.client.BaseURL != base {
+			t.Fatalf("Docker-host endpoint must remain keyless: %q %+v %v", base, ep.client, err)
+		}
+	}
+	for _, base := range []string{"http://host.docker.internal.evil.test/v1", "http://api.host.docker.internal/v1",
+		"http://user@host.docker.internal/v1", "http://host.docker.internal@evil.test/v1", "ftp://host.docker.internal/v1", "http://192.168.1.10/v1"} {
+		if _, err := endpointFromAssignment(&pb.ModelEndpoint{Api: "openai", BaseUrl: base}, nil); !errors.Is(err, ErrNoProviderKey) {
+			t.Fatalf("nonlocal/disguised endpoint accepted keyless: %q %v", base, err)
+		}
+	}
 }
 
 // Тестировщик на агенте Rivet: запрет push доходит до команд агента
