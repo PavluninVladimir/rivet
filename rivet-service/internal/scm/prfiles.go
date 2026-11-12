@@ -107,7 +107,7 @@ func (g *GitHub) prFilesOnce(ctx context.Context, repo string, number int) (PRFi
 		return PRFileList{}, err
 	}
 	if code != http.StatusOK {
-		return PRFileList{}, fmt.Errorf("github PR: %d: %s", code, tailMsg(raw))
+		return PRFileList{}, statusErr("github PR", code, raw)
 	}
 	var pr struct {
 		ChangedFiles int `json:"changed_files"`
@@ -126,7 +126,7 @@ func (g *GitHub) prFilesOnce(ctx context.Context, repo string, number int) (PRFi
 			return PRFileList{}, err
 		}
 		if code != http.StatusOK {
-			return PRFileList{}, fmt.Errorf("github PR files: %d: %s", code, tailMsg(raw))
+			return PRFileList{}, statusErr("github PR files", code, raw)
 		}
 		var files []struct {
 			Filename         string `json:"filename"`
@@ -159,7 +159,7 @@ func (g *GitLab) prFilesOnce(ctx context.Context, repo string, number int) (PRFi
 		return PRFileList{}, err
 	}
 	if code != http.StatusOK {
-		return PRFileList{}, fmt.Errorf("gitlab MR: %d: %s", code, tailMsg(raw))
+		return PRFileList{}, statusErr("gitlab MR", code, raw)
 	}
 	var mr struct {
 		SHA          string `json:"sha"`
@@ -192,7 +192,7 @@ func (g *GitLab) prFilesOnce(ctx context.Context, repo string, number int) (PRFi
 			return PRFileList{Files: files, HeadSHA: mr.SHA}, err
 		}
 		if code != http.StatusOK {
-			return PRFileList{}, fmt.Errorf("gitlab MR diffs: %d: %s", code, tailMsg(raw))
+			return PRFileList{}, statusErr("gitlab MR diffs", code, raw)
 		}
 		var files []struct {
 			OldPath string `json:"old_path"`
@@ -223,7 +223,7 @@ func (g *GitLab) prFilesChanges(ctx context.Context, repo string, number, want i
 		return nil, err
 	}
 	if code != http.StatusOK {
-		return nil, fmt.Errorf("gitlab MR changes: %d: %s", code, tailMsg(raw))
+		return nil, statusErr("gitlab MR changes", code, raw)
 	}
 	var out struct {
 		Changes []struct {
@@ -252,6 +252,9 @@ func (g *GitLab) prFilesChanges(ctx context.Context, repo string, number, want i
 // предка с базой и вершина ветки. Без git-режима репозитория нет: список
 // задаётся SetPRFiles (тесты), иначе пуст.
 func (f *Fake) PRFiles(ctx context.Context, repo string, number int) (PRFileList, error) {
+	if err := f.refused(repo); err != nil {
+		return PRFileList{}, err
+	}
 	key := fmt.Sprintf("%s#%d", repo, number)
 	f.mu.Lock()
 	set, ok := f.prFiles[key]
@@ -310,6 +313,9 @@ func (f *Fake) gitPR(ctx context.Context, dir, repo string, number int, pr fakeP
 
 // MergeAt — merge в git-режиме, только если вершина ветки PR та же.
 func (f *Fake) MergeAt(ctx context.Context, repo string, number int, headSHA string) (string, error) {
+	if err := f.refused(repo); err != nil {
+		return "", err
+	}
 	if dir, inGit := f.repoDir(repo); inGit && headSHA != "" {
 		key := fmt.Sprintf("%s#%d", repo, number)
 		f.mu.Lock()

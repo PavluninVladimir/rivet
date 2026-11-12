@@ -110,14 +110,23 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 	}
 	// Вердикт шага prompt (ok | changes | fail), пусто у остальных стадий.
 	promptVerdict := ""
+	var criteria []*pb.CriterionResult
 	result := func(ok bool, detail string) {
 		emitUsage()
+		// Ошибка провайдера или агента в итоге может нести эхо ключа
+		// (прокси): итог маскируется, как транскрипт.
+		detail = masker.maskString(detail)
+		if promptVerdict == verdictModelConnection {
+			// Первая строка — ошибка агента: по ней control plane читает код
+			// отказа провайдера, длинный текст агента её не вытесняет.
+			detail = headTail(detail, 8000)
+		} else {
+			detail = tail(detail, 8000)
+		}
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_StageResult{
 			StageResult: &pb.StageResult{TaskId: as.TaskId, SessionId: as.SessionId,
 				StepId: as.StepId, Participant: as.Participant, Verdict: promptVerdict,
-				// Ошибка провайдера или агента в итоге может нести эхо
-				// ключа (прокси): итог маскируется, как транскрипт.
-				Stage: as.Stage, Ok: ok, Detail: tail(masker.maskString(detail), 8000),
+				Stage: as.Stage, Ok: ok, Detail: detail, Criteria: criteria,
 				// Эхо доставленной версии: итог стадии привязан к политике,
 				// по которой работал агент (спека access-policy).
 				PolicyHash: as.GetPolicy().GetHash()}}})
@@ -152,6 +161,11 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		if as.Stage == pb.StageResult_TESTING && as.GetRole() != nil {
 			promptVerdict = verdictInfraError
 		}
+		// Хостинг отклонил clone или fetch по авторизации: control plane
+		// проверит учётные данные проекта (fix-credential-state).
+		if gitAuthFailed(err.Error()) {
+			promptVerdict = verdictSCMAuth
+		}
 		result(false, "workspace: "+err.Error())
 		return
 	}
@@ -176,6 +190,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			return
 		}
 		if err != nil {
+			if isConnectionError(err) {
+				promptVerdict = verdictModelConnection
+			}
 			result(false, fmt.Sprintf("агент завершился с ошибкой: %v\n%s", err, out))
 			return
 		}
@@ -190,6 +207,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		defer gitCleanup()
 		if err := gitCommitPush(sctx, ws, as.Branch, gitEnv,
 			fmt.Sprintf("task-%d: %s (%s)", as.TaskNum, as.Title, strings.ToLower(as.Stage.String()))); err != nil {
+			if gitAuthFailed(err.Error()) {
+				promptVerdict = verdictSCMAuth
+			}
 			result(false, "git: "+err.Error())
 			return
 		}
@@ -263,8 +283,15 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			return
 		}
 		if err != nil {
+			if isConnectionError(err) {
+				promptVerdict = verdictModelConnection
+			}
 			result(false, fmt.Sprintf("ревьюер завершился с ошибкой: %v", err))
 			return
+		}
+		criteria = parseCriteria(run.FinalText, len(as.Criteria))
+		for _, c := range criteria {
+			c.Note = masker.maskString(c.Note)
 		}
 		approved, verdict := parseVerdict(run.FinalText)
 		result(approved, verdict)
@@ -287,6 +314,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 			return
 		}
 		if err != nil {
+			if isConnectionError(err) {
+				promptVerdict = verdictModelConnection
+			}
 			result(false, fmt.Sprintf("агент завершился с ошибкой: %v\n%s", err, out))
 			return
 		}
@@ -298,6 +328,9 @@ func (a *agent) executeStage(ctx context.Context, as *pb.Assignment, emit func(*
 		defer gitCleanup()
 		if err := gitCommitPush(sctx, ws, as.Branch, gitEnv,
 			fmt.Sprintf("task-%d: %s (%s)", as.TaskNum, as.Title, as.StepId)); err != nil {
+			if gitAuthFailed(err.Error()) {
+				promptVerdict = verdictSCMAuth
+			}
 			result(false, "git: "+err.Error())
 			return
 		}
@@ -495,6 +528,51 @@ func (a *agent) gitCredentials(as *pb.Assignment) ([]string, func(), error) {
 		"RIVET_GIT_USER=rivet",
 		"RIVET_GIT_TOKEN=" + as.GitToken,
 	}, cleanup, nil
+}
+
+// verdictSCMAuth — вердикт стадии: хостинг отклонил git-операцию runner'а
+// (clone, fetch, push) по авторизации. Control plane проверяет учётные
+// данные проекта и, если они не работают, откладывает запуск без расхода
+// попытки (fix-credential-state).
+const verdictSCMAuth = "scm_auth"
+
+// gitAuthMarkers — признаки отказа хостинга по авторизации в выводе git
+// (HTTPS с askpass): 401 и 403, отозванный или неверный токен, нет права
+// на push. Сюда же «репозиторий не найден»: на приватный репозиторий без
+// доступа GitHub и GitLab отвечают именно так. Ложный признак безопасен —
+// состояние подключения меняет только проверка control plane.
+var gitAuthMarkers = []string{
+	"authentication failed",
+	"could not read username",
+	"could not read password",
+	"returned error: 401",
+	"returned error: 403",
+	"returned error: 404",
+	"http basic: access denied",
+	"invalid username or password",
+	"not allowed to push",
+	"permission denied for writing",
+	"repository not found",
+	"could not be found or you don't have permission",
+}
+
+// gitAuthFailed — вывод git говорит об отказе хостинга по авторизации.
+func gitAuthFailed(out string) bool {
+	low := strings.ToLower(out)
+	for _, m := range gitAuthMarkers {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	// GitHub: «remote: Permission to owner/repo.git denied to bot.»
+	if i := strings.Index(low, "permission to "); i >= 0 && strings.Contains(low[i:], " denied to ") {
+		return true
+	}
+	// git: «fatal: repository 'https://…' not found».
+	if i := strings.Index(low, "fatal: repository '"); i >= 0 && strings.Contains(low[i:], "' not found") {
+		return true
+	}
+	return false
 }
 
 func gitCommitPush(ctx context.Context, dir, branch string, env []string, message string) error {
@@ -697,8 +775,8 @@ func reviewPrompt(as *pb.Assignment) string {
 	}
 	if len(as.Criteria) > 0 {
 		b.WriteString("# Acceptance criteria\n")
-		for _, c := range as.Criteria {
-			b.WriteString("- " + c + "\n")
+		for i, c := range as.Criteria {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, c)
 		}
 		b.WriteString("\n")
 	}
@@ -707,7 +785,8 @@ func reviewPrompt(as *pb.Assignment) string {
 	}
 	b.WriteString(policyPrompt(as.GetPolicy()))
 	b.WriteString("Проверь изменения в текущем каталоге (ветка " + as.Branch + ") по критериям и качеству кода. " +
-		"Код не меняй. Закончи вывод РОВНО одной строкой: " +
+		"Код не меняй. Перед вердиктом отчитайся по каждому критерию отдельной строкой с начала строки: CRITERION <номер>: OK или CRITERION <номер>: FAIL <причина>. " +
+		"Закончи вывод РОВНО одной строкой: " +
 		"«VERDICT: APPROVED» или «VERDICT: CHANGES: <список замечаний одной строкой>».\n")
 	return b.String()
 }
@@ -775,6 +854,35 @@ func tail(s string, n int) string {
 		cut++
 	}
 	return "…" + s[cut:]
+}
+
+// headTail — текст не длиннее n байт с сохранённой первой строкой (не
+// длиннее четверти предела): режется остальной текст, с начала, как в tail.
+// Однострочный текст режется с конца: начало и есть ошибка.
+func headTail(s string, n int) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if len(s) <= n {
+		return s
+	}
+	first, rest, ok := strings.Cut(s, "\n")
+	first = headBytes(first, n/4)
+	if !ok {
+		return headBytes(s, n)
+	}
+	// tail ставит в начало «…»: место под него тоже из предела.
+	return first + "\n" + tail(rest, n-len(first)-1-len("…"))
+}
+
+// headBytes — начало s не длиннее n байт по границе руны.
+func headBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // guardResults — итог стадии (StageResult, Blocked), отменённой не control

@@ -90,6 +90,10 @@ type Config struct {
 	// которые проверки URL control plane'ом (Verify внешней доставки,
 	// наблюдение) могут открывать во внутренней сети.
 	AllowPrivateURLs string
+	// RUVDSAPIURL: адрес API RUVDS (RIVET_RUVDS_API_URL): провайдер хостов
+	// окружений ходит только сюда, в консоли адреса нет
+	// (add-environment-provisioning). Стенды указывают fake.
+	RUVDSAPIURL string
 }
 
 // Адреса по умолчанию только loopback. Открыть API или протокол
@@ -128,6 +132,7 @@ func FromEnv() (Config, error) {
 		AdminPassword:          os.Getenv("RIVET_ADMIN_PASSWORD"),
 		TrustProxy:             os.Getenv("RIVET_TRUST_PROXY") == "1",
 		AllowPrivateURLs:       os.Getenv("RIVET_ALLOW_PRIVATE_URLS"),
+		RUVDSAPIURL:            strings.TrimSuffix(getenv("RIVET_RUVDS_API_URL", "https://api.ruvds.com"), "/"),
 		PolicyMode:             os.Getenv("RIVET_POLICY_MODE"),
 		PolicyURL:              strings.TrimSuffix(os.Getenv("RIVET_POLICY_URL"), "/"),
 		PolicyTimeout:          3 * time.Second,

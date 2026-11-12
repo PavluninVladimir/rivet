@@ -67,6 +67,35 @@ type fakeSCM struct {
 	treeSHA string
 	// symlinks — пути, где лежит символическая ссылка (ReadFile → ErrSymlink).
 	symlinks map[string]bool
+	// prCreated — ветки, из которых создавались PR; createPRErr — отказ
+	// хостинга в создании PR, mergeErr — в merge.
+	prCreated   []string
+	createPRErr error
+	mergeErr    error
+	// createPRFailN — createPRErr только на первых N вызовах (0 — всегда),
+	// createPRCalls — число вызовов CreatePR; openPR — открытый PR ветки,
+	// который находит OpenPR (PR создал прошлый запрос).
+	createPRFailN int
+	createPRCalls int
+	openPR        *scm.PR
+	// openPRAmbiguous — подходящих открытых PR ветки несколько;
+	// openPRCalls — число поисков.
+	openPRAmbiguous bool
+	openPRCalls     int
+}
+
+// OpenPR — открытый PR ветки задачи (идемпотентное создание PR).
+func (f *fakeSCM) OpenPR(ctx context.Context, repo, branch, base string) (scm.PR, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.openPRCalls++
+	if f.openPRAmbiguous {
+		return scm.PR{}, false, scm.ErrAmbiguousPR
+	}
+	if f.openPR == nil {
+		return scm.PR{}, false, nil
+	}
+	return *f.openPR, true, nil
 }
 
 // PathSHA — SHA дерева описания; пустой treeSHA — каталога «нет»,
@@ -101,12 +130,22 @@ func (f *fakeSCM) MergeAt(ctx context.Context, repo string, number int, headSHA 
 }
 
 func (f *fakeSCM) CreatePR(ctx context.Context, repo, branch, base, title, body string) (scm.PR, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.createPRCalls++
+	if f.createPRErr != nil && (f.createPRFailN == 0 || f.createPRCalls <= f.createPRFailN) {
+		return scm.PR{}, f.createPRErr
+	}
+	f.prCreated = append(f.prCreated, branch)
 	return scm.PR{Number: 42, URL: "https://github.com/" + repo + "/pull/42"}, nil
 }
 func (f *fakeSCM) Diff(ctx context.Context, repo string, number int) (string, error) {
 	return "diff --git a/x b/x", nil
 }
 func (f *fakeSCM) Merge(ctx context.Context, repo string, number int) (string, error) {
+	if f.mergeErr != nil {
+		return "", f.mergeErr
+	}
 	f.merged = append(f.merged, number)
 	return fmt.Sprintf("sha-merge-%d", number), nil
 }

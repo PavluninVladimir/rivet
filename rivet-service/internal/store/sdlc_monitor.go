@@ -168,8 +168,10 @@ func (s *Store) MonitorRunner(ctx context.Context, env domain.Environment, urlCh
 		SELECT id FROM runners
 		WHERE status <> 'offline' AND NOT draining
 		  AND capabilities @> ARRAY['deploy'] AND capabilities @> $1::text[]
+ AND NOT (capabilities @> ARRAY['docker'] AND features @> ARRAY['local_docker_v1'])
 		  AND features @> $2::text[]
-		ORDER BY (status = 'idle') DESC, cardinality(capabilities), last_seen DESC LIMIT 1`, caps, features).Scan(&id)
+          AND (NOT $4 OR EXISTS (SELECT 1 FROM env_hosts h WHERE h.env_id=$3::uuid AND h.state='ready' AND h.local_runner=runners.id))
+		ORDER BY (status = 'idle') DESC, cardinality(capabilities), last_seen DESC LIMIT 1`, caps, features, env.ID, env.Config.Provision != nil && env.Config.Provision.Provider == domain.ProvisionLocal).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}

@@ -87,6 +87,16 @@ func (e *Engine) enterReady(ctx context.Context, excluded, excludedEpics []strin
 					"task", task.ID, "step", task.StepID, "first", step.ID)
 			}
 		}
+		// Задача возвращается на review без PR (повтор после отказа хостинга
+		// в создании PR): PR создаётся до входа, агент шага до review не
+		// перезапускается (fix-pr-without-test-step).
+		if step.Kind == policy.StepReview && task.PRURL == "" {
+			withPR, ok := e.prBeforeResume(ctx, task, step)
+			if !ok {
+				continue
+			}
+			task = withPR
+		}
 		if err := e.enterStep(ctx, task, proc, hash, step, entry, "", nil); err != nil {
 			slog.Error("process: enter step", "task", task.ID, "step", step.ID, "err", err)
 		}
@@ -153,7 +163,7 @@ func (e *Engine) enterStep(ctx context.Context, task domain.Task, proc *policy.R
 	// тогда запуск ждёт планировщика.
 	if reuseRunner != "" && len(runs) > 0 && runs[0].RunnerID == reuseRunner {
 		task.StepID, task.StepEntry = step.ID, entry
-		e.dispatchOrRelease(ctx, task, runs[0], domain.Runner{ID: reuseRunner}, step, entry, nil)
+		_, _ = e.dispatchOrRelease(ctx, task, runs[0], domain.Runner{ID: reuseRunner}, step, entry, nil)
 	}
 	return nil
 }
@@ -175,9 +185,11 @@ type connChecker interface{ Connected(runnerID string) bool }
 // открытый запуск держал бы агента занятым навсегда. Причина до отправки
 // откладывает повтор с причиной ожидания; недоставка на отключённый runner
 // переводит его в offline (признак жизни вернёт). false — стадия не
-// стартовала.
+// стартовала; mc — не стартовала из-за подключения модели: runner тут ни
+// при чём, а при неработающей модели агента команды запуск возьмёт другой
+// агент роли.
 func (e *Engine) dispatchOrRelease(ctx context.Context, task domain.Task, run store.StepRun, runner domain.Runner,
-	step policy.ResolvedStep, entry string, assigned *store.PendingAssign) bool {
+	step policy.ResolvedStep, entry string, assigned *store.PendingAssign) (bool, *ModelConnectionError) {
 	// Снимок last_seen до отправки: по нему недоставка отличает мёртвый
 	// runner от переподключившегося. Назначение планировщика несёт снимок
 	// из своей транзакции, переиспользование runner'а — только его id.
@@ -191,7 +203,7 @@ func (e *Engine) dispatchOrRelease(ctx context.Context, task domain.Task, run st
 		if err := e.St.RunDelivered(ctx, run.ID, assigned); err != nil {
 			slog.Error("dispatch: delivered", "run", run.ID, "err", err)
 		}
-		return true
+		return true, nil
 	}
 	if sessionID != "" {
 		if _, err := e.St.EndSession(ctx, sessionID, "", "стадия не запущена: runner недоступен"); err != nil {
@@ -203,8 +215,27 @@ func (e *Engine) dispatchOrRelease(ctx context.Context, task domain.Task, run st
 		slog.Error("dispatch: undo assign", "task", task.ID, "err", err)
 	}
 	if startErr != nil {
+		// Нет рабочего подключения к модели: задача ждёт его с причиной,
+		// проверка повторяется без роста паузы (fix-agent-without-connection).
+		var mc *ModelConnectionError
+		if errors.As(startErr, &mc) {
+			if mc.Agent != "" {
+				// Модель агента команды не работает: запуск свободен для
+				// другого агента роли в этом же проходе.
+				if err := e.St.UnbindRun(ctx, run.ID); err != nil {
+					slog.Error("dispatch: unbind run", "run", run.ID, "err", err)
+				}
+				if err := e.St.FreeRunnerFor(ctx, runner.ID, task.ID); err != nil {
+					slog.Error("dispatch: free runner", "runner", runner.ID, "err", err)
+				}
+				return false, mc
+			}
+			e.deferRunWith(ctx, task, run, runner.ID, mc.Reason, connRetryPause, connRetryPause,
+				map[string]any{"wait": "model_connection", "connection": mc.ConnectionID, "model": mc.Model})
+			return false, mc
+		}
 		e.deferRun(ctx, task, run, runner.ID, "стадия не запустилась: "+startErr.Error())
-		return false
+		return false, nil
 	}
 	if err := e.St.UnbindRun(ctx, run.ID); err != nil {
 		slog.Error("dispatch: unbind run", "run", run.ID, "err", err)
@@ -219,12 +250,18 @@ func (e *Engine) dispatchOrRelease(ctx context.Context, task domain.Task, run st
 			slog.Warn("runner не подключён: назначения до признака жизни не идут", "runner", runner.ID)
 		}
 	}
-	return false
+	return false, nil
 }
 
 // deferRun — запуск откладывается с причиной ожидания, runner свободен.
 func (e *Engine) deferRun(ctx context.Context, task domain.Task, run store.StepRun, runnerID, reason string) {
-	first, pause, err := e.St.DeferRun(ctx, run.ID, task.ID, startRetryPause, startRetryMax, reason)
+	e.deferRunWith(ctx, task, run, runnerID, reason, startRetryPause, startRetryMax, nil)
+}
+
+// deferRunWith — deferRun с паузой повтора и полями события ожидания.
+func (e *Engine) deferRunWith(ctx context.Context, task domain.Task, run store.StepRun, runnerID, reason string,
+	base, maxPause time.Duration, extra map[string]any) {
+	first, pause, err := e.St.DeferRun(ctx, run.ID, task.ID, base, maxPause, reason)
 	if err != nil {
 		slog.Error("dispatch: defer run", "run", run.ID, "err", err)
 	}
@@ -234,31 +271,41 @@ func (e *Engine) deferRun(ctx context.Context, task domain.Task, run store.StepR
 	if !first {
 		return
 	}
-	projectID, epicID, err := e.St.TaskRefs(ctx, task.ID)
+	e.waitEvent(ctx, task.ID, run, reason, pause, extra)
+}
+
+// waitEvent — событие task.wait об откладывании запуска (одно на серию).
+func (e *Engine) waitEvent(ctx context.Context, taskID string, run store.StepRun, reason string, pause time.Duration, extra map[string]any) {
+	projectID, epicID, err := e.St.TaskRefs(ctx, taskID)
 	if err != nil {
-		slog.Error("dispatch: task refs", "task", task.ID, "err", err)
+		slog.Error("dispatch: task refs", "task", taskID, "err", err)
 		return
+	}
+	payload := map[string]any{"step": run.StepID, "participant": run.Participant, "role": run.Role,
+		"reason": reason, "deferred": true, "retry_in_s": int(pause.Seconds())}
+	for k, v := range extra {
+		payload[k] = v
 	}
 	if _, err := e.St.AppendEvent(ctx, store.EventInput{
 		ActorKind: domain.ActorScheduler, Type: "task.wait",
-		ProjectID: projectID, EpicID: epicID, TaskID: task.ID,
-		Text: "ожидание: " + reason + " (шаг " + run.StepID + ")",
-		Payload: map[string]any{"step": run.StepID, "participant": run.Participant, "role": run.Role,
-			"reason": reason, "deferred": true, "retry_in_s": int(pause.Seconds())},
+		ProjectID: projectID, EpicID: epicID, TaskID: taskID,
+		Text:    "ожидание: " + reason + " (шаг " + run.StepID + ")",
+		Payload: payload,
 	}); err != nil {
-		slog.Error("dispatch: wait event", "task", task.ID, "err", err)
+		slog.Error("dispatch: wait event", "task", taskID, "err", err)
 	}
 }
 
 // dispatchAssigned — запуск, назначенный планировщиком: стадия по шагу
-// снимка. false — стадия не стартовала (запуск отвязан, runner свободен).
-func (e *Engine) dispatchAssigned(ctx context.Context, a store.RunAssignment) bool {
-	deferAssigned := func(reason string) bool {
+// снимка. false — стадия не стартовала (запуск отвязан, runner свободен),
+// mc — из-за подключения модели.
+func (e *Engine) dispatchAssigned(ctx context.Context, a store.RunAssignment) (bool, *ModelConnectionError) {
+	deferAssigned := func(reason string) (bool, *ModelConnectionError) {
 		if err := e.St.UndoAssign(ctx, a.Task.ID, a.Pending); err != nil {
 			slog.Error("dispatch: undo assign", "task", a.Task.ID, "err", err)
 		}
 		e.deferRun(ctx, a.Task, a.Run, a.Runner.ID, reason)
-		return false
+		return false, nil
 	}
 	proc, _, err := e.processFor(ctx, a.Task)
 	if err != nil {
@@ -273,25 +320,34 @@ func (e *Engine) dispatchAssigned(ctx context.Context, a store.RunAssignment) bo
 	return e.dispatchOrRelease(ctx, a.Task, a.Run, a.Runner, step, a.Task.StepEntry, a.Pending)
 }
 
-// reviewContext — контекст ревьюера: diff PR и отчёт автопроверок.
-func (e *Engine) reviewContext(ctx context.Context, task domain.Task) string {
+// reviewContext — контекст ревьюера: diff PR и отчёт автопроверок. Ошибка —
+// только нерабочие учётные данные хостинга (ErrSCMCredentials): прочие
+// сбои чтения diff'а стадию не останавливают.
+func (e *Engine) reviewContext(ctx context.Context, task domain.Task) (string, error) {
 	extra := e.peekStageContext(task.ID)
 	if task.PRURL == "" {
-		return extra
+		withPR, err := e.ensurePR(ctx, task)
+		if err != nil {
+			return "", err
+		}
+		task = withPR
 	}
 	d, err := e.diffForTask(ctx, task)
 	if errors.Is(err, scm.ErrDiffTruncated) {
 		// Ревьюеру начало diff'а полезнее, чем ничего.
 		d, err = d+"\n…[diff обрезан: превышен лимит чтения]\n", nil
 	}
+	if errors.Is(err, ErrSCMCredentials) {
+		return "", fmt.Errorf("diff PR: %w", err)
+	}
 	if err != nil {
 		slog.Error("diff for review", "task", task.ID, "err", err)
-		return extra
+		return extra, nil
 	}
 	if extra != "" {
-		return d + "\n\n" + extra
+		return d + "\n\n" + extra, nil
 	}
-	return d
+	return d, nil
 }
 
 func (e *Engine) peekStageContext(taskID string) string {
@@ -315,6 +371,11 @@ func (e *Engine) setStageContext(taskID, text string) {
 // (changes); у шага prompt вердикт называет runner (маркер агента), без
 // него — по признаку успеха.
 func verdictOf(kind string, ok bool, explicit string) string {
+	// Агент не запустился из-за подключения модели: это не замечания
+	// разработчику ни на одном шаге, а сбой настройки (переход fail).
+	if explicit == verdictModelConnection {
+		return policy.OutcomeFail
+	}
 	if kind == policy.StepPrompt {
 		switch explicit {
 		case policy.OutcomeOk, policy.OutcomeChanges, policy.OutcomeFail:
@@ -383,6 +444,11 @@ func (e *Engine) reuseTarget(ctx context.Context, task domain.Task, next policy.
 	if runnerID == "" || (next.Kind != policy.StepCode && next.Kind != policy.StepTest && next.Kind != policy.StepPrompt) || len(next.Participants) != 1 {
 		return false
 	}
+	// Нерабочие учётные данные хостинга: следующая стадия не стартует и на
+	// том же runner'е, её назначит планировщик после восстановления.
+	if projectID, _, err := e.St.TaskRefs(ctx, task.ID); err == nil && e.credentialsInvalid(ctx, projectID) {
+		return false
+	}
 	p := next.Participants[0]
 	rb := e.roleBindings(ctx, task, next)[p.ID]
 	r, err := e.St.GetRunner(ctx, runnerID)
@@ -440,17 +506,14 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 		return err
 	}
 	var open, changes, fails int
-	var remarks []string
 	for _, r := range runs {
 		switch r.Verdict {
 		case "":
 			open++
 		case policy.OutcomeChanges:
 			changes++
-			remarks = append(remarks, remark(step, r))
 		case policy.OutcomeFail:
 			fails++
-			remarks = append(remarks, remark(step, r))
 		case policy.OutcomeBlocked, "cancelled":
 			// Заблокированный или прерванный шаг решён другим путём.
 			return nil
@@ -495,20 +558,48 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 			outcome = policy.OutcomeOk
 		}
 	}
-	// Исход применяется один раз на вход: одновременные вердикты двух
-	// участников не должны дважды расходовать попытку и входить на шаг.
-	claimed, err := e.St.ClaimStepOutcome(ctx, task.ID, pass)
+	// FAIL сверяется атомарно с закреплением исхода: конкурентный отчёт
+	// не может оказаться записанным между проверкой и claim.
+	var claimed bool
+	var criteriaDetail string
+	if step.Kind == policy.StepReview {
+		var claim store.ReviewOutcome
+		claim, err = e.St.ClaimReviewOutcome(ctx, task.ID, pass, outcome)
+		claimed, outcome, criteriaDetail = claim.Claimed, claim.Outcome, claim.Detail
+	} else {
+		claimed, err = e.St.ClaimStepOutcome(ctx, task.ID, pass)
+	}
 	if err != nil {
 		return err
 	}
 	if !claimed {
 		return nil
 	}
+	// Исход закреплён, а взятые исходы никто не дожимает: применение идёт
+	// до конца, даже если канал runner'а оборвался или клиент ушёл, пока
+	// шли внешние вызовы (проверка ключа, хостинг). Свой предел времени
+	// вместо контекста вызывающего.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), outcomeTimeout)
+	defer cancel()
 	// any: остальные участники прерываются только владельцем исхода, иначе
 	// опоздавший обработчик отменил бы запуски уже следующего шага.
 	if step.Require == policy.RequireAny && outcome == policy.OutcomeOk && open > 0 {
 		e.cancelOpenRuns(ctx, task, 0)
 	}
+	verdicts, detail := e.stepVerdicts(ctx, step, runs, outcome)
+	if criteriaDetail != "" && outcome == policy.OutcomeChanges && !strings.Contains(detail, criteriaDetail) {
+		if detail == "" {
+			detail = criteriaDetail
+		} else {
+			detail = criteriaDetail + "\n\n" + detail
+		}
+	}
+	return e.applyOutcome(ctx, task, proc, hash, step, outcome, detail, verdicts, lastRunner, policyHash, prURL)
+}
+
+// stepVerdicts — вердикты участников для события шага и текст исхода:
+// замечания с автором или итог единственного участника при ok.
+func (e *Engine) stepVerdicts(ctx context.Context, step policy.ResolvedStep, runs []store.StepRun, outcome string) ([]map[string]any, string) {
 	verdicts := make([]map[string]any, 0, len(runs))
 	titles, labels := e.roleTitles(ctx), e.runnerLabels(ctx)
 	for _, r := range runs {
@@ -535,7 +626,7 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 		verdicts = append(verdicts, v)
 	}
 	// Автор блока замечаний — роль и имя исполнителя, если они есть.
-	remarks = remarks[:0]
+	var remarks []string
 	for _, r := range runs {
 		if r.Verdict == policy.OutcomeChanges || r.Verdict == policy.OutcomeFail {
 			remarks = append(remarks, remarkBy(step, r, performerLabel(r, titles, labels)))
@@ -545,12 +636,7 @@ func (e *Engine) evaluateStep(ctx context.Context, task domain.Task, proc *polic
 	if outcome == policy.OutcomeOk && len(runs) == 1 {
 		detail = runs[0].Detail
 	}
-	return e.applyOutcome(ctx, task, proc, hash, step, outcome, detail, verdicts, lastRunner, policyHash, prURL)
-}
-
-// remark — блок замечаний участника с указанием автора.
-func remark(step policy.ResolvedStep, r store.StepRun) string {
-	return remarkBy(step, r, "")
+	return verdicts, detail
 }
 
 // remarkBy — блок замечаний участника; performer — роль и имя исполнителя
@@ -623,6 +709,11 @@ func (e *Engine) cancelRuns(ctx context.Context, task domain.Task, except int64,
 // applyOutcome — переход по исходу шага: событие task.step, затем ok →
 // следующий шаг, changes → отказ шага с лимитами и исправление, fail →
 // переход fail (по умолчанию эскалация).
+// outcomeTimeout — предел применения закреплённого исхода шага: переход,
+// эскалация и внешние вызовы по пути (проверка ключа подключения,
+// создание PR).
+const outcomeTimeout = 2 * time.Minute
+
 func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *policy.Resolved, hash string,
 	step policy.ResolvedStep, outcome, detail string, verdicts []map[string]any, lastRunner, policyHash, prURL string) error {
 	p, epic, err := e.projectOf(ctx, task)
@@ -630,6 +721,16 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 		return err
 	}
 	target := step.Target(outcome)
+	// Агент не запустился из-за подключения модели: эскалация кодом
+	// MODEL_CONNECTION или возврат на тот же шаг (подключение уже invalid)
+	// без перехода fail процесса и без расхода попытки, другой шаг
+	// настройку не исправит. Событие task.step пишет фактический переход.
+	connFailed := outcome == policy.OutcomeFail && modelConnectionFailed(verdicts)
+	var cf connFailure
+	if connFailed {
+		cf = e.resolveConnectionFailure(ctx, task, step)
+		target = cf.target(step.ID)
+	}
 	payload := map[string]any{
 		"step": step.ID, "kind": step.Kind, "outcome": outcome, "next": target,
 		"verdicts": verdicts, "process_hash": hash,
@@ -637,10 +738,19 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 	if policyHash != "" {
 		payload["policy_hash"] = policyHash
 	}
+	text := fmt.Sprintf("шаг %s: %s → %s", step.Title, outcome, target)
+	// Переход по порядку через отключённые шаги называет их (спека process
+	// «Отключённый шаг»).
+	if outcome == policy.OutcomeOk {
+		if skipped := proc.SkippedBetween(step.ID, target); len(skipped) > 0 {
+			payload["skipped"] = skipped
+			text += " (" + skippedText(skipped) + ")"
+		}
+	}
 	if _, err := e.St.AppendEvent(ctx, store.EventInput{
 		ActorKind: domain.ActorScheduler, Type: "task.step",
 		ProjectID: p.ID, EpicID: epic.ID, TaskID: task.ID,
-		Text:    fmt.Sprintf("шаг %s: %s → %s", step.Title, outcome, target),
+		Text:    text,
 		Payload: payload,
 	}); err != nil {
 		return err
@@ -653,7 +763,8 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 	switch outcome {
 	case policy.OutcomeOk:
 		if step.Kind == policy.StepTest {
-			// Отчёт автопроверок — ревьюеру; PR создаётся после проверок.
+			// Отчёт автопроверок — ревьюеру. PR создаёт переход на шаг,
+			// которому он нужен (gotoTarget), при любом составе процесса.
 			e.setStageContext(task.ID, "")
 			if detail != "" {
 				label := "Результаты автопроверок:\n"
@@ -661,17 +772,6 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 					label = "Отчёт тестировщика и автопроверок:\n"
 				}
 				e.setStageContext(task.ID, label+detail)
-			}
-			if task.PRURL == "" {
-				if err := e.createPR(ctx, task, p); err != nil {
-					return err
-				}
-				if task, err = e.St.GetTask(ctx, task.ID); err != nil {
-					return err
-				}
-			}
-			if prURL == "" {
-				prURL = task.PRURL
 			}
 		}
 		if step.Kind == policy.StepReview {
@@ -719,6 +819,11 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 		return e.gotoTarget(ctx, task, proc, hash, target, policy.OutcomeChanges, lastRunner, paused, evPayload, "", ev)
 
 	case policy.OutcomeFail:
+		if connFailed {
+			// Контекст стадии не сбрасывается: шаг повторится с ним.
+			e.cancelOpenRuns(ctx, task, 0)
+			return e.onModelConnectionFailure(ctx, task, proc, hash, step, cf, lastRunner, paused, evPayload)
+		}
 		e.setStageContext(task.ID, "")
 		if target == policy.TargetEscalate || target == "" {
 			detailText := detail
@@ -729,6 +834,8 @@ func (e *Engine) applyOutcome(ctx context.Context, task domain.Task, proc *polic
 			}
 			return e.failTask(ctx, task, "Невосстановимая ошибка этапа: "+detailText, lastRunner, evPayload)
 		}
+		// Переход по ошибке шага: текст входа на следующий шаг это называет.
+		evPayload["via"] = policy.OutcomeFail
 		return e.gotoTarget(ctx, task, proc, hash, target, policy.OutcomeOk, lastRunner, paused, evPayload, "")
 	}
 	return nil
@@ -765,6 +872,26 @@ func (e *Engine) gotoTarget(ctx context.Context, task domain.Task, proc *policy.
 	if !ok {
 		return fmt.Errorf("шаг %q не найден в снимке процесса задачи %s", target, task.ID)
 	}
+	// PR создаётся перед первым шагом, которому он нужен: review читает
+	// diff, merge мержит PR (его создаёт вход в merge). Шага test в
+	// процессе может не быть, поэтому PR не привязан к проверкам (спека
+	// task-pipeline «Изоляция работы в ветке и PR»).
+	if next.Kind == policy.StepReview && task.PRURL == "" {
+		withPR, err := e.ensurePR(ctx, task)
+		if err != nil {
+			if errors.Is(err, ErrSCMCredentials) {
+				return e.awaitCredentials(ctx, task, target, entry, "PR откроется", err)
+			}
+			if inTick(ctx) && scm.Transient(err) {
+				return e.prWaitAtReview(ctx, task, next, err)
+			}
+			return e.prFailed(ctx, task, next, err, evPayload)
+		}
+		task = withPR
+	}
+	if prURL == "" {
+		prURL = task.PRURL
+	}
 	var event *store.EventInput
 	if len(ev) > 0 && ev[0] != nil {
 		event = ev[0]
@@ -773,9 +900,13 @@ func (e *Engine) gotoTarget(ctx context.Context, task domain.Task, proc *policy.
 		for k, v := range evPayload {
 			pl[k] = v
 		}
-		event = &store.EventInput{Text: "проверки прошли, PR создан — ожидание review", Payload: pl}
+		event = &store.EventInput{Text: reviewEntryText(proc, task.StepID, evPayload["via"] == policy.OutcomeFail), Payload: pl}
 	} else if next.Kind == policy.StepTest {
 		event = &store.EventInput{Text: "реализация готова — запуск проверок", Payload: evPayload}
+	} else if next.Kind == policy.StepMerge {
+		// Вход в merge пишет своё событие от планировщика, отсюда — только
+		// признак перехода по ошибке для его текста.
+		event = &store.EventInput{ActorKind: domain.ActorScheduler, Payload: evPayload}
 	}
 	if event != nil && event.ActorKind == "" {
 		// Переход по результату runner'а — от его имени; внешний (review с
@@ -815,20 +946,6 @@ func (e *Engine) reusableFrom(task domain.Task) bool {
 	return !ok || s.Kind != policy.StepReview
 }
 
-// createPR открывает PR ветки задачи после успешных проверок.
-func (e *Engine) createPR(ctx context.Context, task domain.Task, p domain.Project) error {
-	adapter, err := e.SCMFor(ctx, p)
-	if err != nil {
-		return err
-	}
-	pr, err := adapter.CreatePR(ctx, p.RepoPath, task.Branch, p.DefaultBranch,
-		fmt.Sprintf("task-%d: %s", task.Num, task.Title), task.Description)
-	if err != nil {
-		return fmt.Errorf("create PR: %w", err)
-	}
-	return e.St.SetTaskPR(ctx, task.ID, pr.URL)
-}
-
 // enterMerge — шаг merge: задача ждёт подтверждения человеком, авто-merge
 // решает гейт политики (спека task-pipeline «Merge после успешной проверки»).
 func (e *Engine) enterMerge(ctx context.Context, task domain.Task, proc *policy.Resolved, hash string, ev *store.EventInput) error {
@@ -846,8 +963,19 @@ func (e *Engine) enterMerge(ctx context.Context, task domain.Task, proc *policy.
 	if len(task.Process) == 0 {
 		in.Process, in.ProcessHash = proc, hash
 	}
+	fromStep := task.StepID
 	if _, err := e.St.EnterStep(ctx, in); err != nil {
 		return err
+	}
+	// PR, если его ещё нет: без него нечего подтверждать и мержить
+	// (задача без шагов review и test, задача до исправления).
+	var prErr error
+	if task.PRURL == "" {
+		if withPR, err := e.ensurePR(ctx, task); err != nil {
+			prErr = err
+		} else {
+			task = withPR
+		}
 	}
 	actor := domain.ActorScheduler
 	actorID := ""
@@ -860,13 +988,26 @@ func (e *Engine) enterMerge(ctx context.Context, task domain.Task, proc *policy.
 			payload[k] = v
 		}
 	}
+	// Событие входа в merge одно для любого процесса (по нему консоль
+	// показывает ожидание подтверждения), текст по шагу, с которого пришла
+	// задача, и по тому, есть ли PR.
+	text, reviewed := mergeEntryText(proc, fromStep, task.PRURL != "", payload["via"] == policy.OutcomeFail)
+	if !reviewed {
+		payload["review_step"] = false
+	}
+	if task.PRURL != "" {
+		payload["pr"] = task.PRURL
+	}
 	if _, err := e.St.AppendEvent(ctx, store.EventInput{
 		ActorKind: actor, ActorID: actorID, Type: "task.review_passed",
 		ProjectID: p.ID, EpicID: task.EpicID, TaskID: task.ID,
-		Text:    "review пройден — ожидание подтверждения merge",
+		Text:    text,
 		Payload: payload,
 	}); err != nil {
 		return err
+	}
+	if prErr != nil {
+		return e.prMissingAtMerge(ctx, task, p, prErr)
 	}
 	eff, err := e.St.EffectivePolicy(ctx, p.ID)
 	if err != nil {
@@ -953,12 +1094,14 @@ func nearestCodeBefore(proc *policy.Resolved, stepID string) string {
 // нужным агентом и моделью»). excluded и excludedEpics — исключённые из
 // назначений этого прохода (бюджет, зависимости Epic'а): причину про
 // агентов им не пишем, а записанную раньше снимаем.
-func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []string) error {
+// bad — агенты команды без рабочей модели в этом проходе с причиной.
+func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []string, bad map[string]string) error {
 	runs, err := e.St.WaitingRuns(ctx)
 	if err != nil {
 		return err
 	}
 	seen := map[string]bool{}
+	av := &modelAvailability{e: e}
 	for _, r := range runs {
 		if seen[r.TaskID] {
 			continue
@@ -973,6 +1116,14 @@ func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []stri
 			reason += " со стадией PROMPT"
 		}
 		reason = e.architectureWaitReason(ctx, r.Capabilities, reason)
+		// Runner'ы агента Rivet есть, а модели участника нет среди доступных
+		// моделей каталога: дело в подключении, а не в runner'ах
+		// (fix-agent-without-connection).
+		if r.Model != "" && (r.AgentKind == "" || r.AgentKind == store.AgentRivet) {
+			if why := av.reason(ctx, r.Model); why != "" {
+				reason = why
+			}
+		}
 		if err := e.St.SetTaskWaitReason(ctx, r.TaskID, reason); err != nil {
 			return err
 		}
@@ -989,7 +1140,7 @@ func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []stri
 			return err
 		}
 	}
-	return e.markTeamWaiting(ctx, seen, excluded, excludedEpics)
+	return e.markTeamWaiting(ctx, seen, excluded, excludedEpics, bad)
 }
 
 // markTeamWaiting — причина ожидания запусков ролей с командой (add-agent-roles):
@@ -1001,14 +1152,19 @@ func (e *Engine) markWaiting(ctx context.Context, excluded, excludedEpics []stri
 // причину, записанную до исключения, планировщик снимает: иначе она
 // держалась бы и после того, как агенты освободились. После снятия
 // исключения причина пишется заново, если задача всё ещё ждёт агента.
-func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool, excluded, excludedEpics []string) error {
+func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool, excluded, excludedEpics []string, bad map[string]string) error {
 	if _, err := e.St.ClearTeamWaits(ctx, excluded, excludedEpics); err != nil {
 		return err
 	}
-	waits, err := e.St.WaitingTeamRuns(ctx, excluded, excludedEpics)
+	badIDs := make([]string, 0, len(bad))
+	for id := range bad {
+		badIDs = append(badIDs, id)
+	}
+	waits, err := e.St.WaitingTeamRuns(ctx, excluded, excludedEpics, badIDs)
 	if err != nil {
 		return err
 	}
+	av := &modelAvailability{e: e}
 	for _, w := range waits {
 		if seen[w.Run.TaskID] {
 			continue
@@ -1017,6 +1173,13 @@ func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool, excl
 		reason := e.architectureWaitReason(ctx, w.Run.Capabilities, "нет runner'а для свободных агентов роли «"+w.RoleTitle+"»")
 		if w.Busy {
 			reason = "нет свободного агента роли «" + w.RoleTitle + "»: все заняты"
+			// Часть агентов роли без рабочей модели (исключены в проходе),
+			// остальные заняты.
+			if why := av.badTeamReason(ctx, w.Run, bad); why != "" {
+				reason = "нет свободного агента роли «" + w.RoleTitle + "» с рабочим подключением к модели: агенты с рабочей моделью заняты, у остальных " + why
+			}
+		} else if why := av.teamReason(ctx, w.Run.Role); why != "" {
+			reason = "нет агента роли «" + w.RoleTitle + "» с рабочим подключением к модели: " + why
 		}
 		if err := e.St.SetTaskTeamWait(ctx, w.Run.TaskID, reason); err != nil {
 			return err

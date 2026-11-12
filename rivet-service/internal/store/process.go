@@ -59,6 +59,11 @@ type StepRun struct {
 	// AssignedModel — модель, с которой стадия ушла runner'у; Model — только
 	// явная модель участника (требование к runner'у).
 	AssignedModel string
+	// AssignedConnection — подключение модели в назначении агенту Rivet;
+	// CatalogKey — ключ или секретные заголовки каталога ушли runner'у в
+	// назначении (иначе runner брал ключ из своего окружения).
+	AssignedConnection string
+	CatalogKey         bool
 }
 
 // DisplayModel — модель запуска для людей: назначенная, иначе явная.
@@ -78,14 +83,15 @@ func (r StepRun) Open() bool { return r.Verdict == "" }
 const runCols = `r.id, r.task_id::text, r.step_id, r.step_kind, r.pass, r.participant, r.agent_kind, r.model,
 	r.capabilities, r.user_login, r.user_role, COALESCE(r.runner_id,''), COALESCE(r.session_id::text,''), COALESCE(r.verdict,''),
 	r.verdict_by, r.detail, r.created_at, r.finished_at, r.role, r.pref_model, COALESCE(r.agent_id, ''),
-	COALESCE((SELECT ta.name FROM team_agents ta WHERE ta.id = r.agent_id), ''), r.role_agent, r.pref_agent, r.agent_verdict, r.assigned_model`
+	COALESCE((SELECT ta.name FROM team_agents ta WHERE ta.id = r.agent_id), ''), r.role_agent, r.pref_agent, r.agent_verdict, r.assigned_model,
+	r.assigned_connection, r.catalog_key`
 
 func scanRun(row pgx.Row) (StepRun, error) {
 	var r StepRun
 	err := row.Scan(&r.ID, &r.TaskID, &r.StepID, &r.StepKind, &r.Pass, &r.Participant, &r.AgentKind, &r.Model,
 		&r.Capabilities, &r.UserLogin, &r.UserRole, &r.RunnerID, &r.SessionID, &r.Verdict, &r.VerdictBy,
 		&r.Detail, &r.CreatedAt, &r.FinishedAt, &r.Role, &r.PrefModel, &r.AgentID, &r.AgentName,
-		&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel)
+		&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel, &r.AssignedConnection, &r.CatalogKey)
 	return r, err
 }
 
@@ -229,6 +235,9 @@ func (s *Store) EnterStep(ctx context.Context, in EnterStep) ([]StepRun, error) 
 		// Новый вход на review — новые ревьюеры: прежний reviewer_id не
 		// должен пережить шаг.
 		if in.Step.Kind == policy.StepReview {
+			if _, err := tx.Exec(ctx, `UPDATE tasks SET criteria=CASE WHEN jsonb_typeof(criteria)='array' THEN COALESCE((SELECT jsonb_agg(jsonb_build_object('text',c->'text','ok',false)) FROM jsonb_array_elements(criteria) c),'[]'::jsonb) ELSE criteria END WHERE id=$1`, in.TaskID); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `UPDATE tasks SET reviewer_id=NULL WHERE id=$1`, in.TaskID); err != nil {
 				return err
 			}
@@ -466,7 +475,7 @@ func (s *Store) SetRunSession(ctx context.Context, runID int64, sessionID string
 // (Assignment не доставлен — планировщик назначит заново).
 func (s *Store) UnbindRun(ctx context.Context, runID int64) error {
 	_, err := s.Pool.Exec(ctx,
-		`UPDATE task_step_runs SET runner_id=NULL, session_id=NULL, agent_id=NULL, assigned_model='' WHERE id=$1 AND verdict IS NULL`, runID)
+		`UPDATE task_step_runs SET runner_id=NULL, session_id=NULL, agent_id=NULL, assigned_model='', assigned_connection='', catalog_key=false WHERE id=$1 AND verdict IS NULL`, runID)
 	return err
 }
 
@@ -485,8 +494,8 @@ func (s *Store) AddSequentialRun(ctx context.Context, taskID string, step policy
 // RecordVerdict закрывает запуск вердиктом и освобождает его runner
 // (кроме keepRunner: тот же runner продолжит следующий шаг). Возвращает
 // false, если запуск уже закрыт (поздний результат).
-func (s *Store) RecordVerdict(ctx context.Context, runID int64, verdict, detail string, keepRunner bool) (bool, error) {
-	return s.recordVerdict(ctx, runID, verdict, detail, "", keepRunner)
+func (s *Store) RecordVerdict(ctx context.Context, runID int64, verdict, detail string, keepRunner bool, report ...CriteriaReport) (bool, error) {
+	return s.recordVerdict(ctx, runID, verdict, detail, "", keepRunner, report...)
 }
 
 // RecordUserVerdict — вердикт человека с его логином; повторный вердикт
@@ -495,10 +504,20 @@ func (s *Store) RecordUserVerdict(ctx context.Context, runID int64, login, verdi
 	return s.recordVerdict(ctx, runID, verdict, detail, login, false)
 }
 
-func (s *Store) recordVerdict(ctx context.Context, runID int64, verdict, detail, by string, keepRunner bool) (bool, error) {
+func (s *Store) recordVerdict(ctx context.Context, runID int64, verdict, detail, by string, keepRunner bool, report ...CriteriaReport) (bool, error) {
 	var claimed bool
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var runnerID, taskID string
+		// Порядок блокировок совпадает с EnterStep: сначала задача, затем запуск.
+		if len(report) > 0 {
+			var gen, closed int
+			if err := tx.QueryRow(ctx, `SELECT t.id::text,t.step_gen,t.step_closed_gen FROM tasks t JOIN task_step_runs r ON r.task_id=t.id WHERE r.id=$1 FOR UPDATE OF t`, runID).Scan(&taskID, &gen, &closed); err != nil {
+				return err
+			}
+			if gen != report[0].Pass || closed >= report[0].Pass {
+				return nil
+			}
+		}
 		// Адресат проверяется в том же UPDATE: между проверкой снаружи и
 		// вердиктом роль или членство могли измениться.
 		err := tx.QueryRow(ctx, `
@@ -518,6 +537,11 @@ func (s *Store) recordVerdict(ctx context.Context, runID int64, verdict, detail,
 			return err
 		}
 		claimed = true
+		if len(report) > 0 {
+			if err := recordCriteriaResultsTx(ctx, tx, taskID, report[0]); err != nil {
+				return err
+			}
+		}
 		if runnerID != "" && !keepRunner {
 			_, err = tx.Exec(ctx, `UPDATE runners SET status='idle', task_id=NULL WHERE id=$1 AND task_id=$2`, runnerID, taskID)
 		}
@@ -590,13 +614,14 @@ type PendingAssign struct {
 // Задача в ready получает статус-проекцию шага и ветку. ok=false —
 // назначать нечего.
 func (s *Store) AssignRun(ctx context.Context, excludedProjects, excludedEpics []string) (RunAssignment, bool, error) {
-	return s.AssignRunExcept(ctx, excludedProjects, excludedEpics, nil, nil)
+	return s.AssignRunExcept(ctx, excludedProjects, excludedEpics, nil, nil, nil)
 }
 
-// AssignRunExcept — AssignRun без указанных runner'ов и запусков: тик
-// планировщика исключает те, чья стадия в этом тике не стартовала, и
-// продолжает назначать остальные (add-agent-roles).
-func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedEpics, excludedRunners []string, excludedRuns []int64) (RunAssignment, bool, error) {
+// AssignRunExcept — AssignRun без указанных runner'ов, запусков и агентов
+// команды: тик планировщика исключает те, чья стадия в этом тике не
+// стартовала, и агентов, у модели которых нет рабочего подключения
+// (fix-agent-without-connection), и продолжает назначать остальные.
+func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedEpics, excludedRunners []string, excludedRuns []int64, excludedAgents []string) (RunAssignment, bool, error) {
 	var a RunAssignment
 	assigned := false
 	if excludedProjects == nil {
@@ -610,6 +635,9 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 	}
 	if excludedRuns == nil {
 		excludedRuns = []int64{}
+	}
+	if excludedAgents == nil {
+		excludedAgents = []string{}
 	}
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var runID int64
@@ -636,6 +664,9 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 				LEFT JOIN team_agents ag ON r.role <> '' AND ag.role_id = r.role AND ag.enabled
 					AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)
 					AND (ag.model = '' OR ag.model = ANY(x.models) OR x.model = ag.model)
+					-- агенты без рабочей модели исключаются только там, где
+					-- модель задаёт агент: у явной модели участника она своя
+					AND (r.model <> '' OR ag.id <> ALL($5::text[]))
 				WHERE x.status = 'idle' AND NOT x.draining AND x.task_id IS NULL AND x.id <> ALL($3::text[]) AND `+agentRunner("x")+`
 				  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)
 				  AND (r.agent_kind = '' OR x.agent = r.agent_kind)
@@ -678,7 +709,7 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 			  AND (r.not_before IS NULL OR r.not_before <= now())
 			ORDER BY (t.kind = 'bug') DESC, t.num, r.id
 			FOR UPDATE OF t, r SKIP LOCKED
-			LIMIT 1`, excludedProjects, excludedEpics, excludedRunners, excludedRuns).
+			LIMIT 1`, excludedProjects, excludedEpics, excludedRunners, excludedRuns, excludedAgents).
 			Scan(&runID, &taskID, &epicID, &projectID, &runnerID, &kind, &entry, &from, &num, &branch, &role, &roleTitle, &runnerName, &rolesFeature,
 				&agentID, &agentName, &seen)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -784,6 +815,33 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 	return a, true, nil
 }
 
+// PendingAgentRuns — запуски участников-агентов, которые планировщик может
+// назначить в этом проходе: без runner'а и вердикта, пауза откладывания
+// прошла, задача в работе, Epic выполняется и не исключён. По ним control
+// plane до назначения проверяет подключение модели
+// (fix-agent-without-connection).
+func (s *Store) PendingAgentRuns(ctx context.Context, excludedProjects, excludedEpics []string) ([]StepRun, error) {
+	if excludedProjects == nil {
+		excludedProjects = []string{}
+	}
+	if excludedEpics == nil {
+		excludedEpics = []string{}
+	}
+	rows, err := s.Pool.Query(ctx, `
+		SELECT `+runCols+` FROM task_step_runs r
+		JOIN tasks t ON t.id = r.task_id
+		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+			AND e.project_id <> ALL($1::uuid[]) AND e.id <> ALL($2::uuid[])
+		WHERE r.runner_id IS NULL AND r.verdict IS NULL AND `+agentRunsOnly+`
+		  AND t.status IN ('ready','running','fixing','testing','review')
+		  AND (r.not_before IS NULL OR r.not_before <= now())
+		ORDER BY r.id`, excludedProjects, excludedEpics)
+	if err != nil {
+		return nil, err
+	}
+	return collectRuns(rows)
+}
+
 // GetRunner — runner по идентификатору.
 func (s *Store) GetRunner(ctx context.Context, id string) (domain.Runner, error) {
 	r, err := scanRunner(s.Pool.QueryRow(ctx, `
@@ -825,6 +883,123 @@ func (s *Store) SetTaskWaitReason(ctx context.Context, taskID, reason string) er
 
 // WaitKindTeam — причина ожидания ролей с командой (markTeamWaiting).
 const WaitKindTeam = "team"
+
+// WaitKindCredentials — исход шага закреплён, но не применён: PR не открылся
+// из-за нерабочих учётных данных хостинга (fix-credential-state). Задачу
+// продолжает ClaimCredentialsWait после восстановления подключения.
+const WaitKindCredentials = "credentials"
+
+// SetTaskCredentialsWait — задача ждёт восстановления подключения с
+// закреплённым исходом шага: target и entry — шаг, на который она шла, и
+// вход на него. Захват продолжения сбрасывается.
+func (s *Store) SetTaskCredentialsWait(ctx context.Context, taskID, reason, target, entry string) error {
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE tasks SET wait_reason=$2, wait_kind=$3, wait_target=$4, wait_entry=$5,
+			wait_claimed_at=NULL, wait_failures=0, updated_at=now() WHERE id=$1`,
+		taskID, clipRunes(reason, 300), WaitKindCredentials, target, entry)
+	return err
+}
+
+// ClaimCredentialsWait захватывает продолжение ждущей задачи на срок
+// lease: отметку ожидания снимает только вход на следующий шаг, поэтому
+// сбой или рестарт посреди продолжения её не теряют — захват истечёт, и
+// задачу подхватит следующий проход. ok=false — задачу уже продолжают или
+// ожидания нет.
+// CredentialsClaim — захват продолжения ждущей задачи: куда она шла и
+// метка захвата, по которой владелец сверяет, что захват всё ещё его.
+type CredentialsClaim struct {
+	Target, Entry string
+	At            time.Time
+}
+
+func (s *Store) ClaimCredentialsWait(ctx context.Context, taskID string, lease time.Duration) (CredentialsClaim, bool, error) {
+	var c CredentialsClaim
+	err := s.Pool.QueryRow(ctx, `
+		UPDATE tasks SET wait_claimed_at=now()
+		WHERE id=$1 AND wait_kind=$2
+		  AND (wait_claimed_at IS NULL OR wait_claimed_at < now() - make_interval(secs => $3))
+		RETURNING wait_target, wait_entry, wait_claimed_at`, taskID, WaitKindCredentials, lease.Seconds()).Scan(&c.Target, &c.Entry, &c.At)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CredentialsClaim{}, false, nil
+	}
+	return c, err == nil, err
+}
+
+// RenewCredentialsClaim продлевает свой захват перед переходом: захват
+// истёк и достался другому проходу — false, переход не делается.
+func (s *Store) RenewCredentialsClaim(ctx context.Context, taskID string, c CredentialsClaim) (CredentialsClaim, bool, error) {
+	err := s.Pool.QueryRow(ctx, `
+		UPDATE tasks SET wait_claimed_at=now()
+		WHERE id=$1 AND wait_kind=$2 AND wait_claimed_at=$3
+		RETURNING wait_claimed_at`, taskID, WaitKindCredentials, c.At).Scan(&c.At)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return c, false, nil
+	}
+	return c, err == nil, err
+}
+
+// NoteCredentialsResumeFailure — продолжение не удалось по причине, не
+// связанной с учётными данными: причина ожидания показывает настоящую
+// ошибку, счётчик неудач растёт. Возвращает число неудач подряд.
+func (s *Store) NoteCredentialsResumeFailure(ctx context.Context, taskID, reason string) (int, error) {
+	var n int
+	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var projectID, epicID, step string
+		err := tx.QueryRow(ctx, `
+            UPDATE tasks t SET wait_failures = wait_failures + 1, wait_reason=$3, updated_at=now()
+            FROM epics e WHERE t.id=$1 AND t.wait_kind=$2 AND e.id=t.epic_id
+            RETURNING t.wait_failures, e.project_id::text, t.epic_id::text, t.step_id`,
+			taskID, WaitKindCredentials, clipRunes(reason, 300)).Scan(&n, &projectID, &epicID, &step)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		_, err = appendEvent(ctx, tx, EventInput{ActorKind: domain.ActorSystem, Type: "task.wait",
+			ProjectID: projectID, EpicID: epicID, TaskID: taskID, Text: reason,
+			Payload: map[string]any{"step": step, "credentials": true, "reason": reason, "error": reason, "attempt": n}})
+		return err
+	})
+	return n, err
+}
+
+// ClearCredentialsWait снимает ожидание учётных данных (задача уходит в
+// эскалацию после постоянных неудач продолжения).
+func (s *Store) ClearCredentialsWait(ctx context.Context, taskID string) error {
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE tasks SET wait_kind='', wait_reason='', wait_claimed_at=NULL, wait_failures=0
+		WHERE id=$1 AND wait_kind=$2`, taskID, WaitKindCredentials)
+	return err
+}
+
+// AwaitingCredentials — задачи, ждущие восстановления подключения, у
+// которых оно уже рабочее: исход шага закреплён, Epic идёт, продолжение
+// никто не держит (или захват старше lease).
+func (s *Store) AwaitingCredentials(ctx context.Context, lease time.Duration) ([]domain.Task, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT `+taskCols+` FROM `+taskFrom+`
+		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
+		WHERE t.wait_kind = $1 AND t.step_gen = t.step_closed_gen
+		  AND t.status IN ('ready','running','fixing','testing','review')
+		  AND (t.wait_claimed_at IS NULL OR t.wait_claimed_at < now() - make_interval(secs => $2))
+		  AND NOT EXISTS (SELECT 1 FROM projects cp JOIN scm_credentials cc ON cc.id = cp.credential_id
+			WHERE cp.id = e.project_id AND cc.state = 'invalid')
+		ORDER BY t.num`, WaitKindCredentials, lease.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
 
 // SetTaskTeamWait фиксирует причину ожидания агента команды: её снимает
 // ClearTeamWaits, когда задача стоит из-за бюджета или зависимостей Epic'а.
@@ -1110,7 +1285,7 @@ func (s *Store) MySteps(ctx context.Context, userID, login string) ([]StepItem, 
 		if err := rows.Scan(&r.ID, &r.TaskID, &r.StepID, &r.StepKind, &r.Pass, &r.Participant, &r.AgentKind, &r.Model,
 			&r.Capabilities, &r.UserLogin, &r.UserRole, &r.RunnerID, &r.SessionID, &r.Verdict, &r.VerdictBy,
 			&r.Detail, &r.CreatedAt, &r.FinishedAt, &r.Role, &r.PrefModel, &r.AgentID, &r.AgentName,
-			&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel,
+			&r.RoleAgent, &r.PrefAgent, &r.AgentVerdict, &r.AssignedModel, &r.AssignedConnection, &r.CatalogKey,
 			&t.ID, &t.EpicID, &t.Num, &t.Title, &t.Description, &t.Status, &t.Estimate,
 			&t.Capabilities, &crit, &t.AttemptUsed, &t.AttemptLimit, &t.ReviewRejections,
 			&t.RunnerID, &t.Branch, &t.PRURL, &t.BlockReason, &t.BlockedBy,

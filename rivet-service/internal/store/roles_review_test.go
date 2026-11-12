@@ -153,7 +153,7 @@ func TestWaitReasonFreeAgentWithoutRunner(t *testing.T) {
 	if _, ok, err := s.AssignRun(ctx, nil, nil); err != nil || ok {
 		t.Fatalf("вторую некому: %v %v", ok, err)
 	}
-	waits, err := s.WaitingTeamRuns(ctx, nil, nil)
+	waits, err := s.WaitingTeamRuns(ctx, nil, nil, nil)
 	if err != nil || len(waits) != 0 {
 		t.Fatalf("подходящий runner занят — ожидание без причины: %+v %v", waits, err)
 	}
@@ -161,7 +161,7 @@ func TestWaitReasonFreeAgentWithoutRunner(t *testing.T) {
 	if marked, err := s.MarkRunnerOffline(ctx, "r1", r1.LastSeen); err != nil || !marked {
 		t.Fatalf("отметка offline: %v %v", marked, err)
 	}
-	waits, err = s.WaitingTeamRuns(ctx, nil, nil)
+	waits, err = s.WaitingTeamRuns(ctx, nil, nil, nil)
 	if err != nil || len(waits) != 1 || waits[0].Busy || waits[0].Run.TaskID != tasks[1].ID {
 		t.Fatalf("причина «нет runner'а для свободных агентов»: %+v %v", waits, err)
 	}
@@ -172,7 +172,7 @@ func TestWaitReasonFreeAgentWithoutRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, ex := range map[string][2][]string{"проект": {{projectID}, nil}, "Epic": {nil, {epicID}}} {
-		if waits, err := s.WaitingTeamRuns(ctx, ex[0], ex[1]); err != nil || len(waits) != 0 {
+		if waits, err := s.WaitingTeamRuns(ctx, ex[0], ex[1], nil); err != nil || len(waits) != 0 {
 			t.Fatalf("%s исключён по бюджету: %+v %v", name, waits, err)
 		}
 	}

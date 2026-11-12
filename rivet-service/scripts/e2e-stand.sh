@@ -6,7 +6,10 @@
 # fake-llm создаются через API после старта rivetd. Процесс остаётся на
 # переднем плане (rivetd), Playwright использует его как webServer.
 # Fake-провайдер и fake SCM — только тестовая инфраструктура: в консоли и
-# пресетах продукта их нет.
+# пресетах продукта их нет. Так же устроены fake RUVDS (cmd/fake-ruvds) и
+# подмены ssh и docker для runner'а выкатки (scripts/e2e-bin,
+# add-environment-provisioning): настоящих серверов, денег и Docker стенду
+# не нужно.
 set -eu
 
 SERVICE_DIR=$(cd "$(dirname "$0")/.." && pwd)
@@ -72,7 +75,8 @@ cp -r "$WEB_DIR/dist" "$SERVICE_DIR/internal/webui/dist"
 (cd "$SERVICE_DIR" && go build -o "$STAND_DIR/rivetd" ./cmd/rivetd \
   && go build -o "$STAND_DIR/rivet-runner" ./cmd/rivet-runner \
   && go build -o "$STAND_DIR/fake-llm" ./cmd/fake-llm \
-  && go build -o "$STAND_DIR/gitops-env" ./scripts/e2e-gitops-env)
+  && go build -o "$STAND_DIR/gitops-env" ./scripts/e2e-gitops-env \
+  && go build -o "$STAND_DIR/fake-ruvds" ./cmd/fake-ruvds)
 
 cleanup() { kill 0 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
@@ -98,6 +102,15 @@ for _ in $(seq 1 300); do
   sleep 0.1
 done
 [ -s "$STAND_DIR/gitops-env.addr" ] || { echo "e2e-stand: окружение GitOps не запустилось" >&2; exit 1; }
+
+# Fake RUVDS (add-environment-provisioning): rivetd ходит в него через
+# RIVET_RUVDS_API_URL. Журнал запросов: GET /__fake/calls.
+RUVDS_PORT=${E2E_RUVDS_PORT:-$((HTTP_PORT + 4))}
+"$STAND_DIR/fake-ruvds" -addr "127.0.0.1:$RUVDS_PORT" &
+for _ in $(seq 1 50); do
+  curl -s "http://127.0.0.1:$RUVDS_PORT/__fake/calls" >/dev/null 2>&1 && break
+  sleep 0.1
+done
 
 # Идентичность стенда: bootstrap-админ (см. ниже env rivetd), PAT для
 # CLI/скриптов в $STAND_DIR/token и токен регистрации runner'ов. Runner'ы
@@ -191,11 +204,24 @@ print(json.dumps({"models": models}))' > "$STAND_DIR/llm-models.json" \
   start_runner e2e-reviewer -agent rivet -caps review
   start_runner e2e-reviewer2 -agent rivet -caps review
   # Runner выкатки без агента: окружения e2e исполняют команды локально.
-  start_runner e2e-deployer -caps deploy
+  # Подмены ssh и docker из scripts/e2e-bin первыми в PATH: хост RUVDS
+  # и локальный хост проверяются без настоящего сервера и Docker, вызовы
+  # пишутся в журналы стенда.
+  # Окружение задаётся прямо перед командой runner'а: присваивания перед
+  # вызовом функции в разных sh ведут себя по-разному.
+  mkdir -p "$STAND_DIR/rw-e2e-deployer"
+  PATH="$SERVICE_DIR/scripts/e2e-bin:$PATH" E2E_SSH_LOG="$STAND_DIR/ssh.log" E2E_DOCKER_LOG="$STAND_DIR/docker.log" \
+    RIVET_RUNNER_TOKEN="$RUNNER_TOKEN" RIVET_PLANE_ADDR="localhost:$GRPC_PORT" RIVET_GIT_BASE="file://$STAND_DIR/repos/" \
+    RIVET_RUNNER_UNSANDBOXED=1 \
+    "$STAND_DIR/rivet-runner" -id e2e-deployer -workdir "$STAND_DIR/rw-e2e-deployer" -caps deploy 2>&1 \
+    | tee "$STAND_DIR/runner-e2e-deployer.log" >&2 &
   wait
 ) &
 
 # Control plane на переднем плане.
+# RIVET_FAKE_SCM_REVOKED — файл со списком токенов, которые fake-хостинг
+# считает отозванными: сценарий отзыва пишет в него токен проекта и
+# проверяет, что новый токен подключение возвращает (fix-credential-state).
 # Ключ шифрования учётных данных хостингов: без него подключение
 # репозитория с токеном отключено (fail-closed), и мастер не создаст проект.
 # Генерируется на каждый прогон, как и пароль администратора.
@@ -211,7 +237,9 @@ exec env \
   RIVET_SCM=fake \
   RIVET_FAKE_GIT_DIR="$STAND_DIR/repos" \
   RIVET_FAKE_GIT_REPOS=e2e/arch,e2e/gitops \
+  RIVET_FAKE_SCM_REVOKED="$STAND_DIR/scm-revoked" \
   RIVET_ALLOW_PRIVATE_URLS=true \
+  RIVET_RUVDS_API_URL="http://127.0.0.1:$RUVDS_PORT" \
   RIVET_GITHUB_WEBHOOK_SECRET="${E2E_WEBHOOK_SECRET:-e2e-webhook-secret}" \
   RIVET_ADMIN_LOGIN="$ADMIN_LOGIN" \
   RIVET_ADMIN_PASSWORD="$ADMIN_PASSWORD" \

@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/llm"
 	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/secretbox"
 )
@@ -626,33 +627,42 @@ func (s *Store) ResolveAgentModel(ctx context.Context, agentID, explicit string,
 	if err != nil {
 		return a, domain.AgentModelRef{}, false, err
 	}
+	return a, ResolveAgentModelIn(a, explicit, override), true, nil
+}
+
+// ResolveAgentModelIn — ResolveAgentModel по уже прочитанному профилю:
+// явная модель, иначе пара переопределения, иначе модель по умолчанию.
+func ResolveAgentModelIn(a domain.AgentProfile, explicit string, override *policy.AgentModel) domain.AgentModelRef {
 	if explicit != "" {
 		for _, b := range a.Models {
 			if b.Model == explicit {
-				return a, b, true, nil
+				return b
 			}
 		}
 		// Модель есть у runner'а, но не в привязках: подключения не знаем.
-		return a, domain.AgentModelRef{Model: explicit}, true, nil
+		return domain.AgentModelRef{Model: explicit}
 	}
 	if override != nil {
 		for _, b := range a.Models {
 			if b.ConnectionID == override.ConnectionID && b.Model == override.Model {
-				return a, b, true, nil
+				return b
 			}
 		}
 	}
 	if a.DefaultModel != nil {
-		return a, *a.DefaultModel, true, nil
+		return *a.DefaultModel
 	}
-	return a, domain.AgentModelRef{}, true, nil
+	return domain.AgentModelRef{}
 }
 
-// SetRunModel фиксирует модель, выбранную при назначении (для консоли и usage).
-func (s *Store) SetRunModel(ctx context.Context, runID int64, model string) error {
+// SetRunAssignment фиксирует, с чем стадия ушла runner'у: модель (для
+// консоли и usage), подключение и признак, что ключ каталога передан в
+// назначении (по ним разбирается отказ провайдера во время стадии).
+func (s *Store) SetRunAssignment(ctx context.Context, runID int64, model, connectionID string, catalogKey bool) error {
 	// Назначенная модель — отдельно от явной модели участника: она не
 	// становится требованием при повторном назначении.
-	_, err := s.Pool.Exec(ctx, `UPDATE task_step_runs SET assigned_model=$2 WHERE id=$1`, runID, model)
+	_, err := s.Pool.Exec(ctx, `UPDATE task_step_runs SET assigned_model=$2, assigned_connection=$3, catalog_key=$4 WHERE id=$1`,
+		runID, model, connectionID, catalogKey)
 	return err
 }
 
@@ -687,13 +697,28 @@ type ModelEndpoint struct {
 // секретные заголовки включаются, только если includeSecrets (решение по
 // режиму профиля и каналу runner'а принимает вызывающий).
 func (s *Store) BuildModelEndpoint(ctx context.Context, a domain.AgentProfile, b domain.AgentModelRef, box *secretbox.Box, includeSecrets bool) (ModelEndpoint, error) {
-	ep := ModelEndpoint{Model: b.Model, ConnectionID: b.ConnectionID, Limits: a.Limits}
 	if b.ConnectionID == "" {
-		return ep, nil
+		return ModelEndpoint{Model: b.Model, Limits: a.Limits}, nil
 	}
 	cl, c, err := s.ConnectionClient(ctx, b.ConnectionID, box)
 	if err != nil && !errors.Is(err, ErrSecret) && !errors.Is(err, secretbox.ErrNoKey) {
-		return ep, err
+		return ModelEndpoint{Model: b.Model, ConnectionID: b.ConnectionID, Limits: a.Limits}, err
+	}
+	return ModelEndpointFrom(a, b, cl, c, err == nil, includeSecrets), nil
+}
+
+// ModelEndpointFrom — подключение агента Rivet из уже прочитанного
+// подключения каталога (ConnectionClient): проверка и сборка назначения
+// идут по одному чтению. secretsRead — ключ и секретные заголовки
+// расшифрованы; includeSecrets — отдавать ли их runner'у.
+func ModelEndpointFrom(a domain.AgentProfile, b domain.AgentModelRef, cl llm.Client, c domain.ModelConnection, secretsRead, includeSecrets bool) ModelEndpoint {
+	ep := ModelEndpoint{Model: b.Model, ConnectionID: b.ConnectionID, Limits: a.Limits}
+	if b.ConnectionID == "" {
+		return ep
+	}
+	err := error(nil)
+	if !secretsRead {
+		err = ErrSecret
 	}
 	ep.API, ep.BaseURL = c.API, c.BaseURL
 	if ep.BaseURL == "" {
@@ -761,5 +786,5 @@ func (s *Store) BuildModelEndpoint(ctx context.Context, a domain.AgentProfile, b
 		}
 	}
 	sort.Strings(ep.SecretNames)
-	return ep, nil
+	return ep
 }

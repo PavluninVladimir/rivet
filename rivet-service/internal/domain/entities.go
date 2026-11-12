@@ -59,8 +59,13 @@ type ScmCredential struct {
 	Owner       string
 	TokenPrefix string
 	State       string // ok | invalid | unchecked
-	CheckedAt   *time.Time
-	Created     time.Time
+	// StateReason и StateMessage — причина нерабочего состояния: код
+	// (bad_token, no_access, insufficient_scope, not_found) и текст для
+	// человека. У рабочего подключения пустые.
+	StateReason  string
+	StateMessage string
+	CheckedAt    *time.Time
+	Created      time.Time
 }
 
 // Check — команда этапа testing из конфига проекта.
@@ -126,8 +131,12 @@ const (
 )
 
 type Criterion struct {
-	Text string `json:"text"`
-	OK   bool   `json:"ok"`
+	Text   string `json:"text"`
+	OK     bool   `json:"ok"`
+	Status string `json:"status,omitempty"`
+	Note   string `json:"note,omitempty"`
+	By     string `json:"by,omitempty"`
+	Pass   int    `json:"pass,omitempty"`
 }
 
 type Task struct {
@@ -409,6 +418,12 @@ type EnvConfig struct {
 	// Monitor — наблюдение за работающим приложением (add-sdlc-cycle,
 	// спека operations «Настройки наблюдения окружения»). nil — не настроено.
 	Monitor *MonitorConfig `json:"monitor,omitempty"`
+	// Provision: привязка Linux-хоста к провайдеру инфраструктуры
+	// (add-environment-provisioning); nil: хост задаёт администратор.
+	Provision *ProvisionConfig `json:"provision,omitempty"`
+	// HostKey: закреплённый ключ хоста (строки known_hosts); у хоста от
+	// провайдера его пишет Rivet после первого подключения.
+	HostKey string `json:"host_key,omitempty"`
 }
 
 // MonitorConfig — настройки наблюдения окружения: периодическая
@@ -528,6 +543,9 @@ func (c EnvConfig) Validate(execType string) error {
 	if c.LocalDocker != nil {
 		return &EnvFieldError{"config.local_docker", "допустим только для exec_type local_docker"}
 	}
+	if c.Provision != nil && execType != ExecSSH {
+		return &EnvFieldError{Field: "config.provision", Msg: "провайдер хоста доступен только окружению «Linux-хост»"}
+	}
 	if execType == ExecGitOps {
 		return c.validateGitOps()
 	}
@@ -578,6 +596,12 @@ func (c EnvConfig) Validate(execType string) error {
 	}
 	if c.Host != "" && (strings.HasPrefix(c.Host, "-") || !envHostRe.MatchString(c.Host)) {
 		return errors.New("host: ожидается [user@]hostname[:port]")
+	}
+	if err := ValidHostKey(c.HostKey); err != nil {
+		return err
+	}
+	if c.Provision != nil {
+		return c.Provision.Validate()
 	}
 	return nil
 }
@@ -821,6 +845,27 @@ const (
 	// записываются без задач-багов до решения человека (add-sdlc-cycle).
 	// Эскалация уровня проекта, одна открытая на проект.
 	AttOpsLimit AttentionReason = "OPS_LIMIT"
+	// AttHostCreate, AttHostDelete: решения о создании сервера с ценой и
+	// об удалении сервера или данных хоста; AttHostFailed: отказ
+	// провайдера, нехватка денег, bootstrap (add-environment-provisioning).
+	// Предмет: хост окружения, одна открытая на хост и причину.
+	AttHostCreate AttentionReason = "HOST_CREATE"
+	AttHostDelete AttentionReason = "HOST_DELETE"
+	AttHostFailed AttentionReason = "HOST_FAILED"
+	// AttModelConnection — агентская стадия не запустилась: у модели нет
+	// рабочего подключения (нет подключения, оно выключено, без ключа или
+	// ключ не дошёл до runner'а). Ошибка настройки, а не провал проверок
+	// (fix-agent-without-connection).
+	AttModelConnection AttentionReason = "MODEL_CONNECTION"
+	// AttPRNotCreated — хостинг не создал PR ветки задачи перед review или
+	// merge: задача ждёт человека, повтор создаёт только PR
+	// (fix-pr-without-test-step).
+	AttPRNotCreated AttentionReason = "PR_NOT_CREATED"
+	// AttScmCredentials — учётные данные хостинга проекта перестали
+	// действовать: конвейер проекта стоит до замены токена или
+	// восстановления доступа (change fix-credential-state). Эскалация
+	// уровня проекта, одна открытая на проект.
+	AttScmCredentials AttentionReason = "SCM_CREDENTIALS"
 )
 
 type Attention struct {
@@ -835,6 +880,11 @@ type Attention struct {
 	Status       string // open | claimed | resolved
 	ClaimedBy    string
 	Created      time.Time
+
+	// HostID и EnvironmentID: эскалация хоста окружения
+	// (add-environment-provisioning): задачи и публикации у неё нет.
+	HostID        string
+	EnvironmentID string
 }
 
 // RunnerToken — токен регистрации runner'ов (спека runners «Токены

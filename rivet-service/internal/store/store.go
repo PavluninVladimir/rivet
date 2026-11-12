@@ -241,6 +241,20 @@ func (s *Store) Events(ctx context.Context, f EventFilter) ([]domain.Event, erro
 // mutate (опционально) правит остальные поля задачи в той же транзакции.
 func (s *Store) TransitionTask(ctx context.Context, taskID string, to domain.TaskStatus,
 	ev EventInput, mutate func(tx pgx.Tx) error) error {
+	return s.transitionTask(ctx, taskID, []domain.TaskStatus{to}, []EventInput{ev}, mutate)
+}
+
+// TransitionTaskVia — переход задачи через промежуточный статус одной
+// транзакцией: оба шага проверяются по матрице статусов, событие пишется на
+// каждый. Нужен, где прямого перехода нет (ready → failed идёт через
+// review): сбой между шагами не оставит задачу в промежуточном статусе.
+func (s *Store) TransitionTaskVia(ctx context.Context, taskID string, via, to domain.TaskStatus,
+	viaEv, ev EventInput, mutate func(tx pgx.Tx) error) error {
+	return s.transitionTask(ctx, taskID, []domain.TaskStatus{via, to}, []EventInput{viaEv, ev}, mutate)
+}
+
+func (s *Store) transitionTask(ctx context.Context, taskID string, path []domain.TaskStatus,
+	evs []EventInput, mutate func(tx pgx.Tx) error) error {
 
 	var denied *EventInput
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
@@ -253,21 +267,23 @@ func (s *Store) TransitionTask(ctx context.Context, taskID string, to domain.Tas
 		if err != nil {
 			return fmt.Errorf("task %s: %w", taskID, err)
 		}
-		ev.ProjectID, ev.EpicID, ev.TaskID = projectID, epicID, taskID
-
-		if !from.CanTransition(to) {
-			bad := domain.ErrBadTransition{Entity: "task", From: string(from), To: string(to)}
-			// Событие об ошибке нельзя писать здесь: возврат ошибки откатит
-			// транзакцию вместе с ним. Пишем после отката, отдельной записью.
-			d := ev
-			d.Type = "task.transition_denied"
-			d.Text = bad.Error()
-			denied = &d
-			return bad
+		for i, to := range path {
+			ev := &evs[i]
+			ev.ProjectID, ev.EpicID, ev.TaskID = projectID, epicID, taskID
+			if !from.CanTransition(to) {
+				bad := domain.ErrBadTransition{Entity: "task", From: string(from), To: string(to)}
+				// Событие об ошибке нельзя писать здесь: возврат ошибки откатит
+				// транзакцию вместе с ним. Пишем после отката, отдельной записью.
+				d := *ev
+				d.Type = "task.transition_denied"
+				d.Text = bad.Error()
+				denied = &d
+				return bad
+			}
+			from = to
 		}
-
 		if _, err := tx.Exec(ctx,
-			`UPDATE tasks SET status = $2, updated_at = now() WHERE id = $1`, taskID, to); err != nil {
+			`UPDATE tasks SET status = $2, updated_at = now() WHERE id = $1`, taskID, path[len(path)-1]); err != nil {
 			return err
 		}
 		if mutate != nil {
@@ -275,8 +291,12 @@ func (s *Store) TransitionTask(ctx context.Context, taskID string, to domain.Tas
 				return err
 			}
 		}
-		_, err = appendEvent(ctx, tx, ev)
-		return err
+		for _, ev := range evs {
+			if _, err := appendEvent(ctx, tx, ev); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if denied != nil {
 		if _, evErr := s.AppendEvent(ctx, *denied); evErr != nil {

@@ -86,7 +86,7 @@ func (x StageResult_Stage) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use StageResult_Stage.Descriptor instead.
 func (StageResult_Stage) EnumDescriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{8, 0}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{9, 0}
 }
 
 type DeployResult_Stage int32
@@ -135,7 +135,7 @@ func (x DeployResult_Stage) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use DeployResult_Stage.Descriptor instead.
 func (DeployResult_Stage) EnumDescriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{23, 0}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{24, 0}
 }
 
 type RegisterRequest struct {
@@ -424,6 +424,7 @@ type RunnerMsg struct {
 	//	*RunnerMsg_Blocked
 	//	*RunnerMsg_DeployResult
 	//	*RunnerMsg_MonitorResult
+	//	*RunnerMsg_HostJobResult
 	Kind          isRunnerMsg_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -554,6 +555,15 @@ func (x *RunnerMsg) GetMonitorResult() *MonitorResult {
 	return nil
 }
 
+func (x *RunnerMsg) GetHostJobResult() *HostJobResult {
+	if x != nil {
+		if x, ok := x.Kind.(*RunnerMsg_HostJobResult); ok {
+			return x.HostJobResult
+		}
+	}
+	return nil
+}
+
 type isRunnerMsg_Kind interface {
 	isRunnerMsg_Kind()
 }
@@ -594,6 +604,10 @@ type RunnerMsg_MonitorResult struct {
 	MonitorResult *MonitorResult `protobuf:"bytes,10,opt,name=monitor_result,json=monitorResult,proto3,oneof"`
 }
 
+type RunnerMsg_HostJobResult struct {
+	HostJobResult *HostJobResult `protobuf:"bytes,11,opt,name=host_job_result,json=hostJobResult,proto3,oneof"`
+}
+
 func (*RunnerMsg_Hello) isRunnerMsg_Kind() {}
 
 func (*RunnerMsg_Heartbeat) isRunnerMsg_Kind() {}
@@ -611,6 +625,8 @@ func (*RunnerMsg_Blocked) isRunnerMsg_Kind() {}
 func (*RunnerMsg_DeployResult) isRunnerMsg_Kind() {}
 
 func (*RunnerMsg_MonitorResult) isRunnerMsg_Kind() {}
+
+func (*RunnerMsg_HostJobResult) isRunnerMsg_Kind() {}
 
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1003,6 +1019,66 @@ func (x *Usage) GetTokensCacheWrite() int64 {
 }
 
 // StageResult — детерминированный итог этапа конвейера.
+type CriterionResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Index         int32                  `protobuf:"varint,1,opt,name=index,proto3" json:"index,omitempty"`
+	Ok            bool                   `protobuf:"varint,2,opt,name=ok,proto3" json:"ok,omitempty"`
+	Note          string                 `protobuf:"bytes,3,opt,name=note,proto3" json:"note,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CriterionResult) Reset() {
+	*x = CriterionResult{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CriterionResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CriterionResult) ProtoMessage() {}
+
+func (x *CriterionResult) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CriterionResult.ProtoReflect.Descriptor instead.
+func (*CriterionResult) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CriterionResult) GetIndex() int32 {
+	if x != nil {
+		return x.Index
+	}
+	return 0
+}
+
+func (x *CriterionResult) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *CriterionResult) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
 type StageResult struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	TaskId     string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
@@ -1016,14 +1092,15 @@ type StageResult struct {
 	StepId      string `protobuf:"bytes,8,opt,name=step_id,json=stepId,proto3" json:"step_id,omitempty"`
 	Participant string `protobuf:"bytes,9,opt,name=participant,proto3" json:"participant,omitempty"`
 	// Вердикт шага prompt: ok | changes | fail (пусто для остальных стадий).
-	Verdict       string `protobuf:"bytes,10,opt,name=verdict,proto3" json:"verdict,omitempty"`
+	Verdict       string             `protobuf:"bytes,10,opt,name=verdict,proto3" json:"verdict,omitempty"`
+	Criteria      []*CriterionResult `protobuf:"bytes,11,rep,name=criteria,proto3" json:"criteria,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *StageResult) Reset() {
 	*x = StageResult{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[8]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1035,7 +1112,7 @@ func (x *StageResult) String() string {
 func (*StageResult) ProtoMessage() {}
 
 func (x *StageResult) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[8]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1048,7 +1125,7 @@ func (x *StageResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StageResult.ProtoReflect.Descriptor instead.
 func (*StageResult) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{8}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *StageResult) GetTaskId() string {
@@ -1121,6 +1198,13 @@ func (x *StageResult) GetVerdict() string {
 	return ""
 }
 
+func (x *StageResult) GetCriteria() []*CriterionResult {
+	if x != nil {
+		return x.Criteria
+	}
+	return nil
+}
+
 // BlockedQuestion — агент не может продолжить без человека.
 type BlockedQuestion struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1133,7 +1217,7 @@ type BlockedQuestion struct {
 
 func (x *BlockedQuestion) Reset() {
 	*x = BlockedQuestion{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[9]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1145,7 +1229,7 @@ func (x *BlockedQuestion) String() string {
 func (*BlockedQuestion) ProtoMessage() {}
 
 func (x *BlockedQuestion) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[9]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1158,7 +1242,7 @@ func (x *BlockedQuestion) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BlockedQuestion.ProtoReflect.Descriptor instead.
 func (*BlockedQuestion) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{9}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *BlockedQuestion) GetTaskId() string {
@@ -1195,6 +1279,7 @@ type PlaneMsg struct {
 	//	*PlaneMsg_Deploy
 	//	*PlaneMsg_Context
 	//	*PlaneMsg_Monitor
+	//	*PlaneMsg_HostJob
 	Kind          isPlaneMsg_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1202,7 +1287,7 @@ type PlaneMsg struct {
 
 func (x *PlaneMsg) Reset() {
 	*x = PlaneMsg{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[10]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1214,7 +1299,7 @@ func (x *PlaneMsg) String() string {
 func (*PlaneMsg) ProtoMessage() {}
 
 func (x *PlaneMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[10]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1227,7 +1312,7 @@ func (x *PlaneMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaneMsg.ProtoReflect.Descriptor instead.
 func (*PlaneMsg) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{10}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PlaneMsg) GetMsgId() string {
@@ -1316,6 +1401,15 @@ func (x *PlaneMsg) GetMonitor() *MonitorJob {
 	return nil
 }
 
+func (x *PlaneMsg) GetHostJob() *HostJob {
+	if x != nil {
+		if x, ok := x.Kind.(*PlaneMsg_HostJob); ok {
+			return x.HostJob
+		}
+	}
+	return nil
+}
+
 type isPlaneMsg_Kind interface {
 	isPlaneMsg_Kind()
 }
@@ -1352,6 +1446,10 @@ type PlaneMsg_Monitor struct {
 	Monitor *MonitorJob `protobuf:"bytes,9,opt,name=monitor,proto3,oneof"`
 }
 
+type PlaneMsg_HostJob struct {
+	HostJob *HostJob `protobuf:"bytes,10,opt,name=host_job,json=hostJob,proto3,oneof"`
+}
+
 func (*PlaneMsg_Ack) isPlaneMsg_Kind() {}
 
 func (*PlaneMsg_Assign) isPlaneMsg_Kind() {}
@@ -1367,6 +1465,8 @@ func (*PlaneMsg_Deploy) isPlaneMsg_Kind() {}
 func (*PlaneMsg_Context) isPlaneMsg_Kind() {}
 
 func (*PlaneMsg_Monitor) isPlaneMsg_Kind() {}
+
+func (*PlaneMsg_HostJob) isPlaneMsg_Kind() {}
 
 // Context — контекст работающему агенту от control plane (обратный канал):
 // предупреждение о пересечении работ и т.п. Доставляется во время
@@ -1384,7 +1484,7 @@ type Context struct {
 
 func (x *Context) Reset() {
 	*x = Context{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[11]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1396,7 +1496,7 @@ func (x *Context) String() string {
 func (*Context) ProtoMessage() {}
 
 func (x *Context) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[11]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1409,7 +1509,7 @@ func (x *Context) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Context.ProtoReflect.Descriptor instead.
 func (*Context) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{11}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Context) GetTaskId() string {
@@ -1449,7 +1549,7 @@ type Ack struct {
 
 func (x *Ack) Reset() {
 	*x = Ack{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[12]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1461,7 +1561,7 @@ func (x *Ack) String() string {
 func (*Ack) ProtoMessage() {}
 
 func (x *Ack) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[12]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1474,7 +1574,7 @@ func (x *Ack) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ack.ProtoReflect.Descriptor instead.
 func (*Ack) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{12}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Ack) GetAckedMsgId() string {
@@ -1564,7 +1664,7 @@ type Assignment struct {
 
 func (x *Assignment) Reset() {
 	*x = Assignment{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[13]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1576,7 +1676,7 @@ func (x *Assignment) String() string {
 func (*Assignment) ProtoMessage() {}
 
 func (x *Assignment) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[13]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1589,7 +1689,7 @@ func (x *Assignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Assignment.ProtoReflect.Descriptor instead.
 func (*Assignment) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{13}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Assignment) GetTaskId() string {
@@ -1827,7 +1927,7 @@ type ModelEndpoint struct {
 
 func (x *ModelEndpoint) Reset() {
 	*x = ModelEndpoint{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1839,7 +1939,7 @@ func (x *ModelEndpoint) String() string {
 func (*ModelEndpoint) ProtoMessage() {}
 
 func (x *ModelEndpoint) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[14]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1852,7 +1952,7 @@ func (x *ModelEndpoint) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ModelEndpoint.ProtoReflect.Descriptor instead.
 func (*ModelEndpoint) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{14}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ModelEndpoint) GetApi() string {
@@ -1965,7 +2065,7 @@ type SessionLimits struct {
 
 func (x *SessionLimits) Reset() {
 	*x = SessionLimits{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1977,7 +2077,7 @@ func (x *SessionLimits) String() string {
 func (*SessionLimits) ProtoMessage() {}
 
 func (x *SessionLimits) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[15]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1990,7 +2090,7 @@ func (x *SessionLimits) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionLimits.ProtoReflect.Descriptor instead.
 func (*SessionLimits) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{15}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *SessionLimits) GetMaxTurns() int32 {
@@ -2028,7 +2128,7 @@ type AgentRole struct {
 
 func (x *AgentRole) Reset() {
 	*x = AgentRole{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2040,7 +2140,7 @@ func (x *AgentRole) String() string {
 func (*AgentRole) ProtoMessage() {}
 
 func (x *AgentRole) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[16]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2053,7 +2153,7 @@ func (x *AgentRole) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentRole.ProtoReflect.Descriptor instead.
 func (*AgentRole) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{16}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *AgentRole) GetId() string {
@@ -2098,7 +2198,7 @@ type Policy struct {
 
 func (x *Policy) Reset() {
 	*x = Policy{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2110,7 +2210,7 @@ func (x *Policy) String() string {
 func (*Policy) ProtoMessage() {}
 
 func (x *Policy) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[17]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2123,7 +2223,7 @@ func (x *Policy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Policy.ProtoReflect.Descriptor instead.
 func (*Policy) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{17}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Policy) GetHash() string {
@@ -2157,7 +2257,7 @@ type Check struct {
 
 func (x *Check) Reset() {
 	*x = Check{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2169,7 +2269,7 @@ func (x *Check) String() string {
 func (*Check) ProtoMessage() {}
 
 func (x *Check) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[18]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2182,7 +2282,7 @@ func (x *Check) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Check.ProtoReflect.Descriptor instead.
 func (*Check) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{18}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Check) GetName() string {
@@ -2209,7 +2309,7 @@ type Answer struct {
 
 func (x *Answer) Reset() {
 	*x = Answer{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2221,7 +2321,7 @@ func (x *Answer) String() string {
 func (*Answer) ProtoMessage() {}
 
 func (x *Answer) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[19]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2234,7 +2334,7 @@ func (x *Answer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Answer.ProtoReflect.Descriptor instead.
 func (*Answer) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{19}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Answer) GetTaskId() string {
@@ -2260,7 +2360,7 @@ type CancelTask struct {
 
 func (x *CancelTask) Reset() {
 	*x = CancelTask{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[20]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2272,7 +2372,7 @@ func (x *CancelTask) String() string {
 func (*CancelTask) ProtoMessage() {}
 
 func (x *CancelTask) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[20]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2285,7 +2385,7 @@ func (x *CancelTask) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelTask.ProtoReflect.Descriptor instead.
 func (*CancelTask) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{20}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *CancelTask) GetTaskId() string {
@@ -2304,7 +2404,7 @@ type PauseRunner struct {
 
 func (x *PauseRunner) Reset() {
 	*x = PauseRunner{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[21]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2316,7 +2416,7 @@ func (x *PauseRunner) String() string {
 func (*PauseRunner) ProtoMessage() {}
 
 func (x *PauseRunner) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[21]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2329,7 +2429,7 @@ func (x *PauseRunner) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PauseRunner.ProtoReflect.Descriptor instead.
 func (*PauseRunner) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{21}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *PauseRunner) GetDrain() bool {
@@ -2368,13 +2468,18 @@ type DeployJob struct {
 	// Отправляется только runner-у с feature local_docker_v1.
 	LocalDockerJob    []byte `protobuf:"bytes,15,opt,name=local_docker_job,json=localDockerJob,proto3" json:"local_docker_job,omitempty"`
 	LocalDockerAction string `protobuf:"bytes,16,opt,name=local_docker_action,json=localDockerAction,proto3" json:"local_docker_action,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Закреплённый ключ хоста (строки known_hosts): ssh проверяет ключ по нему,
+	// а не по known_hosts runner'а (add-environment-provisioning). Пусто:
+	// прежнее поведение.
+	// Номера 15 и 16 уже заняты выпущенным local_docker_v1.
+	HostKey       string `protobuf:"bytes,17,opt,name=host_key,json=hostKey,proto3" json:"host_key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeployJob) Reset() {
 	*x = DeployJob{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[22]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2386,7 +2491,7 @@ func (x *DeployJob) String() string {
 func (*DeployJob) ProtoMessage() {}
 
 func (x *DeployJob) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[22]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2399,7 +2504,7 @@ func (x *DeployJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeployJob.ProtoReflect.Descriptor instead.
 func (*DeployJob) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{22}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *DeployJob) GetDeploymentId() string {
@@ -2514,6 +2619,13 @@ func (x *DeployJob) GetLocalDockerAction() string {
 	return ""
 }
 
+func (x *DeployJob) GetHostKey() string {
+	if x != nil {
+		return x.HostKey
+	}
+	return ""
+}
+
 // DeployResult — итог этапа публикации; чужой/stale deployment_id
 // отбрасывается CAS-переходами статусов.
 type DeployResult struct {
@@ -2531,7 +2643,7 @@ type DeployResult struct {
 
 func (x *DeployResult) Reset() {
 	*x = DeployResult{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[23]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2543,7 +2655,7 @@ func (x *DeployResult) String() string {
 func (*DeployResult) ProtoMessage() {}
 
 func (x *DeployResult) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[23]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2556,7 +2668,7 @@ func (x *DeployResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeployResult.ProtoReflect.Descriptor instead.
 func (*DeployResult) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{23}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *DeployResult) GetDeploymentId() string {
@@ -2620,14 +2732,15 @@ type MonitorJob struct {
 	LogsTimeoutS int32  `protobuf:"varint,9,opt,name=logs_timeout_s,json=logsTimeoutS,proto3" json:"logs_timeout_s,omitempty"` // дедлайн команды логов
 	// Общий бюджет проверки: команда, логи и их завершение. Control plane
 	// ждёт результат по тому же бюджету с запасом на доставку.
-	BudgetS       int32 `protobuf:"varint,10,opt,name=budget_s,json=budgetS,proto3" json:"budget_s,omitempty"`
+	BudgetS       int32  `protobuf:"varint,10,opt,name=budget_s,json=budgetS,proto3" json:"budget_s,omitempty"`
+	HostKey       string `protobuf:"bytes,11,opt,name=host_key,json=hostKey,proto3" json:"host_key,omitempty"` // закреплённый ключ хоста, как в DeployJob
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *MonitorJob) Reset() {
 	*x = MonitorJob{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[24]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2639,7 +2752,7 @@ func (x *MonitorJob) String() string {
 func (*MonitorJob) ProtoMessage() {}
 
 func (x *MonitorJob) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[24]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2652,7 +2765,7 @@ func (x *MonitorJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MonitorJob.ProtoReflect.Descriptor instead.
 func (*MonitorJob) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{24}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *MonitorJob) GetCheckId() string {
@@ -2725,6 +2838,13 @@ func (x *MonitorJob) GetBudgetS() int32 {
 	return 0
 }
 
+func (x *MonitorJob) GetHostKey() string {
+	if x != nil {
+		return x.HostKey
+	}
+	return ""
+}
+
 // MonitorResult — итог проверки; вывод уже замаскирован построчно.
 type MonitorResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -2739,7 +2859,7 @@ type MonitorResult struct {
 
 func (x *MonitorResult) Reset() {
 	*x = MonitorResult{}
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[25]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2751,7 +2871,7 @@ func (x *MonitorResult) String() string {
 func (*MonitorResult) ProtoMessage() {}
 
 func (x *MonitorResult) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_protocol_rivet_proto_msgTypes[25]
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2764,7 +2884,7 @@ func (x *MonitorResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MonitorResult.ProtoReflect.Descriptor instead.
 func (*MonitorResult) Descriptor() ([]byte, []int) {
-	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{25}
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *MonitorResult) GetCheckId() string {
@@ -2802,6 +2922,191 @@ func (x *MonitorResult) GetDurationMs() int64 {
 	return 0
 }
 
+// HostJob: задание хоста окружения (add-environment-provisioning):
+// первичная настройка сервера от провайдера или снятие локального
+// окружения. Исполняет runner с capability deploy, объявивший возможность
+// host_jobs; задание runner не занимает. Скрипт идёт так же, как команды
+// выкатки: по ssh на host или локально при пустом host.
+type HostJob struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	JobId    string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	EnvName  string                 `protobuf:"bytes,2,opt,name=env_name,json=envName,proto3" json:"env_name,omitempty"`
+	Host     string                 `protobuf:"bytes,3,opt,name=host,proto3" json:"host,omitempty"` // [user@]address; пусто: локально
+	Script   string                 `protobuf:"bytes,4,opt,name=script,proto3" json:"script,omitempty"`
+	TimeoutS int32                  `protobuf:"varint,5,opt,name=timeout_s,json=timeoutS,proto3" json:"timeout_s,omitempty"` // дедлайн задания
+	// Первое подключение к новому серверу: ключ хоста принимается в пустой
+	// known_hosts задания и возвращается в HostJobResult.host_key.
+	AcceptNewHostKey bool              `protobuf:"varint,6,opt,name=accept_new_host_key,json=acceptNewHostKey,proto3" json:"accept_new_host_key,omitempty"`
+	HostKey          string            `protobuf:"bytes,7,opt,name=host_key,json=hostKey,proto3" json:"host_key,omitempty"`                                                    // закреплённый ключ хоста
+	Env              map[string]string `protobuf:"bytes,8,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // переменные скрипта (RIVET_*, COMPOSE_PROJECT_NAME)
+	SshWaitS         int32             `protobuf:"varint,9,opt,name=ssh_wait_s,json=sshWaitS,proto3" json:"ssh_wait_s,omitempty"`                                              // сколько ждать SSH нового сервера перед скриптом
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *HostJob) Reset() {
+	*x = HostJob{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostJob) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostJob) ProtoMessage() {}
+
+func (x *HostJob) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostJob.ProtoReflect.Descriptor instead.
+func (*HostJob) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *HostJob) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *HostJob) GetEnvName() string {
+	if x != nil {
+		return x.EnvName
+	}
+	return ""
+}
+
+func (x *HostJob) GetHost() string {
+	if x != nil {
+		return x.Host
+	}
+	return ""
+}
+
+func (x *HostJob) GetScript() string {
+	if x != nil {
+		return x.Script
+	}
+	return ""
+}
+
+func (x *HostJob) GetTimeoutS() int32 {
+	if x != nil {
+		return x.TimeoutS
+	}
+	return 0
+}
+
+func (x *HostJob) GetAcceptNewHostKey() bool {
+	if x != nil {
+		return x.AcceptNewHostKey
+	}
+	return false
+}
+
+func (x *HostJob) GetHostKey() string {
+	if x != nil {
+		return x.HostKey
+	}
+	return ""
+}
+
+func (x *HostJob) GetEnv() map[string]string {
+	if x != nil {
+		return x.Env
+	}
+	return nil
+}
+
+func (x *HostJob) GetSshWaitS() int32 {
+	if x != nil {
+		return x.SshWaitS
+	}
+	return 0
+}
+
+// HostJobResult: итог задания хоста; чужой или устаревший job_id
+// отбрасывается control plane.
+type HostJobResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	JobId         string                 `protobuf:"bytes,1,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
+	Ok            bool                   `protobuf:"varint,2,opt,name=ok,proto3" json:"ok,omitempty"`
+	Output        string                 `protobuf:"bytes,3,opt,name=output,proto3" json:"output,omitempty"`                  // хвост вывода, замаскирован
+	HostKey       string                 `protobuf:"bytes,4,opt,name=host_key,json=hostKey,proto3" json:"host_key,omitempty"` // строки known_hosts, принятые при первом подключении
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HostJobResult) Reset() {
+	*x = HostJobResult{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostJobResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostJobResult) ProtoMessage() {}
+
+func (x *HostJobResult) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostJobResult.ProtoReflect.Descriptor instead.
+func (*HostJobResult) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *HostJobResult) GetJobId() string {
+	if x != nil {
+		return x.JobId
+	}
+	return ""
+}
+
+func (x *HostJobResult) GetOk() bool {
+	if x != nil {
+		return x.Ok
+	}
+	return false
+}
+
+func (x *HostJobResult) GetOutput() string {
+	if x != nil {
+		return x.Output
+	}
+	return ""
+}
+
+func (x *HostJobResult) GetHostKey() string {
+	if x != nil {
+		return x.HostKey
+	}
+	return ""
+}
+
 var File_pkg_protocol_rivet_proto protoreflect.FileDescriptor
 
 const file_pkg_protocol_rivet_proto_rawDesc = "" +
@@ -2830,7 +3135,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x120\n" +
 	"\x14heartbeat_interval_s\x18\x03 \x01(\x05R\x12heartbeatIntervalS\x12\x18\n" +
 	"\acatalog\x18\x04 \x01(\bR\acatalog\x12\x16\n" +
-	"\x06secure\x18\x05 \x01(\bR\x06secure\"\x90\x04\n" +
+	"\x06secure\x18\x05 \x01(\bR\x06secure\"\xd3\x04\n" +
 	"\tRunnerMsg\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12'\n" +
 	"\x05hello\x18\x02 \x01(\v2\x0f.rivet.v1.HelloH\x00R\x05hello\x123\n" +
@@ -2844,7 +3149,8 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\ablocked\x18\b \x01(\v2\x19.rivet.v1.BlockedQuestionH\x00R\ablocked\x12=\n" +
 	"\rdeploy_result\x18\t \x01(\v2\x16.rivet.v1.DeployResultH\x00R\fdeployResult\x12@\n" +
 	"\x0emonitor_result\x18\n" +
-	" \x01(\v2\x17.rivet.v1.MonitorResultH\x00R\rmonitorResultB\x06\n" +
+	" \x01(\v2\x17.rivet.v1.MonitorResultH\x00R\rmonitorResult\x12A\n" +
+	"\x0fhost_job_result\x18\v \x01(\v2\x17.rivet.v1.HostJobResultH\x00R\rhostJobResultB\x06\n" +
 	"\x04kind\"$\n" +
 	"\x05Hello\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\"5\n" +
@@ -2891,7 +3197,11 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\n" +
 	"\b_ctx_pctB\x10\n" +
 	"\x0e_tokens_cachedB\x15\n" +
-	"\x13_tokens_cache_write\"\x8a\x03\n" +
+	"\x13_tokens_cache_write\"K\n" +
+	"\x0fCriterionResult\x12\x14\n" +
+	"\x05index\x18\x01 \x01(\x05R\x05index\x12\x0e\n" +
+	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x12\n" +
+	"\x04note\x18\x03 \x01(\tR\x04note\"\xc1\x03\n" +
 	"\vStageResult\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x121\n" +
 	"\x05stage\x18\x02 \x01(\x0e2\x1b.rivet.v1.StageResult.StageR\x05stage\x12\x0e\n" +
@@ -2905,7 +3215,8 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\astep_id\x18\b \x01(\tR\x06stepId\x12 \n" +
 	"\vparticipant\x18\t \x01(\tR\vparticipant\x12\x18\n" +
 	"\averdict\x18\n" +
-	" \x01(\tR\averdict\"[\n" +
+	" \x01(\tR\averdict\x125\n" +
+	"\bcriteria\x18\v \x03(\v2\x19.rivet.v1.CriterionResultR\bcriteria\"[\n" +
 	"\x05Stage\x12\x15\n" +
 	"\x11STAGE_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +
@@ -2921,7 +3232,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1a\n" +
 	"\bquestion\x18\x02 \x01(\tR\bquestion\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\tR\tsessionId\"\x97\x03\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"\xc7\x03\n" +
 	"\bPlaneMsg\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12!\n" +
 	"\x03ack\x18\x02 \x01(\v2\r.rivet.v1.AckH\x00R\x03ack\x12.\n" +
@@ -2931,7 +3242,9 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x05pause\x18\x06 \x01(\v2\x15.rivet.v1.PauseRunnerH\x00R\x05pause\x12-\n" +
 	"\x06deploy\x18\a \x01(\v2\x13.rivet.v1.DeployJobH\x00R\x06deploy\x12-\n" +
 	"\acontext\x18\b \x01(\v2\x11.rivet.v1.ContextH\x00R\acontext\x120\n" +
-	"\amonitor\x18\t \x01(\v2\x14.rivet.v1.MonitorJobH\x00R\amonitorB\x06\n" +
+	"\amonitor\x18\t \x01(\v2\x14.rivet.v1.MonitorJobH\x00R\amonitor\x12.\n" +
+	"\bhost_job\x18\n" +
+	" \x01(\v2\x11.rivet.v1.HostJobH\x00R\ahostJobB\x06\n" +
 	"\x04kind\"i\n" +
 	"\aContext\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
@@ -3030,7 +3343,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"CancelTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\"#\n" +
 	"\vPauseRunner\x12\x14\n" +
-	"\x05drain\x18\x01 \x01(\bR\x05drain\"\xf4\x03\n" +
+	"\x05drain\x18\x01 \x01(\bR\x05drain\"\x8f\x04\n" +
 	"\tDeployJob\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12\x19\n" +
 	"\benv_name\x18\x02 \x01(\tR\aenvName\x12\x12\n" +
@@ -3051,7 +3364,8 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\brepo_url\x18\r \x01(\tR\arepoUrl\x12\x1b\n" +
 	"\tgit_token\x18\x0e \x01(\tR\bgitToken\x12(\n" +
 	"\x10local_docker_job\x18\x0f \x01(\fR\x0elocalDockerJob\x12.\n" +
-	"\x13local_docker_action\x18\x10 \x01(\tR\x11localDockerAction\"\x93\x02\n" +
+	"\x13local_docker_action\x18\x10 \x01(\tR\x11localDockerAction\x12\x19\n" +
+	"\bhost_key\x18\x11 \x01(\tR\ahostKey\"\x93\x02\n" +
 	"\fDeployResult\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x122\n" +
 	"\x05stage\x18\x02 \x01(\x0e2\x1c.rivet.v1.DeployResult.StageR\x05stage\x12\x0e\n" +
@@ -3064,7 +3378,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\n" +
 	"\x06DEPLOY\x10\x01\x12\n" +
 	"\n" +
-	"\x06VERIFY\x10\x02\"\x9d\x02\n" +
+	"\x06VERIFY\x10\x02\"\xb8\x02\n" +
 	"\n" +
 	"MonitorJob\x12\x19\n" +
 	"\bcheck_id\x18\x01 \x01(\tR\acheckId\x12\x19\n" +
@@ -3077,14 +3391,34 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\tcheck_url\x18\b \x01(\tR\bcheckUrl\x12$\n" +
 	"\x0elogs_timeout_s\x18\t \x01(\x05R\flogsTimeoutS\x12\x19\n" +
 	"\bbudget_s\x18\n" +
-	" \x01(\x05R\abudgetS\"\x87\x01\n" +
+	" \x01(\x05R\abudgetS\x12\x19\n" +
+	"\bhost_key\x18\v \x01(\tR\ahostKey\"\x87\x01\n" +
 	"\rMonitorResult\x12\x19\n" +
 	"\bcheck_id\x18\x01 \x01(\tR\acheckId\x12\x0e\n" +
 	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x16\n" +
 	"\x06output\x18\x03 \x01(\tR\x06output\x12\x12\n" +
 	"\x04logs\x18\x04 \x01(\tR\x04logs\x12\x1f\n" +
 	"\vduration_ms\x18\x05 \x01(\x03R\n" +
-	"durationMs2\x8a\x01\n" +
+	"durationMs\"\xd2\x02\n" +
+	"\aHostJob\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x19\n" +
+	"\benv_name\x18\x02 \x01(\tR\aenvName\x12\x12\n" +
+	"\x04host\x18\x03 \x01(\tR\x04host\x12\x16\n" +
+	"\x06script\x18\x04 \x01(\tR\x06script\x12\x1b\n" +
+	"\ttimeout_s\x18\x05 \x01(\x05R\btimeoutS\x12-\n" +
+	"\x13accept_new_host_key\x18\x06 \x01(\bR\x10acceptNewHostKey\x12\x19\n" +
+	"\bhost_key\x18\a \x01(\tR\ahostKey\x12,\n" +
+	"\x03env\x18\b \x03(\v2\x1a.rivet.v1.HostJob.EnvEntryR\x03env\x12\x1c\n" +
+	"\n" +
+	"ssh_wait_s\x18\t \x01(\x05R\bsshWaitS\x1a6\n" +
+	"\bEnvEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"i\n" +
+	"\rHostJobResult\x12\x15\n" +
+	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x0e\n" +
+	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x16\n" +
+	"\x06output\x18\x03 \x01(\tR\x06output\x12\x19\n" +
+	"\bhost_key\x18\x04 \x01(\tR\ahostKey2\x8a\x01\n" +
 	"\rRunnerService\x12A\n" +
 	"\bRegister\x12\x19.rivet.v1.RegisterRequest\x1a\x1a.rivet.v1.RegisterResponse\x126\n" +
 	"\aChannel\x12\x13.rivet.v1.RunnerMsg\x1a\x12.rivet.v1.PlaneMsg(\x010\x01B0Z.github.com/PavluninVladimir/rivet/pkg/protocolb\x06proto3"
@@ -3102,7 +3436,7 @@ func file_pkg_protocol_rivet_proto_rawDescGZIP() []byte {
 }
 
 var file_pkg_protocol_rivet_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 28)
+var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
 var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(StageResult_Stage)(0),   // 0: rivet.v1.StageResult.Stage
 	(DeployResult_Stage)(0),  // 1: rivet.v1.DeployResult.Stage
@@ -3114,26 +3448,30 @@ var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(*AgentEvent)(nil),       // 7: rivet.v1.AgentEvent
 	(*TranscriptChunk)(nil),  // 8: rivet.v1.TranscriptChunk
 	(*Usage)(nil),            // 9: rivet.v1.Usage
-	(*StageResult)(nil),      // 10: rivet.v1.StageResult
-	(*BlockedQuestion)(nil),  // 11: rivet.v1.BlockedQuestion
-	(*PlaneMsg)(nil),         // 12: rivet.v1.PlaneMsg
-	(*Context)(nil),          // 13: rivet.v1.Context
-	(*Ack)(nil),              // 14: rivet.v1.Ack
-	(*Assignment)(nil),       // 15: rivet.v1.Assignment
-	(*ModelEndpoint)(nil),    // 16: rivet.v1.ModelEndpoint
-	(*SessionLimits)(nil),    // 17: rivet.v1.SessionLimits
-	(*AgentRole)(nil),        // 18: rivet.v1.AgentRole
-	(*Policy)(nil),           // 19: rivet.v1.Policy
-	(*Check)(nil),            // 20: rivet.v1.Check
-	(*Answer)(nil),           // 21: rivet.v1.Answer
-	(*CancelTask)(nil),       // 22: rivet.v1.CancelTask
-	(*PauseRunner)(nil),      // 23: rivet.v1.PauseRunner
-	(*DeployJob)(nil),        // 24: rivet.v1.DeployJob
-	(*DeployResult)(nil),     // 25: rivet.v1.DeployResult
-	(*MonitorJob)(nil),       // 26: rivet.v1.MonitorJob
-	(*MonitorResult)(nil),    // 27: rivet.v1.MonitorResult
-	nil,                      // 28: rivet.v1.Assignment.AgentEnvEntry
-	nil,                      // 29: rivet.v1.ModelEndpoint.HeadersEntry
+	(*CriterionResult)(nil),  // 10: rivet.v1.CriterionResult
+	(*StageResult)(nil),      // 11: rivet.v1.StageResult
+	(*BlockedQuestion)(nil),  // 12: rivet.v1.BlockedQuestion
+	(*PlaneMsg)(nil),         // 13: rivet.v1.PlaneMsg
+	(*Context)(nil),          // 14: rivet.v1.Context
+	(*Ack)(nil),              // 15: rivet.v1.Ack
+	(*Assignment)(nil),       // 16: rivet.v1.Assignment
+	(*ModelEndpoint)(nil),    // 17: rivet.v1.ModelEndpoint
+	(*SessionLimits)(nil),    // 18: rivet.v1.SessionLimits
+	(*AgentRole)(nil),        // 19: rivet.v1.AgentRole
+	(*Policy)(nil),           // 20: rivet.v1.Policy
+	(*Check)(nil),            // 21: rivet.v1.Check
+	(*Answer)(nil),           // 22: rivet.v1.Answer
+	(*CancelTask)(nil),       // 23: rivet.v1.CancelTask
+	(*PauseRunner)(nil),      // 24: rivet.v1.PauseRunner
+	(*DeployJob)(nil),        // 25: rivet.v1.DeployJob
+	(*DeployResult)(nil),     // 26: rivet.v1.DeployResult
+	(*MonitorJob)(nil),       // 27: rivet.v1.MonitorJob
+	(*MonitorResult)(nil),    // 28: rivet.v1.MonitorResult
+	(*HostJob)(nil),          // 29: rivet.v1.HostJob
+	(*HostJobResult)(nil),    // 30: rivet.v1.HostJobResult
+	nil,                      // 31: rivet.v1.Assignment.AgentEnvEntry
+	nil,                      // 32: rivet.v1.ModelEndpoint.HeadersEntry
+	nil,                      // 33: rivet.v1.HostJob.EnvEntry
 }
 var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	5,  // 0: rivet.v1.RunnerMsg.hello:type_name -> rivet.v1.Hello
@@ -3141,37 +3479,41 @@ var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	7,  // 2: rivet.v1.RunnerMsg.event:type_name -> rivet.v1.AgentEvent
 	8,  // 3: rivet.v1.RunnerMsg.transcript:type_name -> rivet.v1.TranscriptChunk
 	9,  // 4: rivet.v1.RunnerMsg.usage:type_name -> rivet.v1.Usage
-	10, // 5: rivet.v1.RunnerMsg.stage_result:type_name -> rivet.v1.StageResult
-	11, // 6: rivet.v1.RunnerMsg.blocked:type_name -> rivet.v1.BlockedQuestion
-	25, // 7: rivet.v1.RunnerMsg.deploy_result:type_name -> rivet.v1.DeployResult
-	27, // 8: rivet.v1.RunnerMsg.monitor_result:type_name -> rivet.v1.MonitorResult
-	0,  // 9: rivet.v1.StageResult.stage:type_name -> rivet.v1.StageResult.Stage
-	14, // 10: rivet.v1.PlaneMsg.ack:type_name -> rivet.v1.Ack
-	15, // 11: rivet.v1.PlaneMsg.assign:type_name -> rivet.v1.Assignment
-	21, // 12: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
-	22, // 13: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
-	23, // 14: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
-	24, // 15: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
-	13, // 16: rivet.v1.PlaneMsg.context:type_name -> rivet.v1.Context
-	26, // 17: rivet.v1.PlaneMsg.monitor:type_name -> rivet.v1.MonitorJob
-	0,  // 18: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
-	20, // 19: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
-	19, // 20: rivet.v1.Assignment.policy:type_name -> rivet.v1.Policy
-	28, // 21: rivet.v1.Assignment.agent_env:type_name -> rivet.v1.Assignment.AgentEnvEntry
-	18, // 22: rivet.v1.Assignment.role:type_name -> rivet.v1.AgentRole
-	16, // 23: rivet.v1.Assignment.endpoint:type_name -> rivet.v1.ModelEndpoint
-	17, // 24: rivet.v1.ModelEndpoint.limits:type_name -> rivet.v1.SessionLimits
-	29, // 25: rivet.v1.ModelEndpoint.headers:type_name -> rivet.v1.ModelEndpoint.HeadersEntry
-	1,  // 26: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
-	2,  // 27: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
-	4,  // 28: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
-	3,  // 29: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
-	12, // 30: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
-	29, // [29:31] is the sub-list for method output_type
-	27, // [27:29] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	11, // 5: rivet.v1.RunnerMsg.stage_result:type_name -> rivet.v1.StageResult
+	12, // 6: rivet.v1.RunnerMsg.blocked:type_name -> rivet.v1.BlockedQuestion
+	26, // 7: rivet.v1.RunnerMsg.deploy_result:type_name -> rivet.v1.DeployResult
+	28, // 8: rivet.v1.RunnerMsg.monitor_result:type_name -> rivet.v1.MonitorResult
+	30, // 9: rivet.v1.RunnerMsg.host_job_result:type_name -> rivet.v1.HostJobResult
+	0,  // 10: rivet.v1.StageResult.stage:type_name -> rivet.v1.StageResult.Stage
+	10, // 11: rivet.v1.StageResult.criteria:type_name -> rivet.v1.CriterionResult
+	15, // 12: rivet.v1.PlaneMsg.ack:type_name -> rivet.v1.Ack
+	16, // 13: rivet.v1.PlaneMsg.assign:type_name -> rivet.v1.Assignment
+	22, // 14: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
+	23, // 15: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
+	24, // 16: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
+	25, // 17: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
+	14, // 18: rivet.v1.PlaneMsg.context:type_name -> rivet.v1.Context
+	27, // 19: rivet.v1.PlaneMsg.monitor:type_name -> rivet.v1.MonitorJob
+	29, // 20: rivet.v1.PlaneMsg.host_job:type_name -> rivet.v1.HostJob
+	0,  // 21: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
+	21, // 22: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
+	20, // 23: rivet.v1.Assignment.policy:type_name -> rivet.v1.Policy
+	31, // 24: rivet.v1.Assignment.agent_env:type_name -> rivet.v1.Assignment.AgentEnvEntry
+	19, // 25: rivet.v1.Assignment.role:type_name -> rivet.v1.AgentRole
+	17, // 26: rivet.v1.Assignment.endpoint:type_name -> rivet.v1.ModelEndpoint
+	18, // 27: rivet.v1.ModelEndpoint.limits:type_name -> rivet.v1.SessionLimits
+	32, // 28: rivet.v1.ModelEndpoint.headers:type_name -> rivet.v1.ModelEndpoint.HeadersEntry
+	1,  // 29: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
+	33, // 30: rivet.v1.HostJob.env:type_name -> rivet.v1.HostJob.EnvEntry
+	2,  // 31: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
+	4,  // 32: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
+	3,  // 33: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
+	13, // 34: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
+	33, // [33:35] is the sub-list for method output_type
+	31, // [31:33] is the sub-list for method input_type
+	31, // [31:31] is the sub-list for extension type_name
+	31, // [31:31] is the sub-list for extension extendee
+	0,  // [0:31] is the sub-list for field type_name
 }
 
 func init() { file_pkg_protocol_rivet_proto_init() }
@@ -3189,10 +3531,11 @@ func file_pkg_protocol_rivet_proto_init() {
 		(*RunnerMsg_Blocked)(nil),
 		(*RunnerMsg_DeployResult)(nil),
 		(*RunnerMsg_MonitorResult)(nil),
+		(*RunnerMsg_HostJobResult)(nil),
 	}
 	file_pkg_protocol_rivet_proto_msgTypes[4].OneofWrappers = []any{}
 	file_pkg_protocol_rivet_proto_msgTypes[7].OneofWrappers = []any{}
-	file_pkg_protocol_rivet_proto_msgTypes[10].OneofWrappers = []any{
+	file_pkg_protocol_rivet_proto_msgTypes[11].OneofWrappers = []any{
 		(*PlaneMsg_Ack)(nil),
 		(*PlaneMsg_Assign)(nil),
 		(*PlaneMsg_Answer)(nil),
@@ -3201,6 +3544,7 @@ func file_pkg_protocol_rivet_proto_init() {
 		(*PlaneMsg_Deploy)(nil),
 		(*PlaneMsg_Context)(nil),
 		(*PlaneMsg_Monitor)(nil),
+		(*PlaneMsg_HostJob)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -3208,7 +3552,7 @@ func file_pkg_protocol_rivet_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_protocol_rivet_proto_rawDesc), len(file_pkg_protocol_rivet_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   28,
+			NumMessages:   32,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

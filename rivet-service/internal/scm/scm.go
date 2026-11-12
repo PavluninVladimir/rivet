@@ -88,6 +88,52 @@ var ErrBranchNotFound = errors.New("ветки нет в репозитории"
 // защита ветки, обязательные проверки и неизвестный ответ — обычная ошибка.
 var ErrMergeConflict = errors.New("PR конфликтует с базовой веткой")
 
+// ErrUnauthorized — хостинг не принял учётные данные (401): токен отозван,
+// просрочен или неверен (спека scm-integration «Учётные данные хостинга»).
+var ErrUnauthorized = errors.New("хостинг не принимает учётные данные")
+
+// ErrForbidden — хостинг отказал в доступе (403, не лимит запросов). Сам по
+// себе отказ неоднозначен: у токена отобрали доступ к репозиторию или ему
+// не хватает прав на одну операцию. Различает их проверка подключения.
+var ErrForbidden = errors.New("хостинг отказал в доступе")
+
+// ErrNotFound — хостинг не нашёл объект операции (404). На приватный
+// репозиторий, к которому у токена отобрали доступ, GitHub отвечает именно
+// так, поэтому 404 на операции без собственного смысла 404 сверяется с
+// проверкой подключения. Операции, у которых 404 значит «нет ветки» или
+// «нет файла», разбирают его сами и сюда не попадают.
+var ErrNotFound = errors.New("хостинг не нашёл объект")
+
+// AccessRefused — ответ хостинга мог означать, что учётные данные не
+// работают (401, 403, 404). Решает проверка подключения.
+func AccessRefused(err error) bool {
+	return errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrNotFound)
+}
+
+// hostError — неуспешный ответ хостинга. Текст прежний («github create PR:
+// 403: …»), а отказ по авторизации узнаётся через errors.Is.
+type hostError struct {
+	msg  string
+	kind error
+}
+
+func (e *hostError) Error() string { return e.msg }
+func (e *hostError) Unwrap() error { return e.kind }
+
+// statusErr — ошибка операции op по неуспешному коду ответа хостинга.
+func statusErr(op string, code int, raw []byte) error {
+	msg := fmt.Sprintf("%s: %d: %s", op, code, clip(raw))
+	switch code {
+	case http.StatusUnauthorized:
+		return &hostError{msg: msg, kind: ErrUnauthorized}
+	case http.StatusForbidden:
+		return &hostError{msg: msg, kind: ErrForbidden}
+	case http.StatusNotFound:
+		return &hostError{msg: msg, kind: ErrNotFound}
+	}
+	return errors.New(msg)
+}
+
 // MaxResponseBytes — лимит чтения тела ответа хостинга.
 const MaxResponseBytes = 4 << 20
 
@@ -204,6 +250,11 @@ func (f *Factory) For(provider Provider, baseURL, token string) (Adapter, error)
 	if f.Force || token == "" {
 		if f.Fallback == nil {
 			return nil, errors.New("у проекта нет учётных данных, а запасной адаптер не настроен")
+		}
+		// Fake стенда видит токен проекта: так отзыв токена отличается от
+		// его замены (RIVET_FAKE_SCM_REVOKED).
+		if fk, ok := f.Fallback.(*Fake); ok && token != "" {
+			return fk.ForToken(token), nil
 		}
 		return f.Fallback, nil
 	}

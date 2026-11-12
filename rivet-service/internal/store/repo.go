@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -18,12 +19,12 @@ import (
 // Подключение репозитория к проекту (change add-repo-onboarding): учётные
 // данные хранятся шифротекстом, наружу отдаются владелец и префикс.
 
-const credCols = `id::text, provider, base_url, owner, token_prefix, state, checked_at, created_at`
+const credCols = `id::text, provider, base_url, owner, token_prefix, state, state_reason, state_message, checked_at, created_at`
 
 func scanCredential(row pgx.Row) (domain.ScmCredential, error) {
 	var c domain.ScmCredential
 	err := row.Scan(&c.ID, &c.Provider, &c.BaseURL, &c.Owner, &c.TokenPrefix,
-		&c.State, &c.CheckedAt, &c.Created)
+		&c.State, &c.StateReason, &c.StateMessage, &c.CheckedAt, &c.Created)
 	return c, err
 }
 
@@ -159,6 +160,42 @@ func (s *Store) ProjectToken(ctx context.Context, projectID string, box *secretb
 	return box.Open(enc)
 }
 
+// ProjectCredentialState — токен проекта, id и состояние его учётных данных
+// одним запросом: адаптер конвейера отмечает итог операций именно по этим
+// учётным данным. Пустой токен без ошибки — у проекта нет своих.
+type ProjectCredentialState struct {
+	Token  string
+	CredID string
+	State  string
+}
+
+func (s *Store) ProjectTokenState(ctx context.Context, projectID string, box *secretbox.Box) (ProjectCredentialState, error) {
+	var enc []byte
+	var out ProjectCredentialState
+	err := s.Pool.QueryRow(ctx, `
+		SELECT c.token_enc, c.id::text, c.state FROM projects p
+		JOIN scm_credentials c ON c.id = p.credential_id
+		WHERE p.id = $1`, projectID).Scan(&enc, &out.CredID, &out.State)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ProjectCredentialState{}, nil
+	}
+	if err != nil {
+		return ProjectCredentialState{}, err
+	}
+	out.Token, err = box.Open(enc)
+	return out, err
+}
+
+// ProjectCredentialsInvalid — учётные данные проекта нерабочие: новые
+// стадии проекта не запускаются.
+func (s *Store) ProjectCredentialsInvalid(ctx context.Context, projectID string) (bool, error) {
+	var invalid bool
+	err := s.Pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM projects p JOIN scm_credentials c ON c.id = p.credential_id
+			WHERE p.id = $1 AND c.state = 'invalid')`, projectID).Scan(&invalid)
+	return invalid, err
+}
+
 // ProjectCredential — метаданные учётных данных проекта (без секрета).
 func (s *Store) ProjectCredential(ctx context.Context, projectID string) (domain.ScmCredential, error) {
 	c, err := scanCredential(s.Pool.QueryRow(ctx, `
@@ -209,17 +246,161 @@ func (s *Store) ReplaceCredential(ctx context.Context, projectID string, conn Ne
 				return err
 			}
 		}
-		return nil
+		// Новые учётные данные проверены: эскалация о нерабочих снимается,
+		// конвейер проекта продолжает работу.
+		return resolveProjectEscalationTx(ctx, tx, projectID, domain.AttScmCredentials)
 	})
 }
 
-// SetCredentialState отмечает учётные данные рабочими или отозванными,
-// чтобы нерабочее подключение было видно до запуска задач.
-func (s *Store) SetCredentialState(ctx context.Context, projectID, state string) error {
-	_, err := s.Pool.Exec(ctx, `
-		UPDATE scm_credentials SET state=$2, checked_at=now()
-		WHERE id = (SELECT credential_id FROM projects WHERE id=$1)`, projectID, state)
+// Состояния учётных данных хостинга.
+const (
+	CredentialOK      = "ok"
+	CredentialInvalid = "invalid"
+)
+
+// CredentialMark — наблюдение за учётными данными проекта: состояние,
+// причина (код и текст) у нерабочего и что его выявило (операция хостинга,
+// git на runner'е, повторная проверка).
+type CredentialMark struct {
+	State   string
+	Reason  string
+	Message string
+	Source  string
+}
+
+// MarkCredential меняет состояние учётных данных проекта одной
+// транзакцией. Переход в нерабочее пишет событие project.credentials и
+// открывает эскалацию SCM_CREDENTIALS, возврат в рабочее — событие и
+// закрытие эскалации. Повтор того же состояния обновляет причину, время
+// проверки и текст открытой эскалации. changed — состояние сменилось.
+// credID — учётные данные, которыми шла операция: если их уже заменили,
+// наблюдение устарело и ничего не меняет.
+func (s *Store) MarkCredential(ctx context.Context, projectID, credID string, m CredentialMark) (changed bool, err error) {
+	if m.State != CredentialOK && m.State != CredentialInvalid {
+		return false, fmt.Errorf("недопустимое состояние учётных данных %q", m.State)
+	}
+	if m.State == CredentialOK {
+		m.Reason, m.Message = "", ""
+	}
+	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var old, oldMessage, provider, repoPath string
+		err := tx.QueryRow(ctx, `
+			SELECT c.state, c.state_message, p.provider, p.repo_path FROM projects p
+			JOIN scm_credentials c ON c.id = p.credential_id
+			WHERE p.id = $1 AND c.id = $2::uuid FOR UPDATE OF c`, projectID, credID).Scan(&old, &oldMessage, &provider, &repoPath)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE scm_credentials SET state=$2, state_reason=$3, state_message=$4, checked_at=now()
+			WHERE id=$1::uuid`, credID, m.State, m.Reason, clipRunes(m.Message, 500)); err != nil {
+			return err
+		}
+		// Причина нерабочего подключения сменилась: текст открытой
+		// эскалации тот же, что в настройках.
+		if old == CredentialInvalid && m.State == CredentialInvalid && clipRunes(m.Message, 500) != oldMessage {
+			_, err := tx.Exec(ctx, `
+				UPDATE attention SET message=$3
+				WHERE project_id=$1 AND reason=$2 AND status <> 'resolved'
+				  AND task_id IS NULL AND deployment_id IS NULL`,
+				projectID, string(domain.AttScmCredentials), credentialEscalation(m.Message))
+			return err
+		}
+		// Событие и эскалация — только на переходе между рабочим и
+		// нерабочим: unchecked → ok ничего не сообщает.
+		if old == m.State || (old != CredentialInvalid && m.State != CredentialInvalid) {
+			return nil
+		}
+		changed = true
+		payload := map[string]any{"state": m.State, "provider": provider, "repo_path": repoPath, "source": m.Source}
+		text := "подключение к хостингу снова работает — конвейер проекта продолжается"
+		if m.State == CredentialInvalid {
+			payload["reason"], payload["message"] = m.Reason, m.Message
+			text = "учётные данные хостинга не работают: " + m.Message +
+				" — конвейер проекта остановлен до замены токена"
+		}
+		if _, err := appendEvent(ctx, tx, EventInput{
+			ActorKind: domain.ActorSystem, Type: "project.credentials",
+			ProjectID: projectID, Text: text, Payload: payload,
+		}); err != nil {
+			return err
+		}
+		if m.State == CredentialOK {
+			return resolveProjectEscalationTx(ctx, tx, projectID, domain.AttScmCredentials)
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO attention (project_id, task_id, reason, message)
+			VALUES ($1, NULL, $2, $3)
+			ON CONFLICT DO NOTHING`, projectID, string(domain.AttScmCredentials), credentialEscalation(m.Message))
+		return err
+	})
+	return changed, err
+}
+
+// credentialEscalation — текст эскалации о нерабочих учётных данных.
+func credentialEscalation(reason string) string {
+	return "учётные данные хостинга перестали действовать: " + reason +
+		". Замените токен в настройках проекта: задачи продолжат конвейер, попытки не расходуются"
+}
+
+// TouchCredentialRecheck отмечает попытку повторной проверки при любом её
+// исходе: очередь проверок движется и при недоступном хостинге.
+func (s *Store) TouchCredentialRecheck(ctx context.Context, credID string) error {
+	_, err := s.Pool.Exec(ctx, `UPDATE scm_credentials SET recheck_at=now() WHERE id=$1::uuid`, credID)
 	return err
+}
+
+// resolveProjectEscalationTx закрывает открытую эскалацию уровня проекта
+// с указанной причиной внутри транзакции.
+func resolveProjectEscalationTx(ctx context.Context, tx pgx.Tx, projectID string, reason domain.AttentionReason) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE attention SET status='resolved', resolved_at=now()
+		WHERE project_id=$1 AND reason=$2 AND status <> 'resolved'
+		  AND task_id IS NULL AND deployment_id IS NULL`, projectID, string(reason))
+	return err
+}
+
+// InvalidCredentialProjects — проекты с нерабочими учётными данными: им
+// ничего не назначается, пока подключение не восстановится.
+func (s *Store) InvalidCredentialProjects(ctx context.Context) ([]string, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT p.id::text FROM projects p
+		JOIN scm_credentials c ON c.id = p.credential_id
+		WHERE c.state = 'invalid' ORDER BY p.id`)
+	if err != nil {
+		return nil, err
+	}
+	return collectIDs(rows)
+}
+
+// CredentialsToRecheck — проекты с нерабочими учётными данными, которые не
+// проверялись дольше every: повторная проверка возвращает их в работу, если
+// доступ восстановили на хостинге без замены токена.
+func (s *Store) CredentialsToRecheck(ctx context.Context, every time.Duration, limit int) ([]domain.Project, error) {
+	rows, err := s.Pool.Query(ctx, `
+		SELECT `+projectCols+` FROM projects WHERE id IN (
+			SELECT p.id FROM projects p
+			JOIN scm_credentials c ON c.id = p.credential_id
+			WHERE c.state = 'invalid'
+			  AND COALESCE(GREATEST(c.recheck_at, c.checked_at), 'epoch') < now() - make_interval(secs => $1)
+			ORDER BY COALESCE(GREATEST(c.recheck_at, c.checked_at), 'epoch') LIMIT $2)
+		ORDER BY created_at`, every.Seconds(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Project
+	for rows.Next() {
+		p, err := scanProject(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }
 
 // SetProjectRepoMeta обновляет метаданные подключения (ветка по умолчанию).

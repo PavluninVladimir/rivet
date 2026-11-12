@@ -331,7 +331,14 @@ func nextRoleAction(msgs []nativeMsg) nativeAction {
 		return finishAct("ok", "Задание шага выполнено.")
 
 	case "reviewer":
-		final := finishAct("ok", "Просмотрел изменения, замечаний нет.")
+		summary := "Просмотрел изменения, замечаний нет."
+		for i := 1; i <= criteriaCount(task); i++ {
+			summary += fmt.Sprintf("\nCRITERION %d: OK", i)
+		}
+		if step >= 2 && has("[e2e-criterion-fail]") && reviewPasses(task, readResult(msgs, "e2e-result.txt")) < 2 {
+			summary += "\nCRITERION 1: FAIL нужен второй проход реализации"
+		}
+		final := finishAct("ok", summary)
 		if step >= 2 && has("[e2e-native-changes]") {
 			if reviewPasses(task, readResult(msgs, "e2e-result.txt")) < 2 {
 				final = finishAct("changes", "e2e-ревьюер просит поправить: нужен второй проход")
@@ -417,4 +424,20 @@ func describeActions() []nativeAction {
 	dir := architecture.DefaultDir
 	return append(acts, nativeAction{tool: "run", args: map[string]any{"command": `"$RIVET_RUNNER_BIN" architecture views -dir ` + dir +
 		` && "$RIVET_RUNNER_BIN" architecture validate -dir ` + dir}})
+}
+
+// criteriaCount читает нумерованный блок reviewPrompt, а не произвольный текст задачи.
+func criteriaCount(task string) int {
+	_, rest, ok := strings.Cut(task, "# Acceptance criteria\n")
+	if !ok {
+		return 0
+	}
+	block, _, _ := strings.Cut(rest, "\n\n")
+	count := 0
+	for _, line := range strings.Split(block, "\n") {
+		if strings.HasPrefix(line, fmt.Sprintf("%d. ", count+1)) {
+			count++
+		}
+	}
+	return count
 }

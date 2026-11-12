@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +18,8 @@ import (
 
 	"github.com/PavluninVladimir/rivet/internal/blob"
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/infra"
+	"github.com/PavluninVladimir/rivet/internal/llm"
 	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/scm"
@@ -52,6 +53,12 @@ type Engine struct {
 	mu sync.Mutex
 	// контекст следующего шага задачи (вывод тестов, замечания review)
 	stageContext map[string]string
+	// prWait — когда снова пробовать создать PR задаче, которая вернулась
+	// на review без PR (fix-pr-without-test-step).
+	prWait map[string]prWaitState
+	// prMergeRetryAt — когда снова пробовать создать PR задачам, которые
+	// ждут на merge без PR (retryMergePRs).
+	prMergeRetryAt time.Time
 	// транскрипты открытых сессий по session_id
 	transcripts map[string][]byte
 	// открытые сессии: session_id → task_id (у задачи может идти несколько
@@ -108,11 +115,26 @@ type Engine struct {
 	opsOnce sync.Once
 	// OpsComplete подменяет вызов модели в тестах (connID, model, prompt).
 	OpsComplete func(ctx context.Context, connID, model, prompt string) (string, error)
+	// CheckKey подменяет в тестах проверку ключа подключения control
+	// plane'ом после отказа провайдера во время стадии (список моделей).
+	CheckKey func(ctx context.Context, cl llm.Client) error
 	// URLPolicy — какие адреса доступны проверкам URL control plane'ом
 	// (RIVET_ALLOW_PRIVATE_URLS). Задаётся до первой проверки.
 	URLPolicy URLPolicy
+	// Infra: провайдеры инфраструктуры хостов окружений
+	// (add-environment-provisioning); nil: только встроенные с адресами
+	// по умолчанию.
+	Infra     *infra.Factory
 	urlOnce   sync.Once
 	urlClient *http.Client
+	// credRecheckAt и credRecheckRunning — последний запуск и признак
+	// идущей повторной проверки нерабочих учётных данных хостинга
+	// (fix-credential-state); под mu.
+	credRecheckAt      time.Time
+	credRecheckRunning bool
+	// credProbedOK — когда учётные данные (по id) последний раз прошли
+	// проверку подключения после неоднозначного отказа; под mu.
+	credProbedOK map[string]time.Time
 }
 
 func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, heartbeat time.Duration) *Engine {
@@ -153,6 +175,8 @@ func (e *Engine) Run(ctx context.Context) {
 
 // Tick — один проход планировщика: протухшие runner'ы, пересчёт DAG, назначения.
 func (e *Engine) Tick(ctx context.Context) error {
+	// В проходе PR создаётся одной попыткой без пауз (tickContext).
+	ctx = tickContext(ctx)
 	// Наблюдение и задания control plane идут и при сбое тика конвейера.
 	defer e.tickOps(ctx)
 	lost, lostDeps, err := e.St.MarkStaleRunnersOffline(ctx, int(e.HeartbeatTimeout.Seconds()))
@@ -191,6 +215,15 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("budget: %w", err)
 	}
+	// Нерабочие учётные данные хостинга (fix-credential-state): проекту
+	// ничего не назначается до восстановления подключения — стадия упала
+	// бы на clone или push и потратила попытку.
+	credExcluded, err := e.credentialExclusions(ctx)
+	if err != nil {
+		return fmt.Errorf("credentials: %w", err)
+	}
+	excluded = append(excluded, credExcluded...)
+	e.recheckCredentials(ctx)
 	// Бюджет Epic (спека orchestration «Бюджет Epic»): исчерпанные Epic
 	// исключаются из назначений до решения человека (поднять/снять бюджет).
 	excludedEpics, err := e.epicBudgetExclusions(ctx)
@@ -210,30 +243,61 @@ func (e *Engine) Tick(ctx context.Context) error {
 	if err := e.enterReady(ctx, excluded, excludedEpics); err != nil {
 		return err
 	}
+	e.retryMergePRs(ctx)
 	// Runner'ы и запуски, чья стадия в этом тике не стартовала, исключаются
 	// до конца тика: остальные назначения идут дальше, а цикл не крутится
 	// на недоступном runner'е.
+	// Подключения моделей до назначений (fix-agent-without-connection):
+	// запуски без рабочего подключения ждут, не занимая runner'ов, агенты
+	// команды без рабочей модели в этом проходе не назначаются.
+	bad := e.screenConnections(ctx, excluded, excludedEpics)
+	if bad == nil {
+		bad = map[string]string{}
+	}
+	badAgents := make([]string, 0, len(bad))
+	for id := range bad {
+		badAgents = append(badAgents, id)
+	}
 	var badRunners []string
 	var badRuns []int64
+	misses := map[int64]agentMiss{}
 	for {
-		a, ok, err := e.St.AssignRunExcept(ctx, excluded, excludedEpics, badRunners, badRuns)
+		a, ok, err := e.St.AssignRunExcept(ctx, excluded, excludedEpics, badRunners, badRuns, badAgents)
 		if err != nil {
 			return err
 		}
 		if !ok {
 			break
 		}
-		if !e.dispatchAssigned(ctx, a) {
+		started, mc := e.dispatchAssigned(ctx, a)
+		// Отказ по модели агента откладывается после прохода, только если
+		// он последний исход запуска: стартовавший запуск или запуск, не
+		// стартовавший по другой причине, свою причину уже получил.
+		delete(misses, a.Run.ID)
+		switch {
+		case started:
+		case mc != nil && mc.Agent != "":
+			// Модель агента не работает: запуск возьмёт другой агент роли,
+			// а если не возьмёт — подождёт с причиной после прохода.
+			badAgents = append(badAgents, mc.Agent)
+			bad[mc.Agent] = mc.Reason
+			misses[a.Run.ID] = agentMiss{run: a.Run, err: mc}
+		case mc != nil:
+			// Запуск ждёт подключения, runner свободен для других задач.
+			badRuns = append(badRuns, a.Run.ID)
+		default:
 			badRunners = append(badRunners, a.Runner.ID)
 			badRuns = append(badRuns, a.Run.ID)
 		}
 	}
-	if err := e.markWaiting(ctx, excluded, excludedEpics); err != nil {
+	e.deferAgentMisses(ctx, misses)
+	if err := e.markWaiting(ctx, excluded, excludedEpics, bad); err != nil {
 		return err
 	}
 	if err := e.reconcileSteps(ctx); err != nil {
 		return err
 	}
+	e.resumeAwaitingCredentials(ctx)
 	return e.tickDeployments(ctx)
 }
 
@@ -372,12 +436,20 @@ func (e *Engine) epicBudgetExclusions(ctx context.Context) ([]string, error) {
 // SCMFor — адаптер хостинга проекта: провайдер, инстанс и учётные данные
 // живут у проекта (design add-repo-onboarding, решение 5). Проект без
 // собственных учётных данных работает на запасном адаптере установки.
+//
+// Итог каждой операции отмечается в состоянии учётных данных проекта: отказ
+// по авторизации делает их нерабочими (ошибка обёрнута в
+// ErrSCMCredentials), успех возвращает в работу (fix-credential-state).
 func (e *Engine) SCMFor(ctx context.Context, p domain.Project) (scm.Adapter, error) {
-	token, err := e.St.ProjectToken(ctx, p.ID, e.Box)
+	cred, err := e.St.ProjectTokenState(ctx, p.ID, e.Box)
 	if err != nil {
 		return nil, fmt.Errorf("учётные данные проекта %s: %w", p.ID, err)
 	}
-	return e.Adapters.For(scm.Provider(p.Provider), p.BaseURL, token)
+	a, err := e.Adapters.For(scm.Provider(p.Provider), p.BaseURL, cred.Token)
+	if err != nil {
+		return nil, err
+	}
+	return e.track(a, p, cred), nil
 }
 
 func (e *Engine) projectOf(ctx context.Context, task domain.Task) (domain.Project, domain.Epic, error) {
@@ -415,38 +487,13 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 		slog.Error("dispatch: project", "task", task.ID, "err", err)
 		return "", false, fmt.Errorf("проект задачи: %w", err)
 	}
+	if e.credentialsInvalid(ctx, p.ID) {
+		return "", false, ErrSCMCredentials
+	}
 	if runner.Agent == "" {
 		if r, err := e.St.GetRunner(ctx, runner.ID); err == nil {
 			runner = r
 		}
-	}
-	criteria := make([]string, 0, len(task.Criteria))
-	for _, c := range task.Criteria {
-		criteria = append(criteria, c.Text)
-	}
-	checks := make([]*pb.Check, 0, len(p.Checks))
-	for _, c := range p.Checks {
-		checks = append(checks, &pb.Check{Name: c.Name, Cmd: c.Cmd})
-	}
-	// Проверка архитектуры (add-architecture-c4): у задачи описания только
-	// она, у остальных добавляется, если у проекта есть описание.
-	checks = e.architectureChecks(ctx, task, p, checks)
-	if task.Kind == domain.KindArchitecture && step.Kind == policy.StepTest {
-		// Сессии ещё нет: отказ откладывает шаг без «зависшей» сессии.
-		if err := e.recordCheckedSHA(ctx, task, p); err != nil {
-			slog.Warn("dispatch: проверенная вершина задачи описания", "task", task.ID, "err", err)
-			return "", false, err
-		}
-	}
-	// Контекст стадии: замечания при исправлении, diff и отчёт проверок
-	// ревьюеру. Читается без удаления: параллельным участникам нужен один
-	// и тот же контекст, сбрасывает его исход шага.
-	extra := ""
-	switch {
-	case step.Kind == policy.StepReview:
-		extra = e.reviewContext(ctx, task)
-	case step.Kind == policy.StepCode && entry == policy.OutcomeChanges:
-		extra = e.peekStageContext(task.ID)
 	}
 	// Политика проекта едет вместе с назначением: у runner'а нет другого
 	// источника, рабочая копия на исполнение не влияет (спека access-policy
@@ -472,59 +519,57 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	// модели и учётных данных runner'у»): модель участника, иначе
 	// переопределение проекта, иначе модель по умолчанию; окружение и
 	// аргументы по шаблону, секреты по режиму профиля и каналу runner'а.
-	model := run.Model
-	// Модель агента команды обязательна (планировщик подобрал runner с ней);
-	// модель шаблона или переопределение проекта — предпочтение: берётся,
-	// если runner её поддерживает.
-	switch {
-	case model != "":
-	case perf.agent != nil && perf.agent.Model != "":
-		model = perf.agent.Model
-	case run.PrefModel != "" && (contains(runner.Models, run.PrefModel) || runner.Model == run.PrefModel):
-		model = run.PrefModel
-	}
-	var endpoint *store.ModelEndpoint
+	model := stageModel(run, perf, runner)
 	// Агенту Rivet (feature native) уходит endpoint модели: подключение,
 	// окно, пределы ответа, цены, лимиты, ключ по режиму секретов и каналу
-	// runner'а.
-	if slices.Contains(runner.Features, featureNative) {
-		agentID := store.AgentRivet
-		var override *policy.AgentModel
-		if am, ok := agentModels[agentID]; ok {
-			override = &am
-		}
-		explicit := model
-		// Модель агента команды — пара с подключением: привязка ищется по
-		// паре, а не по одному имени модели (одна модель может быть у двух
-		// подключений).
-		if perf.agent != nil && perf.agent.ConnectionID != "" && perf.agent.Model != "" && run.Model == "" {
-			override = &policy.AgentModel{ConnectionID: perf.agent.ConnectionID, Model: perf.agent.Model}
-			explicit = ""
-		}
-		prof, binding, ok, rerr := e.St.ResolveAgentModel(ctx, agentID, explicit, override)
-		if rerr == nil && ok && explicit == "" && perf.agent != nil && perf.agent.Model != "" && binding.Model != perf.agent.Model {
-			// Пары нет в привязках профиля runner'а: модель — по имени.
-			prof, binding, ok, rerr = e.St.ResolveAgentModel(ctx, agentID, perf.agent.Model, nil)
-		}
-		if rerr != nil {
-			slog.Error("dispatch: профиль агента", "agent", agentID, "err", rerr)
-		} else if ok {
-			include := prof.Secrets == "always" || (prof.Secrets == "secure" && runner.Secure)
-			ep, berr := e.St.BuildModelEndpoint(ctx, prof, binding, e.Box, include)
-			if berr != nil {
-				slog.Error("dispatch: подключение модели", "agent", agentID, "err", berr)
-			} else {
-				endpoint = &ep
-				if binding.Model != "" {
-					model = binding.Model
-				}
-			}
+	// runner'а. Без рабочего подключения стадия не назначается: сессии ещё
+	// нет, задача ждёт с причиной (fix-agent-without-connection). Проверка
+	// идёт раньше обращений к хостингу (задача описания архитектуры).
+	endpoint, model, err := e.stageEndpoint(ctx, run, perf, runner, agentModels, model, stage)
+	if err != nil {
+		return "", false, err
+	}
+	criteria := make([]string, 0, len(task.Criteria))
+	for _, c := range task.Criteria {
+		criteria = append(criteria, c.Text)
+	}
+	checks := make([]*pb.Check, 0, len(p.Checks))
+	for _, c := range p.Checks {
+		checks = append(checks, &pb.Check{Name: c.Name, Cmd: c.Cmd})
+	}
+	// Проверка архитектуры (add-architecture-c4): у задачи описания только
+	// она, у остальных добавляется, если у проекта есть описание.
+	checks = e.architectureChecks(ctx, task, p, checks)
+	if task.Kind == domain.KindArchitecture && step.Kind == policy.StepTest {
+		// Сессии ещё нет: отказ откладывает шаг без «зависшей» сессии.
+		if err := e.recordCheckedSHA(ctx, task, p); err != nil {
+			slog.Warn("dispatch: проверенная вершина задачи описания", "task", task.ID, "err", err)
+			return "", false, err
 		}
 	}
+	// Контекст стадии: замечания при исправлении, diff и отчёт проверок
+	// ревьюеру. Читается без удаления: параллельным участникам нужен один
+	// и тот же контекст, сбрасывает его исход шага.
+	extra := ""
+	switch {
+	case step.Kind == policy.StepReview:
+		if extra, err = e.reviewContext(ctx, task); err != nil {
+			return "", false, err
+		}
+	case step.Kind == policy.StepCode && entry == policy.OutcomeChanges:
+		extra = e.peekStageContext(task.ID)
+	}
 	// Модель назначения пишется отдельно от явной модели участника: при
-	// повторном назначении она не станет требованием к runner'у.
-	if model != "" {
-		if err := e.St.SetRunModel(ctx, run.ID, model); err != nil {
+	// повторном назначении она не станет требованием к runner'у. Вместе с
+	// ней — подключение и признак передачи ключа каталога: по ним
+	// разбирается отказ провайдера во время стадии.
+	var connID string
+	var catalogKey bool
+	if endpoint != nil {
+		connID, catalogKey = endpoint.ConnectionID, endpoint.SecretsIncluded
+	}
+	if model != "" || connID != "" {
+		if err := e.St.SetRunAssignment(ctx, run.ID, model, connID, catalogKey); err != nil {
 			slog.Error("dispatch: модель запуска", "run", run.ID, "err", err)
 		}
 	}
@@ -818,6 +863,22 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 	if !ok {
 		return fmt.Errorf("шаг %q запуска не найден в снимке процесса задачи %s", run.StepID, task.ID)
 	}
+	// Git на runner'е отклонён хостингом по авторизации (fix-credential-state):
+	// если проверка подключения подтверждает нерабочие учётные данные,
+	// запуск ждёт их восстановления без вердикта, попытка не расходуется.
+	if sr.Verdict == verdictSCMAuth {
+		handled, err := e.runnerAuthFailure(ctx, task, run, runnerID, sr.Detail)
+		if err != nil || handled {
+			return err
+		}
+		// Отзыв не подтвердился: сбой git разбирается, как раньше. На шаге
+		// test это сбой инфраструктуры (повтор без расхода попытки), на
+		// остальных — обычный неуспех стадии.
+		sr.Verdict = ""
+		if step.Kind == policy.StepTest {
+			sr.Verdict = verdictInfraError
+		}
+	}
 	// Сбой инфраструктуры шага test (add-agent-roles, add-native-agent):
 	// git, push, падение тестировщика, проверки без песочницы или упавшие
 	// из-за её окружения — не замечания разработчику. Шаг повторяется без
@@ -839,6 +900,40 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 		}
 	}
 	verdict := verdictOf(step.Kind, sr.Ok, sr.Verdict)
+	var reports []store.CriteriaReport
+	if step.Kind == policy.StepReview && sr.Stage == pb.StageResult_REVIEW && sr.Verdict == "" {
+		report := store.CriteriaReport{Pass: run.Pass, By: runnerID}
+		var failed []string
+		indexed := map[int]*pb.CriterionResult{}
+		for _, c := range sr.Criteria {
+			if c != nil && c.Index > 0 && int(c.Index) <= len(task.Criteria) {
+				indexed[int(c.Index)] = c
+			}
+		}
+		for i := 1; i <= len(task.Criteria); i++ {
+			c := indexed[i]
+			if c == nil || c.Index < 1 || int(c.Index) > len(task.Criteria) {
+				continue
+			}
+			note := redact.String(c.Note)
+			if len([]rune(note)) > 1000 {
+				note = string([]rune(note)[:1000])
+			}
+			report.Results = append(report.Results, store.CriterionResult{Index: int(c.Index), OK: c.Ok, Note: note})
+			if !c.Ok {
+				failed = append(failed, fmt.Sprintf("%d — %s", c.Index, note))
+			}
+		}
+		reports = append(reports, report)
+		if verdict == policy.OutcomeOk && len(failed) > 0 {
+			verdict = policy.OutcomeChanges
+			detail := "Не выполнены критерии: " + strings.Join(failed, "; ")
+			if sr.Detail != "" && sr.Detail != "review пройден" {
+				detail += "\n\n" + sr.Detail
+			}
+			sr.Detail = detail
+		}
+	}
 	if infraExhausted {
 		// Повторный сбой — не замечания разработчику, а эскалация (переход fail).
 		verdict = policy.OutcomeFail
@@ -852,7 +947,7 @@ func (e *Engine) OnStageResult(ctx context.Context, runnerID string, sr *pb.Stag
 	if next, found := proc.Step(step.Target(verdict)); found && step.Kind != policy.StepReview && !e.epicPaused(ctx, task) {
 		keep = e.reuseTarget(ctx, task, next, runnerID)
 	}
-	claimed, err := e.St.RecordVerdict(ctx, run.ID, verdict, sr.Detail, keep)
+	claimed, err := e.St.RecordVerdict(ctx, run.ID, verdict, sr.Detail, keep, reports...)
 	if err != nil {
 		return err
 	}
@@ -882,29 +977,44 @@ func (e *Engine) failTask(ctx context.Context, task domain.Task, msg, runnerID s
 // failTaskBy — failTask с явным автором события (система для отказов
 // control plane, например границы задачи описания архитектуры).
 func (e *Engine) failTaskBy(ctx context.Context, task domain.Task, actor domain.ActorKind, actorID, msg string, extra ...map[string]any) error {
+	return e.failTaskWith(ctx, task, domain.AttTestFailed, actor, actorID, msg, extra...)
+}
+
+// failTaskWith — failed + эскалация с указанной причиной (ошибка настройки
+// подключения модели — MODEL_CONNECTION, остальное — TEST_FAILED).
+func (e *Engine) failTaskWith(ctx context.Context, task domain.Task, reason domain.AttentionReason, actor domain.ActorKind, actorID, msg string, extra ...map[string]any) error {
+	ev, mutate := e.failParts(ctx, task, reason, actor, actorID, msg, extra...)
+	return e.St.TransitionTask(ctx, task.ID, domain.TaskFailed, ev, mutate)
+}
+
+// failParts — событие перехода в failed и изменения в той же транзакции:
+// runner'ы задачи свободны, эскалация с причиной reason.
+func (e *Engine) failParts(ctx context.Context, task domain.Task, reason domain.AttentionReason, actor domain.ActorKind, actorID, msg string,
+	extra ...map[string]any) (store.EventInput, func(pgx.Tx) error) {
 	failPayload := map[string]any{"status": "failed"}
 	for _, m := range extra {
 		for k, v := range m {
 			failPayload[k] = v
 		}
 	}
-	return e.St.TransitionTask(ctx, task.ID, domain.TaskFailed,
-		store.EventInput{ActorKind: actor, ActorID: actorID, Type: "task.status",
-			Text: msg, Payload: failPayload},
-		func(tx pgx.Tx) error {
-			if _, err := tx.Exec(ctx,
-				`UPDATE runners SET status='idle', task_id=NULL WHERE task_id=$1`, task.ID); err != nil {
-				return err
-			}
-			epic, err := e.St.GetEpic(ctx, task.EpicID)
-			if err != nil {
-				return err
-			}
-			_, err = tx.Exec(ctx, `
-				INSERT INTO attention (project_id, task_id, reason, message)
-				VALUES ($1,$2,'TEST_FAILED',$3)`, epic.ProjectID, task.ID, msg)
+	ev := store.EventInput{ActorKind: actor, ActorID: actorID, Type: "task.status", Text: msg, Payload: failPayload}
+	return ev, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE tasks SET wait_kind='', wait_reason='', wait_claimed_at=NULL, wait_failures=0 WHERE id=$1`, task.ID); err != nil {
 			return err
-		})
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE runners SET status='idle', task_id=NULL WHERE task_id=$1`, task.ID); err != nil {
+			return err
+		}
+		epic, err := e.St.GetEpic(ctx, task.EpicID)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO attention (project_id, task_id, reason, message)
+			VALUES ($1,$2,$3,$4)`, epic.ProjectID, task.ID, string(reason), msg)
+		return err
+	}
 }
 
 // OnBlocked — вопрос агента: blocked + эскалация. Вопрос — runner-controlled
@@ -952,7 +1062,19 @@ func (e *Engine) OnBlocked(ctx context.Context, runnerID string, b *pb.BlockedQu
 // review переводится в fixing на свободном runner'е, агент получает промпт
 // человека, результат идёт обычным конвейером. Попытка не расходуется.
 func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login string, private bool) (string, error) {
-	a, err := e.St.StartUserSession(ctx, taskID, login, private)
+	// Сессия на нерабочих учётных данных хостинга упала бы на clone или
+	// push, потратив работу агента (fix-credential-state).
+	if projectID, _, err := e.St.TaskRefs(ctx, taskID); err == nil && e.credentialsInvalid(ctx, projectID) {
+		return "", fmt.Errorf("%w: замените токен в настройках проекта, потом запускайте сессию", ErrSCMCredentials)
+	}
+	// Подключение модели проверяется по выбранному runner'у до изменений
+	// задачи: отказ по нему не закрывает эскалацию и не переводит задачу в
+	// fixing (fix-agent-without-connection).
+	var check func(string) error
+	if task, err := e.St.GetTask(ctx, taskID); err == nil {
+		check = e.sessionRunnerCheck(ctx, task)
+	}
+	a, err := e.St.StartUserSession(ctx, taskID, login, private, check)
 	if err != nil {
 		return "", err
 	}
@@ -982,7 +1104,7 @@ func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login str
 		return "", fmt.Errorf("сессию не удалось запустить: %v", err)
 	}
 	a.Task.StepID, a.Task.StepEntry = step.ID, policy.OutcomeChanges
-	sessionID, delivered, _ := e.dispatchRun(ctx, a.Task, runs[0], a.Runner, step, policy.OutcomeChanges, &sessionSpec{
+	sessionID, delivered, startErr := e.dispatchRun(ctx, a.Task, runs[0], a.Runner, step, policy.OutcomeChanges, &sessionSpec{
 		driverKind: "user", driverID: login, prompt: prompt,
 		userPrompt: prompt, private: private,
 	})
@@ -1004,6 +1126,12 @@ func (e *Engine) StartUserSession(ctx context.Context, taskID, prompt, login str
 		}
 		if rerr := e.St.ReleaseTaskRunner(ctx, taskID); rerr != nil {
 			slog.Error("user session: release after dispatch failure", "task", taskID, "err", rerr)
+		}
+		// Нет рабочего подключения к модели: человеку — причина и где её
+		// исправить (fix-agent-without-connection).
+		var mc *ModelConnectionError
+		if errors.As(startErr, &mc) {
+			return "", &ModelConnectionError{Reason: "сессию не удалось запустить: " + mc.Reason, ConnectionID: mc.ConnectionID, Model: mc.Model}
 		}
 		return "", fmt.Errorf("сессию не удалось запустить: runner недоступен или стадия не собралась, подробности в логе rivetd")
 	}
@@ -1056,6 +1184,15 @@ func (e *Engine) MergeTask(ctx context.Context, taskID, userID string) error {
 // отложенным merge, fail-closed без списка путей; иначе merge от системного
 // актора с версией политики в payload.
 func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Project, eff store.EffectivePolicy) error {
+	// Без PR подтверждать и мержить нечего: PR создаётся при любом значении
+	// пресета, отказ хостинга даёт событие о неудачном merge и эскалацию.
+	if task.PRURL == "" {
+		withPR, err := e.ensurePR(ctx, task)
+		if err != nil {
+			return e.prMissingAtMerge(ctx, task, p, err)
+		}
+		task = withPR
+	}
 	deferMerge := func(reason, text string, paths []string) error {
 		payload := eff.Ref()
 		payload["reason"] = reason
@@ -1093,16 +1230,15 @@ func (e *Engine) autoMerge(ctx context.Context, task domain.Task, p domain.Proje
 		return e.policyEngineUp(ctx, p.ID)
 	}
 	var paths []string
-	filesUnknown := false
-	if task.PRURL != "" {
-		diff, err := e.diffForTask(ctx, task)
-		if err != nil {
-			slog.Error("auto-merge: diff", "task", task.ID, "err", err)
-			filesUnknown = true
-		} else {
-			paths = policy.PathsFromDiff(diff)
-			filesUnknown = len(paths) == 0 && strings.TrimSpace(diff) != ""
-		}
+	// Список файлов PR неизвестен — авто-merge не выполняется (fail-closed).
+	// Пустой diff тоже неизвестный список: хостинг готовит diff только что
+	// созданного PR асинхронно, а PR без изменений создать нельзя.
+	filesUnknown := true
+	if diff, err := e.diffForTask(ctx, task); err != nil {
+		slog.Error("auto-merge: diff", "task", task.ID, "err", err)
+	} else {
+		paths = policy.PathsFromDiff(diff)
+		filesUnknown = len(paths) == 0
 	}
 	var policyFiles, protected []string
 	for _, path := range paths {
@@ -1211,35 +1347,44 @@ func shortHash(h string) string {
 }
 
 // mergeTask — merge PR → done → пересчёт DAG → автопубликации; ev — событие
-// перехода (человек или система).
+// перехода (человек или система). Задача без PR в done не переходит: PR
+// создаётся здесь, иначе изменения ветки потерялись бы молча.
 func (e *Engine) mergeTask(ctx context.Context, task domain.Task, p domain.Project, ev store.EventInput) error {
 	if task.Status != domain.TaskReview {
 		return domain.ErrBadTransition{Entity: "task", From: string(task.Status), To: string(domain.TaskDone)}
 	}
 	taskID := task.ID
-	mergeSHA := ""
-	if task.PRURL != "" {
-		num, err := prNumber(task.PRURL)
+	if task.PRURL == "" {
+		// Обычно PR создаёт вход на review или merge. Сюда задача без PR
+		// попадает, если человек подтвердил merge раньше (задача на шаге
+		// prompt до review) или дошла до merge до этого исправления.
+		withPR, err := e.ensurePR(ctx, task)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %w", ErrPRNotCreated, err)
 		}
-		adapter, aerr := e.SCMFor(ctx, p)
-		if aerr != nil {
-			return aerr
-		}
-		// Граница задачи описания по данным хостинга, а не только гейтом в
-		// рабочей копии, и merge проверенной вершины (add-architecture-c4).
-		if task.Kind == domain.KindArchitecture {
-			if mergeSHA, err = e.mergeArchitecturePR(ctx, task, p, adapter, num); err != nil {
-				if errors.Is(err, ErrArchitecturePRRejected) || errors.Is(err, ErrArchitectureHeadMoved) ||
-					errors.Is(err, ErrArchitectureFilesUnavailable) {
-					return err
-				}
-				return fmt.Errorf("merge PR: %w", err)
+		task = withPR
+	}
+	num, err := prNumber(task.PRURL)
+	if err != nil {
+		return err
+	}
+	adapter, err := e.SCMFor(ctx, p)
+	if err != nil {
+		return err
+	}
+	mergeSHA := ""
+	// Граница задачи описания по данным хостинга, а не только гейтом в
+	// рабочей копии, и merge проверенной вершины (add-architecture-c4).
+	if task.Kind == domain.KindArchitecture {
+		if mergeSHA, err = e.mergeArchitecturePR(ctx, task, p, adapter, num); err != nil {
+			if errors.Is(err, ErrArchitecturePRRejected) || errors.Is(err, ErrArchitectureHeadMoved) ||
+				errors.Is(err, ErrArchitectureFilesUnavailable) {
+				return err
 			}
-		} else if mergeSHA, err = adapter.Merge(ctx, p.RepoPath, num); err != nil {
 			return fmt.Errorf("merge PR: %w", err)
 		}
+	} else if mergeSHA, err = adapter.Merge(ctx, p.RepoPath, num); err != nil {
+		return fmt.Errorf("merge PR: %w", err)
 	}
 	// Точка merge задаёт состав релиза (add-sdlc-cycle): у задачи описания
 	// архитектуры её нет, документация в релиз не входит и не публикуется.

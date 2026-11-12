@@ -165,13 +165,28 @@ func endpointFromAssignment(e *pb.ModelEndpoint, secrets map[string]string) (nat
 	return ep, nil
 }
 
-func isLocalURL(u string) bool {
-	for _, h := range []string{"//localhost", "//127.0.0.1", "//[::1]"} {
-		if strings.Contains(u, h) {
-			return true
-		}
-	}
-	return false
+func isLocalURL(u string) bool { return llm.IsLocalURL(u) }
+
+// endpointError — подключение модели стадии не собрать: нет ключа, адреса
+// или неизвестный тип API. Это ошибка настройки подключения, а не работы
+// агента: стадия возвращает вердикт verdictModelConnection, и control
+// plane эскалирует её своим кодом (fix-agent-without-connection).
+type endpointError struct{ err error }
+
+func (e *endpointError) Error() string { return e.err.Error() }
+func (e *endpointError) Unwrap() error { return e.err }
+
+// isEndpointError — агент не запустился из-за подключения модели.
+func isEndpointError(err error) bool {
+	var ee *endpointError
+	return errors.As(err, &ee)
+}
+
+// isConnectionError — агент не запустился из-за подключения модели или
+// провайдер отклонил ключ (401/403): это ошибка настройки подключения, а не
+// работы агента. Стадия возвращает вердикт verdictModelConnection.
+func isConnectionError(err error) bool {
+	return isEndpointError(err) || errors.Is(err, llm.ErrUnauthorized)
 }
 
 func atoiEnv(s string) int {
@@ -187,7 +202,7 @@ func atofEnv(s string) float64 {
 func (n *nativeAdapter) Run(ctx context.Context, dir, prompt string, sink runSink) (agentRun, error) {
 	ep, err := n.endpoint()
 	if err != nil {
-		return agentRun{}, err
+		return agentRun{}, &endpointError{err}
 	}
 	step := func(ev native.Event) {
 		if sink.step == nil {

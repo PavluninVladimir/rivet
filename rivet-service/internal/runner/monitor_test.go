@@ -142,13 +142,14 @@ func TestMonitorTimeout(t *testing.T) {
 	}
 }
 
-// Feature monitor объявляется только runner'ом с capability deploy.
+// Feature monitor (и задания хоста, add-environment-provisioning)
+// объявляется только runner'ом с capability deploy.
 func TestFeaturesMonitor(t *testing.T) {
 	if f := (Config{Capabilities: []string{"coding"}}).features(); len(f) != 1 || f[0] != featureRoles {
 		t.Fatalf("coding-runner: %v", f)
 	}
 	f := (Config{Capabilities: []string{"deploy"}}).features()
-	if len(f) != 3 || f[1] != featureMonitor || f[2] != featureMonitorURL {
+	if len(f) != 4 || f[1] != featureMonitor || f[2] != featureMonitorURL || f[3] != featureHostJobs {
 		t.Fatalf("deploy-runner: %v", f)
 	}
 }

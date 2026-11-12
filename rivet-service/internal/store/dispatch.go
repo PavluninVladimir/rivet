@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -46,6 +47,41 @@ func (s *Store) FreeReviewerRunner(ctx context.Context, taskID string) error {
 // SetTaskPR фиксирует созданный PR.
 func (s *Store) SetTaskPR(ctx context.Context, taskID, prURL string) error {
 	_, err := s.Pool.Exec(ctx, `UPDATE tasks SET pr_url=$2, updated_at=now() WHERE id=$1`, taskID, prURL)
+	return err
+}
+
+// TasksAwaitingPR — задачи на review или merge без PR (ждут с прошлой
+// версии или после отказа хостинга): их PR создаётся после старта rivetd.
+// Задачи приостановленных и архивных Epic'ов не трогаются, как и задачи,
+// чей PR человек закрыл на хостинге (открыта эскалация PR_CLOSED): от этой
+// работы отказались, новый PR не создаётся.
+func (s *Store) TasksAwaitingPR(ctx context.Context) ([]domain.Task, error) {
+	rows, err := s.Pool.Query(ctx, `SELECT `+taskCols+` FROM `+taskFrom+`
+		JOIN epics pe ON pe.id = t.epic_id AND pe.status = 'running'
+		WHERE t.status = 'review' AND COALESCE(t.pr_url, '') = '' AND t.step_id <> '' AND t.process IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM attention a WHERE a.task_id = t.id AND a.reason = $1 AND a.status <> 'resolved')
+		ORDER BY t.num`, string(domain.AttPRClosed))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ResolveTaskEscalation закрывает открытые эскалации задачи с указанной
+// причиной: их повод исчез (PR создан).
+func (s *Store) ResolveTaskEscalation(ctx context.Context, taskID string, reason domain.AttentionReason) error {
+	_, err := s.Pool.Exec(ctx, `
+		UPDATE attention SET status='resolved', resolved_at=now()
+		WHERE task_id=$1 AND reason=$2 AND status <> 'resolved'`, taskID, string(reason))
 	return err
 }
 
@@ -152,7 +188,7 @@ func (s *Store) ReleaseRunnerRuns(ctx context.Context, runnerID string, keepSess
 					return err
 				}
 			}
-			if _, err := tx.Exec(ctx, `UPDATE task_step_runs SET runner_id=NULL, session_id=NULL, agent_id=NULL, assigned_model='' WHERE id=$1`, r.ID); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE task_step_runs SET runner_id=NULL, session_id=NULL, agent_id=NULL, assigned_model='', assigned_connection='', catalog_key=false WHERE id=$1`, r.ID); err != nil {
 				return err
 			}
 			var projectID, epicID string
@@ -181,21 +217,45 @@ func (s *Store) ReleaseRunnerRuns(ctx context.Context, runnerID string, keepSess
 // 2·base, 4·base и так до max; доставка (RunDelivered) сбрасывает серию.
 // first — первое откладывание серии: событие ожидания пишется один раз.
 func (s *Store) DeferRun(ctx context.Context, runID int64, taskID string, base, max time.Duration, reason string) (first bool, pause time.Duration, err error) {
+	_, first, pause, err = s.deferRun(ctx, runID, taskID, base, max, reason, false)
+	return first, pause, err
+}
+
+// DeferPendingRun — DeferRun для запуска, которому планировщик ещё не
+// назначил runner'а (проверка подключения модели до назначения,
+// fix-agent-without-connection). Запуск, который тем временем назначили,
+// не трогается: deferred=false.
+func (s *Store) DeferPendingRun(ctx context.Context, runID int64, taskID string, base, max time.Duration, reason string) (deferred, first bool, pause time.Duration, err error) {
+	return s.deferRun(ctx, runID, taskID, base, max, reason, true)
+}
+
+// deferRun — откладывание запуска. Серия считается по причине: другая
+// причина начинает новую серию (пауза с начала, первое событие ожидания).
+func (s *Store) deferRun(ctx context.Context, runID int64, taskID string, base, max time.Duration, reason string, pendingOnly bool) (deferred, first bool, pause time.Duration, err error) {
+	reason = clipRunes(reason, 300)
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		var n int
-		if err := tx.QueryRow(ctx, `SELECT defer_count FROM task_step_runs WHERE id=$1 AND verdict IS NULL FOR UPDATE`,
-			runID).Scan(&n); err != nil {
+		var prev string
+		var bound bool
+		if err := tx.QueryRow(ctx, `SELECT defer_count, defer_reason, runner_id IS NOT NULL FROM task_step_runs WHERE id=$1 AND verdict IS NULL FOR UPDATE`,
+			runID).Scan(&n, &prev, &bound); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return nil
 			}
 			return err
 		}
-		first = n == 0
+		if pendingOnly && bound {
+			return nil
+		}
+		if prev != deferReasonKey(reason) {
+			n = 0
+		}
+		deferred, first = true, n == 0
 		pause = deferPause(n, base, max)
 		if _, err := tx.Exec(ctx, `
-			UPDATE task_step_runs SET runner_id=NULL, session_id=NULL, agent_id=NULL, assigned_model='',
-				defer_count = defer_count + 1, not_before = now() + make_interval(secs => $2)
-			WHERE id=$1`, runID, pause.Seconds()); err != nil {
+			UPDATE task_step_runs SET runner_id=NULL, session_id=NULL, agent_id=NULL, assigned_model='', assigned_connection='', catalog_key=false,
+				defer_count = $3, defer_reason = $4, not_before = now() + make_interval(secs => $2)
+			WHERE id=$1`, runID, pause.Seconds(), n+1, deferReasonKey(reason)); err != nil {
 			return err
 		}
 		// Начало ожидания серии живёт в самом запуске (deferred_since) и
@@ -206,7 +266,7 @@ func (s *Store) DeferRun(ctx context.Context, runID int64, taskID string, base, 
 		if first {
 			var since time.Time
 			if err := tx.QueryRow(ctx, `UPDATE tasks SET wait_reason=$2, wait_kind='', updated_at=now() WHERE id=$1
-				RETURNING COALESCE(wait_since, now())`, taskID, clipRunes(reason, 300)).Scan(&since); err != nil {
+				RETURNING COALESCE(wait_since, now())`, taskID, reason).Scan(&since); err != nil {
 				return err
 			}
 			_, err := tx.Exec(ctx, `UPDATE task_step_runs SET deferred_since=$2 WHERE id=$1`, runID, since)
@@ -214,10 +274,20 @@ func (s *Store) DeferRun(ctx context.Context, runID int64, taskID string, base, 
 		}
 		_, err := tx.Exec(ctx, `UPDATE tasks t SET wait_reason=$2, wait_kind='', updated_at=now(),
 			wait_since = COALESCE((SELECT r.deferred_since FROM task_step_runs r WHERE r.id=$3), t.wait_since, now())
-			WHERE t.id=$1`, taskID, clipRunes(reason, 300), runID)
+			WHERE t.id=$1`, taskID, reason, runID)
 		return err
 	})
-	return first, pause, err
+	return deferred, first, pause, err
+}
+
+// deferReasonKey — вид причины откладывания: текст до первого «: ».
+// Серия продолжается, пока вид тот же, даже если подробности меняются
+// (адрес в ошибке хостинга, «timeout» и «connection reset»).
+func deferReasonKey(reason string) string {
+	if i := strings.Index(reason, ": "); i >= 0 {
+		return reason[:i]
+	}
+	return reason
 }
 
 // deferPause — пауза n-го (с нуля) откладывания подряд.
@@ -236,7 +306,7 @@ func deferPause(n int, base, max time.Duration) time.Duration {
 // событие назначения (p, если есть) пишется только теперь.
 func (s *Store) RunDelivered(ctx context.Context, runID int64, p *PendingAssign) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE task_step_runs SET defer_count=0, not_before=NULL, deferred_since=NULL
+		if _, err := tx.Exec(ctx, `UPDATE task_step_runs SET defer_count=0, defer_reason='', not_before=NULL, deferred_since=NULL
 			WHERE id=$1 AND (defer_count > 0 OR not_before IS NOT NULL OR deferred_since IS NOT NULL)`, runID); err != nil {
 			return err
 		}

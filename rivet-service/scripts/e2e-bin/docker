@@ -1,0 +1,15 @@
+#!/bin/sh
+# Подмена docker для deploy-runner'а e2e-стенда (add-environment-provisioning):
+# на машине CI настоящего Docker может не быть. Только тестовая
+# инфраструктура. Каждый вызов пишется в $E2E_DOCKER_LOG вместе с именем
+# compose-проекта и портом: сценарий проверяет по журналу изоляцию
+# окружения и снятие с томами.
+log="${E2E_DOCKER_LOG:-/dev/null}"
+printf 'project=%s port=%s args=%s\n' "${COMPOSE_PROJECT_NAME:-}" "${RIVET_HOST_PORT:-}" "$*" >> "$log"
+case " $* " in
+  *" version "*) echo "Docker Compose version v2.99.0-e2e-fake" ;;
+  *" down "*) echo "fake docker: compose-проект ${COMPOSE_PROJECT_NAME:-} снят" ;;
+  *" ps "*) echo "fake docker: сервис ${COMPOSE_PROJECT_NAME:-} работает" ;;
+  *" up "*) echo "fake docker: сервис ${COMPOSE_PROJECT_NAME:-} запущен на порту ${RIVET_HOST_PORT:-}" ;;
+  *) echo "fake docker: $*" ;;
+esac

@@ -363,3 +363,37 @@ func TestHealthBreakAndFix(t *testing.T) {
 		t.Fatalf("починка: %q", got)
 	}
 }
+
+// Ключ «fake-key-…» принимается, пока сценарий его не отзовёт; основной
+// ключ стенда не отзывается.
+func TestRevokeKey(t *testing.T) {
+	srv := httptest.NewServer(newMux())
+	defer srv.Close()
+	status := func(key string) int {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	revoke := func(key string) int {
+		resp, err := http.Post(srv.URL+"/_e2e/revoke", "application/json", strings.NewReader(`{"key":"`+key+`"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	if status("fake-key-a") != http.StatusOK || status("other") != http.StatusUnauthorized {
+		t.Fatal("ключи до отзыва")
+	}
+	if revoke("fake-key-a") != http.StatusNoContent || revoke("fake-key") != http.StatusBadRequest {
+		t.Fatal("отзыв ключа")
+	}
+	if status("fake-key-a") != http.StatusUnauthorized || status("fake-key") != http.StatusOK || status("fake-key-b") != http.StatusOK {
+		t.Fatal("после отзыва отклоняется только отозванный ключ")
+	}
+}

@@ -18,7 +18,8 @@ import (
 // access-policy «Безопасные умолчания установки»). Секреты в базе:
 // токены хостингов (scm_credentials.token_enc), ключи подключений к
 // моделям (model_connections.key_enc) и значения секретных заголовков
-// подключений (model_connections.headers[].value_enc). Новый вид
+// подключений (model_connections.headers[].value_enc), токены подключений
+// к провайдерам инфраструктуры (infra_connections.token_enc). Новый вид
 // шифрованного секрета добавляется сюда в той же правке, иначе после смены
 // ключа он перестанет читаться.
 
@@ -28,6 +29,9 @@ type RotateResult struct {
 	Credentials       int `json:"scm_credentials"`
 	ConnectionKeys    int `json:"connection_keys"`
 	ConnectionHeaders int `json:"connection_headers"`
+	// InfraTokens: токены подключений к провайдерам инфраструктуры
+	// (add-environment-provisioning).
+	InfraTokens int `json:"infra_tokens"`
 	// AlreadyNew: секреты, которые уже читаются новым ключом (их
 	// сохранили после смены ключа): остаются как есть.
 	AlreadyNew int `json:"already_new"`
@@ -85,7 +89,7 @@ func (s *Store) RotateSecrets(ctx context.Context, oldBox, newBox *secretbox.Box
 		// Запись секретов работающим rivetd ждёт конца транзакции: иначе
 		// секрет, сохранённый прежним ключом посреди перешифровки, остался
 		// бы под ним.
-		if _, err := tx.Exec(ctx, `LOCK TABLE scm_credentials, model_connections IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		if _, err := tx.Exec(ctx, `LOCK TABLE scm_credentials, model_connections, infra_connections IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
 				return ErrSecretsBusy
@@ -207,12 +211,47 @@ func (s *Store) RotateSecrets(ctx context.Context, oldBox, newBox *secretbox.Box
 			res.ConnectionHeaders += n
 		}
 
+		type infraRow struct {
+			id  string
+			enc []byte
+		}
+		var infras []infraRow
+		rows, err = tx.Query(ctx, `SELECT id, token_enc FROM infra_connections WHERE token_enc IS NOT NULL ORDER BY id`)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var r infraRow
+			if err := rows.Scan(&r.id, &r.enc); err != nil {
+				rows.Close()
+				return err
+			}
+			infras = append(infras, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, c := range infras {
+			enc, changed, err := recrypt(c.enc, "токен подключения инфраструктуры "+c.id)
+			if err != nil {
+				return err
+			}
+			if !changed {
+				continue
+			}
+			if _, err := tx.Exec(ctx, `UPDATE infra_connections SET token_enc=$2 WHERE id=$1`, c.id, enc); err != nil {
+				return err
+			}
+			res.InfraTokens++
+		}
+
 		if len(bad) > 0 {
 			return &UndecryptableError{Items: bad}
 		}
 		_, err = appendEvent(ctx, tx, EventInput{
 			ActorKind: domain.ActorSystem, ActorID: "rotate-key", Type: "secret_key.rotated",
-			Text:    fmt.Sprintf("ключ шифрования секретов сменён: перешифровано %d", res.Credentials+res.ConnectionKeys+res.ConnectionHeaders),
+			Text:    fmt.Sprintf("ключ шифрования секретов сменён: перешифровано %d", res.Credentials+res.ConnectionKeys+res.ConnectionHeaders+res.InfraTokens),
 			Payload: res,
 		})
 		return err

@@ -354,8 +354,18 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 		setVerdict(verdictInfraError)
 		finish(false, msg)
 	}
+	// gitInfra — сбой git тестировщика: отказ хостинга по авторизации
+	// control plane сверяет с учётными данными проекта (fix-credential-state).
+	gitInfra := func(msg string) {
+		if gitAuthFailed(msg) {
+			setVerdict(verdictSCMAuth)
+			finish(false, msg)
+			return
+		}
+		infra(msg)
+	}
 	if err := resetTo(sctx, ws, origin, creds); err != nil {
-		infra(err.Error())
+		gitInfra(err.Error())
 		return
 	}
 	// Push агенту запрещён окружением его процесса (runAgent тестировщика).
@@ -374,6 +384,11 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 		return
 	}
 	if runErr != nil {
+		if isConnectionError(runErr) {
+			setVerdict(verdictModelConnection)
+			finish(false, fmt.Sprintf("тестировщик не запустился: %v", runErr))
+			return
+		}
 		infra(fmt.Sprintf("тестировщик завершился с ошибкой: %v", runErr))
 		return
 	}
@@ -382,7 +397,7 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 	// шаг повторится от нового состояния ветки.
 	remote, err := remoteBranchSHA(sctx, ws, creds, as.Branch)
 	if err != nil {
-		infra("тестировщик: ветка на origin после сессии: " + err.Error())
+		gitInfra("тестировщик: ветка на origin после сессии: " + err.Error())
 		return
 	}
 	selfPushed := false
@@ -392,7 +407,7 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 			return
 		}
 		if err := restoreRemote(sctx, ws, creds, as.Branch, remote, origin); err != nil {
-			infra("тестировщик сам отправил коммиты в ветку, вернуть её не удалось: " + err.Error())
+			gitInfra("тестировщик сам отправил коммиты в ветку, вернуть её не удалось: " + err.Error())
 			return
 		}
 		selfPushed = true
@@ -409,7 +424,7 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 	case selfPushed || len(outside) > 0:
 		// Граница роли держится кодом: правки сессии в ветку не попадают.
 		if err := resetTo(sctx, ws, origin, creds); err != nil {
-			infra(err.Error())
+			gitInfra(err.Error())
 			return
 		}
 		verdict = "changes"
@@ -426,7 +441,7 @@ func (a *agent) testerStage(sctx context.Context, as *pb.Assignment, ws string, 
 		step("тесты готовы — фиксация изменений")
 		if err := gitCommitPush(sctx, ws, as.Branch, creds,
 			fmt.Sprintf("task-%d: тесты (%s)", as.TaskNum, roleLabel(role))); err != nil {
-			infra("git: " + err.Error())
+			gitInfra("git: " + err.Error())
 			return
 		}
 		committed = true
@@ -464,6 +479,12 @@ const settleTimeout = 20 * time.Second
 // verdictInfraError — вердикт стадии TESTING при сбое инфраструктуры
 // (тестировщик или проверки проекта): не замечания разработчику.
 const verdictInfraError = "error"
+
+// verdictModelConnection — вердикт любой агентской стадии, если агент не
+// запустился из-за подключения модели (нет ключа, адреса): это ошибка
+// настройки, control plane эскалирует её кодом MODEL_CONNECTION, а не
+// как провал проверок (fix-agent-without-connection).
+const verdictModelConnection = "connection"
 
 // originBranchSHA — коммит ветки задачи на origin после fetch в workspace.
 func originBranchSHA(ctx context.Context, dir, branch string) (string, error) {

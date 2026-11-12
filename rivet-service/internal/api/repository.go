@@ -46,8 +46,13 @@ type repositoryView struct {
 	WebURL        string          `json:"web_url"`
 	Credential    *credentialView `json:"credential"`
 	State         string          `json:"state"`
-	CheckedAt     *time.Time      `json:"checked_at"`
-	Webhook       webhookView     `json:"webhook"`
+	// StateReason и StateMessage — причина нерабочего состояния: код
+	// (bad_token, no_access, insufficient_scope, not_found) и текст для
+	// человека; у рабочего подключения пустые (fix-credential-state).
+	StateReason  string      `json:"state_reason"`
+	StateMessage string      `json:"state_message"`
+	CheckedAt    *time.Time  `json:"checked_at"`
+	Webhook      webhookView `json:"webhook"`
 }
 
 // probeInput — общий вход проверки подключения и создания проекта.
@@ -239,6 +244,7 @@ func (s *Server) repositoryDTO(r *http.Request, p domain.Project) repositoryView
 	if c, err := s.St.ProjectCredential(r.Context(), p.ID); err == nil {
 		v.Credential = &credentialView{Owner: c.Owner, TokenPrefix: c.TokenPrefix, AddedAt: c.Created}
 		v.State = c.State
+		v.StateReason, v.StateMessage = c.StateReason, c.StateMessage
 		v.CheckedAt = c.CheckedAt
 		v.Webhook.Registered = p.WebhookRegistered
 	}
