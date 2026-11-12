@@ -54,6 +54,56 @@ func assessmentPass(t *testing.T, s *Store, id string) {
 	}
 }
 
+func TestReassessmentCannotInvalidateConcurrentFirstStart(t *testing.T) {
+	s, p := assessmentFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	e, err := s.CreateEpic(ctx, p.ID, "Existing feature", "UI only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	assessmentPass(t, s, e.ID)
+	v, _ := s.EpicAssessment(ctx, e.ID)
+	start, err := s.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = start.Rollback(context.Background()) }()
+	if _, err = start.Exec(ctx, `UPDATE epics SET status='running' WHERE id=$1`, e.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.ReevaluateEpicAssessment(ctx, e.ID, v.Revision, "owner") }()
+	// Observe the real database lock rather than relying on a timing sleep.
+	for {
+		var waiting bool
+		if err = s.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+			AND wait_event_type='Lock' AND query LIKE 'SELECT project_id FROM epics WHERE id=%FOR NO KEY UPDATE%')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("reassessment did not serialize with Start: %v", err)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err = start.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; !errors.Is(err, ErrConflict) {
+		t.Fatalf("reassessment invalidated running work: %v", err)
+	}
+	after, _ := s.EpicAssessment(ctx, e.ID)
+	if after.Revision != v.Revision || after.Assessment.Status != "passed" {
+		t.Fatal("started assessment was invalidated")
+	}
+}
+
 func TestEpicAssessmentManualAndDatabaseGates(t *testing.T) {
 	s, p := assessmentFixture(t)
 	ctx := context.Background()

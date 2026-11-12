@@ -170,6 +170,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/epics/{id}/decompose", s.decompose)
 	mux.HandleFunc("GET /api/v1/epics/{id}/architecture-assessment", s.getEpicAssessment)
 	mux.HandleFunc("POST /api/v1/epics/{id}/architecture-assessment/retry", s.retryEpicAssessment)
+	mux.HandleFunc("POST /api/v1/epics/{id}/architecture-assessment/reevaluate", s.reevaluateEpicAssessment)
 	mux.HandleFunc("PUT /api/v1/epics/{id}/deps", s.putEpicDeps)
 	mux.HandleFunc("GET /api/v1/projects/{id}/discovery", s.getDiscovery)
 	mux.HandleFunc("POST /api/v1/projects/{id}/discovery/interviews", s.addInterview)
@@ -649,11 +650,11 @@ func (s *Server) enrichedEpic(r *http.Request, e domain.Epic) domain.Epic {
 
 type epicView struct {
 	domain.Epic
-	ArchitectureAssessment *store.AssessmentView `json:"architecture_assessment,omitempty"`
-	Tasks                  []domain.Task         `json:"tasks"`
-	Progress               map[string]any        `json:"progress"`
-	Usage                  []store.UsageRow      `json:"usage,omitempty"`
-	UsageTotal             *store.UsageRow       `json:"usage_total,omitempty"`
+	ArchitectureAssessment *epicAssessmentView `json:"architecture_assessment,omitempty"`
+	Tasks                  []domain.Task       `json:"tasks"`
+	Progress               map[string]any      `json:"progress"`
+	Usage                  []store.UsageRow    `json:"usage,omitempty"`
+	UsageTotal             *store.UsageRow     `json:"usage_total,omitempty"`
 	// Оценка стоимости плана и состояние бюджета Epic
 	// (api-contract add-cost-transparency).
 	Estimate store.CostEstimate `json:"estimate"`
@@ -774,7 +775,7 @@ func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	assessment, err := s.St.EpicAssessment(r.Context(), e.ID)
+	assessment, err := s.assessmentForViewer(r.Context(), e, currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
 		return

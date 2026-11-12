@@ -7,9 +7,31 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
+
+type epicAssessmentView struct {
+	store.AssessmentView
+	CanReevaluate bool `json:"can_reevaluate"`
+}
+
+func (s *Server) assessmentForViewer(ctx context.Context, epic domain.Epic, userID string) (epicAssessmentView, error) {
+	v, err := s.St.EpicAssessment(ctx, epic.ID)
+	if err != nil {
+		return epicAssessmentView{}, err
+	}
+	out := epicAssessmentView{AssessmentView: v}
+	if v.ReevaluationEligible {
+		role, err := s.St.MemberRole(ctx, epic.ProjectID, userID)
+		if err != nil {
+			return out, err
+		}
+		out.CanReevaluate = role == domain.RoleOwner
+	}
+	return out, nil
+}
 
 func (s *Server) getEpicAssessment(w http.ResponseWriter, r *http.Request) {
 	epic, err := s.St.EpicForViewer(r.Context(), r.PathValue("id"), currentUser(r).ID)
@@ -17,12 +39,40 @@ func (s *Server) getEpicAssessment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	v, err := s.St.EpicAssessment(r.Context(), epic.ID)
+	v, err := s.assessmentForViewer(r.Context(), epic, currentUser(r).ID)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, v)
+}
+
+func (s *Server) reevaluateEpicAssessment(w http.ResponseWriter, r *http.Request) {
+	epic, err := s.St.EpicForViewer(r.Context(), r.PathValue("id"), currentUser(r).ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if !s.requireOwner(w, r, epic.ProjectID) {
+		return
+	}
+	var in struct {
+		Revision int64 `json:"revision"`
+	}
+	if err := decode(r, &in); err != nil || in.Revision < 1 {
+		fieldInvalid(w, "revision", "нужна актуальная ревизия архитектурной оценки")
+		return
+	}
+	if err := s.St.ReevaluateEpicAssessment(r.Context(), epic.ID, in.Revision, currentUser(r).ID); err != nil {
+		writeErr(w, err)
+		return
+	}
+	v, err := s.assessmentForViewer(r.Context(), epic, currentUser(r).ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, v)
 }
 func (s *Server) retryEpicAssessment(w http.ResponseWriter, r *http.Request) {
 	epic, err := s.St.EpicForViewer(r.Context(), r.PathValue("id"), currentUser(r).ID)
