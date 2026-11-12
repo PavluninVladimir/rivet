@@ -44,21 +44,28 @@ type EpicAssessment struct {
 	FinishedAt         *time.Time               `json:"finished_at,omitempty"`
 }
 type AssessmentView struct {
-	Required   bool            `json:"required"`
-	Revision   int64           `json:"revision"`
-	Assessment *EpicAssessment `json:"assessment"`
-	Title      string          `json:"-"`
-	Goal       string          `json:"-"`
+	Required             bool            `json:"required"`
+	Revision             int64           `json:"revision"`
+	Assessment           *EpicAssessment `json:"assessment"`
+	Title                string          `json:"-"`
+	Goal                 string          `json:"-"`
+	ReevaluationEligible bool            `json:"-"`
 }
+
+const assessmentReevaluationEligibleSQL = `e.architecture_required AND e.status='planned' AND e.started_at IS NULL
+	AND EXISTS(SELECT 1 FROM epic_architecture_assessments ar WHERE ar.epic_id=e.id AND ar.revision=e.architecture_revision AND ar.status='passed')
+	AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.epic_id=e.id AND
+		(t.status NOT IN ('queued','cancelled') OR t.started_at IS NOT NULL OR t.attempt_used>0))
+	AND NOT EXISTS(SELECT 1 FROM task_step_runs r JOIN tasks t ON t.id=r.task_id WHERE t.epic_id=e.id)`
 
 func (s *Store) EpicAssessment(ctx context.Context, id string) (AssessmentView, error) {
 	var out AssessmentView
 	var raw []byte
 	err := s.Pool.QueryRow(ctx, `SELECT e.architecture_required,e.architecture_revision,e.title,e.goal,
 		(to_jsonb(a)-ARRAY['lease_token','lease_until','planning_token','planning_until','context','instruction_sha','configuration'])
-		 || jsonb_build_object('existing_plan',COALESCE(jsonb_array_length(a.context->'existing_plan'),0)>0)
+		 || jsonb_build_object('existing_plan',COALESCE(jsonb_array_length(a.context->'existing_plan'),0)>0), (`+assessmentReevaluationEligibleSQL+`)
 		FROM epics e LEFT JOIN epic_architecture_assessments a ON a.epic_id=e.id WHERE e.id=$1`, id).
-		Scan(&out.Required, &out.Revision, &out.Title, &out.Goal, &raw)
+		Scan(&out.Required, &out.Revision, &out.Title, &out.Goal, &raw, &out.ReevaluationEligible)
 	if err != nil {
 		return out, nf(err)
 	}
@@ -105,6 +112,31 @@ func (s *Store) RetryEpicAssessment(ctx context.Context, id string) error {
 		return ErrConflict
 	}
 	return nil
+}
+
+// Reassessment is an explicit owner action before first execution. Locking the
+// Epic serializes it with Start; the normal revision trigger invalidates the
+// result and closes every existing gate without editing the goal or tasks.
+func (s *Store) ReevaluateEpicAssessment(ctx context.Context, id string, revision int64, actor string) error {
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		var project string
+		if err := tx.QueryRow(ctx, `SELECT project_id FROM epics WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&project); err != nil {
+			return nf(err)
+		}
+		tag, err := tx.Exec(ctx, `UPDATE epics e SET architecture_revision=architecture_revision+1
+			WHERE e.id=$1 AND e.architecture_revision=$2 AND (`+assessmentReevaluationEligibleSQL+`)`, id, revision)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrConflict
+		}
+		_, err = appendEvent(ctx, tx, EventInput{ActorKind: domain.ActorUser, ActorID: actor,
+			Type: "architecture.assessment_reevaluation_requested", ProjectID: project, EpicID: id,
+			Text:    "Владелец запросил повторную архитектурную оценку",
+			Payload: map[string]any{"epic_id": id, "previous_revision": revision, "revision": revision + 1}})
+		return err
+	})
 }
 
 type DueAssessment struct{ EpicID, ProjectID string }
