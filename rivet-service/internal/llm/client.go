@@ -98,7 +98,8 @@ var defaultHTTP = &http.Client{Timeout: 30 * time.Minute}
 // ключа отказывается идти на нелокальный адрес, и у control plane, который
 // не назначает стадию на такое подключение. Хост разбирается целиком, без
 // поиска подстрок и без DNS: localhost (и *.localhost) или loopback-адрес
-// (127.0.0.0/8, ::1, в том числе IPv4 в IPv6).
+// (127.0.0.0/8, ::1, в том числе IPv4 в IPv6). Для HTTP(S) без userinfo
+// также допустим точный Docker-host alias host.docker.internal.
 func IsLocalURL(u string) bool {
 	parsed, err := url.Parse(strings.TrimSpace(u))
 	if err != nil {
@@ -107,6 +108,9 @@ func IsLocalURL(u string) bool {
 	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
 	if host == "" {
 		return false
+	}
+	if host == "host.docker.internal" {
+		return parsed.User == nil && (parsed.Scheme == "http" || parsed.Scheme == "https")
 	}
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return true
