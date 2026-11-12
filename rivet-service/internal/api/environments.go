@@ -301,6 +301,9 @@ func (s *Server) patchEnvironment(w http.ResponseWriter, r *http.Request) {
 	monitorChanged := in.Config != nil && !reflect.DeepEqual(prevMonitor, env.Config.Monitor)
 	env, err = s.St.UpdateEnvironment(r.Context(), env)
 	if err != nil {
+		if writeMonitorErr(w, err) {
+			return
+		}
 		writeErr(w, err)
 		return
 	}

@@ -186,6 +186,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/projects/{id}/environments", s.listEnvironments)
 	mux.HandleFunc("POST /api/v1/projects/{id}/environments", s.createEnvironment)
 	mux.HandleFunc("PATCH /api/v1/environments/{id}", s.patchEnvironment)
+ mux.HandleFunc("GET /api/v1/environments/{id}/secrets", s.listApplicationSecrets)
+ mux.HandleFunc("PATCH /api/v1/environments/{id}/secrets", s.patchApplicationSecrets)
 	mux.HandleFunc("DELETE /api/v1/environments/{id}", s.deleteEnvironment)
 	mux.HandleFunc("POST /api/v1/environments/{id}/deploy", s.envDeploy)
 	mux.HandleFunc("POST /api/v1/environments/{id}/publish", s.localPublish)

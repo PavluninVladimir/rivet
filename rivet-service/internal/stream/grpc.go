@@ -417,7 +417,7 @@ func (s *Server) Channel(streamSrv pb.RunnerService_ChannelServer) error {
 	if err := s.checkIdentity(ctx, identityCheck{runnerID: runnerID}); err != nil {
 		return err
 	}
-	sendCh := s.Reg.Attach(runnerID)
+	sendCh := s.Reg.AttachSecure(runnerID, secureChannel(ctx))
 	defer s.Reg.Detach(runnerID, sendCh)
 	slog.Info("runner connected", "runner", runnerID)
 	// Канал открыт — признак жизни: отметка offline после недоставки в окне
@@ -776,6 +776,13 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		if t.DeployId != "" {
 			// Лог деплой-джобы: свой буфер и live-событие deploy.log.
 			if !s.Engine.DeployMatches(ctx, t.DeployId, runnerID) {
+				return nil
+			}
+			sensitive, err := s.St.DeploymentHasApplicationSecrets(ctx, t.DeployId)
+			if err != nil {
+				return err
+			}
+			if sensitive {
 				return nil
 			}
 			r := s.redactor("deploy:"+t.DeployId, t.DeployId)

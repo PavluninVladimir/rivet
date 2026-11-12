@@ -148,6 +148,9 @@ func (e *Engine) DeployMatches(ctx context.Context, depID, runnerID string) bool
 // OnDeployTranscript накапливает замаскированный лог публикации (кап как у
 // транскриптов задач); принадлежность проверяет вызывающий (DeployMatches).
 func (e *Engine) OnDeployTranscript(depID string, data []byte) {
+	if sensitive, err := e.St.DeploymentHasApplicationSecrets(context.Background(), depID); err != nil || sensitive {
+		return
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	buf := e.deployLogs[depID]

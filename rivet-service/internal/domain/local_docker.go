@@ -77,6 +77,11 @@ func (c *LocalDockerEnvironmentConfig) Defaults() {
 	}
 }
 
+// ValidApplicationEnvName also bounds names used by the secret API.
+func ValidApplicationEnvName(name string) bool {
+	return len(name) <= 128 && dockerEnvName.MatchString(name) && !strings.HasPrefix(name, "RIVET_")
+}
+
 var dockerEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (c EnvConfig) validateLocalDocker() error {

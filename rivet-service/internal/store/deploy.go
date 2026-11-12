@@ -82,6 +82,9 @@ func (s *Store) UpdateEnvironment(ctx context.Context, e domain.Environment) (ou
 		e.Config.LocalDocker.Defaults()
 	}
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := localSecretCollision(ctx, tx, e); err != nil {
+			return err
+		}
 		if err := allocateLocalPort(ctx, tx, &e); err != nil {
 			return err
 		}
@@ -348,6 +351,8 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
                           SELECT 1 FROM env_hosts h WHERE h.env_id=e.id AND h.state='ready' AND h.local_runner=r.id))
                   AND (e.exec_type='local_docker' OR NOT (r.capabilities @> ARRAY['docker'] AND r.features @> ARRAY['local_docker_v1']))
                   AND (e.exec_type<>'local_docker' OR (r.capabilities @> ARRAY['docker'] AND r.features @> ARRAY['local_docker_v1']
+ AND (NOT EXISTS(SELECT 1 FROM local_publication_secrets ps JOIN local_publications lp ON lp.id=ps.publication_id WHERE lp.active_deployment_id=d.id)
+ OR (r.secure AND cardinality(r.capabilities)=2 AND r.features @> ARRAY['local_docker_secrets_v1']))
                    AND (NOT EXISTS(SELECT 1 FROM local_publications lp WHERE lp.env_id=e.id AND lp.runner_id<>'')
                     OR r.id=(SELECT lp.runner_id FROM local_publications lp WHERE lp.env_id=e.id AND lp.runner_id<>'' ORDER BY generation DESC LIMIT 1))))
 				-- Сначала самый «узкий» подходящий runner: иначе обычная

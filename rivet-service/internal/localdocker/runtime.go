@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -24,7 +25,21 @@ import (
 
 const LogLimit = 2 << 20
 
+// ProtectResult removes all application-controlled text from secret-bearing jobs.
+func ProtectResult(v Result) Result {
+	v.Logs = SensitiveLogMessage
+	if v.Reason != nil {
+		v.Reason = &Failure{Code: "publication_failed", Message: "операция публикации не выполнена; вывод скрыт для защиты секретов"}
+	}
+	return v
+}
+
+const SensitiveLogMessage = "Вывод скрыт: публикация использует секретные переменные приложения."
+
 type Job struct {
+	// Secrets exists only in the assigned runner message, never in public config.
+	Secrets               map[string]string                   `json:"secrets,omitempty"`
+	Sensitive             bool                                `json:"sensitive,omitempty"`
 	ProjectID             string                              `json:"project_id"`
 	EnvironmentID         string                              `json:"environment_id"`
 	PublicationID         string                              `json:"publication_id"`
@@ -97,7 +112,13 @@ func (r *Runtime) call(ctx context.Context, args ...string) (string, error) {
 	if f == nil {
 		f = dockerCommand
 	}
-	return f(ctx, args, r.Log)
+	sink := r.Log
+	// Cleanup can inspect an older generation with secrets, even when the
+	// current generation has none. Inspect output must never be streamed.
+	if len(args) > 1 && args[1] == "inspect" {
+		sink = nil
+	}
+	return f(ctx, args, sink)
 }
 func (r *Runtime) phase(s string) error {
 	if r.Progress != nil {
@@ -118,6 +139,17 @@ func (j Job) validate() error {
 	}
 	if j.Generation < 1 {
 		return fail("config_invalid", "некорректное поколение публикации")
+	}
+	if len(j.Secrets) > 64 {
+		return fail("config_invalid", "слишком много секретов")
+	}
+	for k, v := range j.Secrets {
+		if !domain.ValidApplicationEnvName(k) || len(v) == 0 || len(v) > 4096 || strings.ContainsAny(v, "\x00\r\n") {
+			return fail("config_invalid", "некорректный секрет приложения")
+		}
+		if _, ok := j.Config.Env[k]; ok {
+			return fail("config_invalid", "совпали имена публичной и секретной переменной")
+		}
 	}
 	return (domain.EnvConfig{LocalDocker: &j.Config}).Validate(domain.ExecLocalDocker)
 }
@@ -307,6 +339,11 @@ func (r *Runtime) volume(ctx context.Context, j Job) (string, error) {
 
 // Старое поколение выключается control plane после durable принятия running.
 func (r *Runtime) Publish(ctx context.Context, root string, j Job) Result {
+	if j.Sensitive || len(j.Secrets) > 0 {
+		copy := *r
+		copy.Log = nil
+		r = &copy
+	}
 	if e := j.validate(); e != nil {
 		return result(j, "failed", e)
 	}
@@ -340,6 +377,11 @@ func (r *Runtime) Publish(ctx context.Context, root string, j Job) Result {
 	if e = r.phase("starting"); e != nil {
 		return result(j, "failed", e)
 	}
+	secretFile, cleanup, e := secretEnvFile(j.Secrets)
+	if e != nil {
+		return result(j, "failed", fail("config_invalid", "не удалось подготовить секретные переменные"))
+	}
+	defer cleanup()
 	for attempt := 0; attempt < 3; attempt++ {
 		j.Port, e = freePort()
 		if e != nil {
@@ -354,6 +396,9 @@ func (r *Runtime) Publish(ctx context.Context, root string, j Job) Result {
 		sort.Strings(keys)
 		for _, k := range keys {
 			args = append(args, "--env", k+"="+j.Config.Env[k])
+		}
+		if secretFile != "" {
+			args = append(args, "--env-file", secretFile)
 		}
 		args = append(args, j.Image)
 		raw, e = r.call(ctx, args...)
@@ -395,6 +440,14 @@ func (r *Runtime) Publish(ctx context.Context, root string, j Job) Result {
 	return result(j, "running", nil)
 }
 func (r *Runtime) Operate(ctx context.Context, action string, j Job) Result {
+	if j.Sensitive || len(j.Secrets) > 0 {
+		copy := *r
+		copy.Log = nil
+		r = &copy
+		if action == "logs" {
+			return Result{Status: "running", Logs: SensitiveLogMessage}
+		}
+	}
 	if e := j.validate(); e != nil {
 		return result(j, "failed", e)
 	}
@@ -497,4 +550,34 @@ func (r *Runtime) PrepareHost(ctx context.Context, j Job) Result {
 		}
 	}
 	return result(j, "waiting_artifact", nil)
+}
+
+// secretEnvFile is created after the build, outside the workspace; Docker sees
+// only its path in argv. The caller removes it even after a failed run.
+func secretEnvFile(values map[string]string) (string, func(), error) {
+	if len(values) == 0 {
+		return "", func() {}, nil
+	}
+	f, err := os.CreateTemp("", "rivet-app-env-*")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.Remove(f.Name()) }
+	keys := make([]string, 0, len(values))
+	for k := range values {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if _, err = fmt.Fprintln(f, k+"="+values[k]); err != nil {
+			_ = f.Close()
+			cleanup()
+			return "", nil, err
+		}
+	}
+	if err = f.Close(); err != nil {
+		cleanup()
+		return "", nil, err
+	}
+	return f.Name(), cleanup, nil
 }
