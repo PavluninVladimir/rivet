@@ -1156,6 +1156,9 @@ func (e *Engine) markTeamWaiting(ctx context.Context, seen map[string]bool, excl
 	if _, err := e.St.ClearTeamWaits(ctx, excluded, excludedEpics); err != nil {
 		return err
 	}
+	if err := e.markPinnedDeveloperWaiting(ctx, seen, excluded, excludedEpics, bad); err != nil {
+		return err
+	}
 	badIDs := make([]string, 0, len(bad))
 	for id := range bad {
 		badIDs = append(badIDs, id)

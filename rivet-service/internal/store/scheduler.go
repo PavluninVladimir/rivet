@@ -279,7 +279,7 @@ func (s *Store) AssignNext(ctx context.Context, excludedProjects, excludedEpics 
 				FOR UPDATE OF r SKIP LOCKED
 				LIMIT 1
 			) r ON true
-			WHERE t.status = 'ready'
+			WHERE t.status = 'ready' AND t.developer_agent_id IS NULL
 			ORDER BY t.num
 			FOR UPDATE OF t SKIP LOCKED
 			LIMIT 1`, excludedProjects, excludedEpics)

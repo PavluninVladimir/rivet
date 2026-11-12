@@ -177,6 +177,9 @@ type Task struct {
 	// AgentID и AgentName — агент команды текущего исполнителя.
 	AgentID   string `json:"AgentID"`
 	AgentName string `json:"AgentName"`
+	// DeveloperAgentID is a strict code/fix pin, separate from the current performer.
+	DeveloperAgentID   string `json:"DeveloperAgentID"`
+	DeveloperAgentName string `json:"DeveloperAgentName"`
 	// Kind — вид задачи: work, architecture, explore или bug (задача-баг
 	// инцидента, add-sdlc-cycle); IncidentID — инцидент задачи-бага;
 	// MergedAt — момент merge (состав релиза считается по нему, у задачи

@@ -169,6 +169,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/epics/{id}/tasks", s.addTask)
 	mux.HandleFunc("POST /api/v1/epics/{id}/decompose", s.decompose)
 	mux.HandleFunc("GET /api/v1/epics/{id}/architecture-assessment", s.getEpicAssessment)
+	mux.HandleFunc("PUT /api/v1/tasks/{id}/developer", s.setTaskDeveloper)
 	mux.HandleFunc("POST /api/v1/epics/{id}/architecture-assessment/retry", s.retryEpicAssessment)
 	mux.HandleFunc("POST /api/v1/epics/{id}/architecture-assessment/reevaluate", s.reevaluateEpicAssessment)
 	mux.HandleFunc("PUT /api/v1/epics/{id}/deps", s.putEpicDeps)
@@ -929,7 +930,25 @@ func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"task": t, "timeline": timeline, "step_runs": runViews(runs)})
+	projectID, _, err := s.St.TaskRefs(r.Context(), t.ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	role, err := s.St.MemberRole(r.Context(), projectID, currentUser(r).ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	canSetDeveloper := false
+	if role == domain.RoleOwner {
+		canSetDeveloper, err = s.St.TaskDeveloperEditable(r.Context(), t.ID)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"task": t, "timeline": timeline, "step_runs": runViews(runs), "can_set_developer": canSetDeveloper})
 }
 
 // patchTask — правка задачи участником проекта: лимит попыток
