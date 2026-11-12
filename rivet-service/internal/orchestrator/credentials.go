@@ -55,6 +55,15 @@ type fullAdapter interface {
 	scm.TreeHasher
 }
 
+func (t *trackedAdapter) ListIssues(ctx context.Context, repo, label string, page int, etag string) (scm.IssuePage, error) {
+	a, ok := t.inner.(scm.IssueReader)
+	if !ok {
+		return scm.IssuePage{}, scm.ErrIssuesUnsupported
+	}
+	issues, err := a.ListIssues(ctx, repo, label, page, etag)
+	return issues, t.observe(ctx, err)
+}
+
 // Каждый адаптер хостинга обязан реализовать все операции конвейера:
 // иначе track молча не обернул бы его и состояние учётных данных не
 // отмечалось бы.

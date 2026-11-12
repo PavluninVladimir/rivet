@@ -623,14 +623,23 @@ func (s *Server) startAnalysis(w http.ResponseWriter, r *http.Request) {
 		writeDiscoveryErr(w, err)
 		return
 	}
+	s.launchAnalysis(ctx, run, texts, setup, domain.ActorUser, user(r))
+	writeJSON(w, http.StatusAccepted, discRunDTO(run))
+}
+
+func (s *Server) launchAnalysis(ctx context.Context, run store.DiscoveryRun, texts []store.DiscoveryInterview, setup analystSetup, actorKind domain.ActorKind, actorID string) {
 	who := setup.who.Title
 	if setup.who.Name != "" {
 		who += " " + setup.who.Name
 	}
+	payload := analyst.Payload(run, setup.agentID, setup.who)
+	if actorKind == domain.ActorSystem {
+		payload["origin"] = "github_issues"
+	}
 	if _, err := s.St.AppendEvent(context.WithoutCancel(ctx), store.EventInput{
-		ActorKind: domain.ActorUser, ActorID: user(r), Type: "discovery.analysis_started", ProjectID: pid,
+		ActorKind: actorKind, ActorID: actorID, Type: "discovery.analysis_started", ProjectID: run.ProjectID,
 		Text:    who + " начинает анализ: " + materialsText(texts),
-		Payload: analyst.Payload(run, setup.agentID, setup.who),
+		Payload: payload,
 	}); err != nil {
 		slog.Error("событие старта анализа", "run", run.ID, "err", err)
 	}
@@ -647,10 +656,9 @@ func (s *Server) startAnalysis(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}()
-		job.Context = s.productContext(bg, pid)
+		job.Context = s.productContext(bg, run.ProjectID)
 		s.analystRunner().Run(bg, job)
 	}()
-	writeJSON(w, http.StatusAccepted, discRunDTO(run))
 }
 
 func (s *Server) analystRunner() *analyst.Runner {

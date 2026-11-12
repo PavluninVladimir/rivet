@@ -115,6 +115,9 @@ type Engine struct {
 	opsOnce sync.Once
 	// OpsComplete подменяет вызов модели в тестах (connID, model, prompt).
 	OpsComplete func(ctx context.Context, connID, model, prompt string) (string, error)
+	// IssueWatch is installed before Run and executes the deterministic SRE
+	// intake job. Research execution remains owned by the Discovery service.
+	IssueWatch func(ctx context.Context, projectID, agentID string) error
 	// CheckKey подменяет в тестах проверку ключа подключения control
 	// plane'ом после отказа провайдера во время стадии (список моделей).
 	CheckKey func(ctx context.Context, cl llm.Client) error
