@@ -57,6 +57,11 @@ func testStore(t *testing.T) *store.Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(st.Close)
+	// These suites seed existing legacy work. Assessment suites explicitly
+	// enable the natural new-Epic qualification trigger in their isolated DB.
+	if _, err := st.Pool.Exec(ctx, `ALTER TABLE epics DISABLE TRIGGER prepare_epic_architecture`); err != nil {
+		t.Fatal(err)
+	}
 	return st
 }
 

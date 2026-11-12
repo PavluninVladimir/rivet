@@ -967,6 +967,15 @@ func (s *Store) ApproveRun(ctx context.Context, projectID, runID, userID string,
 		}
 		res.Run, err = scanDiscRun(tx.QueryRow(ctx, `SELECT `+discRunCols+discRunFrom+` WHERE r.id=$1`, runID))
 		res.Epics, res.Order = approved, orderKeys
+		if decompose {
+			for _, a := range approved {
+				if a.Action == "created" {
+					if _, err = tx.Exec(ctx, `UPDATE epic_architecture_assessments SET decompose_requested=true WHERE epic_id=$1`, a.EpicID); err != nil {
+						return err
+					}
+				}
+			}
+		}
 		for id := range changed {
 			res.DepsChanged = append(res.DepsChanged, id)
 		}

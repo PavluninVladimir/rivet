@@ -85,6 +85,8 @@ func (s *Server) decompose(w http.ResponseWriter, r *http.Request) {
 	var unavailable *plannerUnavailable
 	var rejected *planRejected
 	switch {
+	case store.IsArchitectureRequired(err):
+		writeJSON(w, http.StatusAccepted, map[string]any{"tasks": []domain.Task{}, "architecture_pending": true})
 	// Модель не настроена или ключ отклонён — машиночитаемый 503, не сбой
 	// (спека epic-decomposition, api-contract).
 	case errors.As(err, &unavailable) && unavailable.invalid:
@@ -110,6 +112,20 @@ func (s *Server) decompose(w http.ResponseWriter, r *http.Request) {
 // бэклога исследования (add-product-discovery). Если Epic связан с
 // исследованием, Тимлид получает его потребности с цитатами.
 func (s *Server) decomposeEpic(ctx context.Context, epic domain.Epic) ([]domain.Task, error) {
+	assessment, err := s.St.RequestAssessmentPlanning(ctx, epic.ID)
+	if err != nil {
+		return nil, err
+	}
+	if assessment.Required && (assessment.Assessment == nil || assessment.Assessment.Status != "passed" || assessment.Assessment.Revision != assessment.Revision) {
+		return nil, store.ErrArchitectureRequired
+	}
+	// Title/goal and assessment revision came from one database statement.
+	epic.Title, epic.Goal = assessment.Title, assessment.Goal
+	if budget, err := s.St.ProjectBudget(ctx, epic.ProjectID, time.Now()); err != nil {
+		return nil, err
+	} else if budget.PausedUntil != nil {
+		return nil, fmt.Errorf("%w: планирование ждёт восстановления дневного бюджета", store.ErrConflict)
+	}
 	pl, st := s.plannerStatus()
 	switch {
 	case st.State == "invalid":
@@ -195,6 +211,9 @@ func (s *Server) decomposeEpic(ctx context.Context, epic domain.Epic) ([]domain.
 		s.markDecompose(bg, epic.ID, "failed", reason)
 		s.planFailed(bg, epic, reason, payload)
 	}
+	if assessment.Required && assessment.Assessment.Result != nil {
+		instruction += assessment.Assessment.Result.PlannerContext()
+	}
 	in := planner.Input{LeadInstruction: instruction, Needs: needs}
 	plan, err := s.requestPlan(ctx, pl, epic, project, in)
 	// Персональные данные в задачах (email, телефон, имена и описания
@@ -217,7 +236,11 @@ func (s *Server) decomposeEpic(ctx context.Context, epic domain.Epic) ([]domain.
 	if len(review.Warnings) > 0 {
 		rolePayload["warnings"] = review.Warnings
 	}
-	tasks, err := planner.Materialize(ctx, s.St, epic.ID, plan)
+	revision := int64(0)
+	if assessment.Required {
+		revision = assessment.Revision
+	}
+	tasks, err := planner.MaterializeAtArchitectureRevision(ctx, s.St, epic.ID, plan, revision)
 	if errors.Is(err, store.ErrPlanExists) {
 		// Задачи появились, пока модель отвечала (добавлены вручную): строка
 		// бэклога готова, а этот запуск закрывается событием с причиной.
@@ -341,6 +364,8 @@ func (s *Server) decomposeBacklogEpic(ctx context.Context, runID, key, id string
 	case errors.Is(err, errEpicHasTasks):
 		// План уже построен другой декомпозицией: строка готова.
 		set("done", "")
+	case store.IsArchitectureRequired(err):
+		set("architecture", "ожидает оценки Архитектора")
 	default:
 		// Текст причины может содержать фрагменты интервью: в лог rivetd
 		// идут только идентификаторы и длина, текст — в строку и событие.

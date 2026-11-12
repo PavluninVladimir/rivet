@@ -442,7 +442,8 @@ func (s *Store) WaitingTeamRuns(ctx context.Context, excludedProjects, excludedE
 		SELECT `+runCols+`, ar.title,
 			NOT EXISTS (SELECT 1 FROM team_agents ag WHERE ag.role_id = r.role AND ag.enabled
 				AND (r.model <> '' OR ag.id <> ALL($3::text[]))
-				AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)) AS busy
+				AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)
+				AND NOT EXISTS(SELECT 1 FROM epic_architecture_assessments aa WHERE aa.agent_id=ag.id AND aa.lease_until>now())) AS busy
 		FROM task_step_runs r
 		JOIN tasks t ON t.id = r.task_id
 		JOIN epics e ON e.id = t.epic_id AND e.status = 'running'
@@ -457,6 +458,7 @@ func (s *Store) WaitingTeamRuns(ctx context.Context, excludedProjects, excludedE
 			WHERE ag.role_id = r.role AND ag.enabled
 			  AND (r.model <> '' OR ag.id <> ALL($3::text[]))
 			  AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)
+				AND NOT EXISTS(SELECT 1 FROM epic_architecture_assessments aa WHERE aa.agent_id=ag.id AND aa.lease_until>now())
 			  AND x.capabilities @> (r.capabilities || CASE WHEN r.step_kind IN ('code','test','prompt') THEN t.capabilities ELSE '{}'::text[] END)
 			  AND x.agent = COALESCE(NULLIF(ag.agent, ''), NULLIF(r.role_agent, ''), x.agent)
 			  AND (ag.model = '' OR ag.model = ANY(x.models) OR x.model = ag.model)

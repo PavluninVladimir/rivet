@@ -248,6 +248,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	})
 	g.Go(func() error { engine.Run(ctx); return nil })
 	g.Go(func() error { apiSrv.RunIssueIntake(ctx); return nil })
+	g.Go(func() error { apiSrv.RunEpicAssessments(ctx); return nil })
 	// После старта в фоне: переподписка webhook'ов на push и сверка SHA уже
 	// построенных снимков архитектуры, чтобы не потерять обновление,
 	// отложенное до рестарта (add-architecture-c4). Старт хостинга не ждёт.

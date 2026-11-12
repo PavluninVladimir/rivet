@@ -314,6 +314,11 @@ func testStore(t *testing.T) *store.Store {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
+	// These suites seed existing legacy work. Assessment suites explicitly
+	// enable the natural new-Epic qualification trigger in their isolated DB.
+	if _, err := s.Pool.Exec(ctx, `ALTER TABLE epics DISABLE TRIGGER prepare_epic_architecture`); err != nil {
+		t.Fatal(err)
+	}
 	// mergeTask обновляет снимок архитектуры в фоне: дождаться обновлений
 	// до закрытия базы (иначе в логах «closed pool»).
 	t.Cleanup(archInflight.Wait)
