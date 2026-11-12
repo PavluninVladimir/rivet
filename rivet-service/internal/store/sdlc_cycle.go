@@ -322,17 +322,17 @@ func loadCycleIssueIntake(ctx context.Context, tx pgx.Tx, projectID string, in *
 	if err != nil {
 		return err
 	}
-	if enabled {
+	// Healthy scheduled monitoring is available, but is not queued work.
+	// Pending materials remain in Discovery; actual intake errors stay here.
+	if enabled && detail != "" {
 		it := cycle.Item{Kind: "issue_watch", ID: projectID, Title: "GitHub Issues → Исследование", State: cycle.StateWaiting}
 		if checked != nil {
 			it.Since = *checked
 		}
-		if detail != "" {
-			it.Title += ": " + detail
-			it.State = cycle.StateNeedsHuman
-			if strings.Contains(detail, "ждёт") || strings.Contains(detail, "позже") {
-				it.State = cycle.StateWaiting
-			}
+		it.Title += ": " + detail
+		it.State = cycle.StateNeedsHuman
+		if strings.Contains(detail, "ждёт") || strings.Contains(detail, "позже") {
+			it.State = cycle.StateWaiting
 		}
 		in.IssueIntakes = append(in.IssueIntakes, it)
 	}

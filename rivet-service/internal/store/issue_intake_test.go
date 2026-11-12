@@ -128,8 +128,62 @@ func TestIssueIntakeLeaseIdempotenceAndResearch(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, ph := range view.Phases {
-		if ph.ID == cycle.Operations && (ph.NoData || ph.Counters.Waiting != 1 || ph.Counters.DonePeriod != 2 || len(ph.Artifacts) != 2) {
+		if ph.ID == cycle.Operations && (ph.NoData || ph.Counters.Waiting != 0 || ph.Counters.DonePeriod != 2 || len(ph.Artifacts) != 2) {
 			t.Fatalf("operations watch hidden: %+v", ph)
 		}
+	}
+}
+
+func TestLoadCycleIssueWatchDistinguishesMonitoringFromWork(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	owner := mustOwner(t, s)
+	p, err := s.CreateProject(ctx, "issue cycle", "o/crm", nil, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := IssueIntakeConfig{Enabled: true, AutoResearch: false, Label: "rivet"}
+	if err = s.SetIssueIntake(ctx, p.ID, owner.ID, config); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := s.ClaimIssueIntake(ctx, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ImportIssue(ctx, lease, p, scm.Issue{Number: 7, Title: "Unresearched request"}, "gleb"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name           string
+		enabled        bool
+		detail         string
+		waiting, human int
+	}{
+		{"healthy scheduled observation", true, "", 0, 0},
+		{"model wait", true, "Аналитик ждёт доступной модели", 1, 0},
+		{"retry later", true, "Повторите позже", 1, 0},
+		{"configuration error", true, "GitHub недоступен", 0, 1},
+		{"disabled keeps history", false, "GitHub недоступен", 0, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := s.Pool.Exec(ctx, `UPDATE project_issue_intake SET enabled=$2,error=$3,last_check_at=now() WHERE project_id=$1`, p.ID, tc.enabled, tc.detail); err != nil {
+				t.Fatal(err)
+			}
+			v, err := s.LoadCycle(ctx, p.ID, "7d", time.UTC, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ops := cyclePhase(t, v, cycle.Operations)
+			if ops.NoData || ops.Counters.Active != 0 || ops.Counters.Waiting != tc.waiting || ops.Counters.NeedsHuman != tc.human || len(ops.Items) != tc.waiting+tc.human || len(ops.Artifacts) != 1 || ops.Counters.DonePeriod != 1 {
+				t.Fatalf("monitoring/work/history: %+v", ops)
+			}
+			if len(ops.Items) > 0 && !strings.Contains(ops.Items[0].Title, tc.detail) {
+				t.Fatalf("missing concrete reason: %+v", ops.Items)
+			}
+			discovery := cyclePhase(t, v, cycle.Discovery)
+			if discovery.FeedbackUnaccounted != 1 || len(discovery.Items) != 1 || discovery.Items[0].Kind != "material" {
+				t.Fatalf("pending issue material lost: %+v", discovery)
+			}
+		})
 	}
 }
