@@ -36,8 +36,9 @@ type environmentView struct {
 	MonitorLastAt *time.Time `json:"monitor_last_at"`
 	// Host: хост от провайдера: живой или последний; null без привязки
 	// (add-environment-provisioning).
-	Host      *envHostView `json:"host"`
-	CreatedAt time.Time    `json:"created_at"`
+	Host        *envHostView `json:"host"`
+	CreatedAt   time.Time    `json:"created_at"`
+	Preparation string       `json:"preparation,omitempty"`
 }
 
 // deploymentView — DTO Deployment контракта: created_at — очередь,
@@ -93,6 +94,7 @@ func (s *Server) environmentDTOWith(r *http.Request, e domain.Environment, state
 	if h, ok := hosts[e.ID]; ok {
 		v.Host = hostDTO(h)
 	}
+	v.Preparation, _ = s.St.LocalPreparation(r.Context(), e.ID)
 	if d, err := s.St.LastDeployment(r.Context(), e.ID); err == nil {
 		dto := deploymentDTO(d)
 		v.LastDeployment = &dto
@@ -104,6 +106,17 @@ func (s *Server) environmentDTOWith(r *http.Request, e domain.Environment, state
 			v.MonitorState, v.MonitorReason, v.MonitorLastAt = b.State, b.Reason, b.LastAt
 		}
 	}
+	if e.ExecType == domain.ExecLocalDocker {
+		if p, err := s.St.CurrentLocalPublication(r.Context(), e.ID); err == nil {
+			v.Config.Monitor = &domain.MonitorConfig{Enabled: p.DesiredState == "running", CheckURL: p.HealthURL, IntervalMin: 1}
+		}
+		if m, err := s.St.LocalMonitorView(r.Context(), e.ID); err == nil {
+			v.MonitorState = m.State
+			v.MonitorReason = m.Reason
+			v.MonitorLastAt = m.LastAt
+		}
+	}
+
 	return v
 }
 
@@ -131,9 +144,9 @@ func (in environmentInput) validate() string {
 		return "нужно имя окружения"
 	}
 	switch in.execType() {
-	case domain.ExecSSH, domain.ExecPipeline, domain.ExecK8s, domain.ExecGitOps:
+	case domain.ExecSSH, domain.ExecPipeline, domain.ExecK8s, domain.ExecGitOps, domain.ExecLocalDocker:
 	default:
-		return "exec_type: ожидается ssh, k8s, pipeline или gitops"
+		return "exec_type: ожидается ssh, k8s, pipeline, gitops или local_docker"
 	}
 	if in.Trigger != "auto" && in.Trigger != "manual" {
 		return "trigger: ожидается auto или manual"
@@ -184,6 +197,9 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 	}
 	var in environmentInput
 	if err := decode(r, &in); err != nil {
+		if writeMonitorErr(w, err) {
+			return
+		}
 		unprocessable(w, "невалидный JSON")
 		return
 	}
@@ -197,6 +213,9 @@ func (s *Server) createEnvironment(w http.ResponseWriter, r *http.Request) {
 			!s.checkInfraConn(w, r, in.Config.Provision) {
 			return
 		}
+	}
+	if writeMonitorErr(w, in.Config.Validate(in.execType())) {
+		return
 	}
 	if msg := in.validate(); msg != "" {
 		unprocessable(w, msg)
@@ -239,6 +258,9 @@ func (s *Server) patchEnvironment(w http.ResponseWriter, r *http.Request) {
 		RunnerCaps *[]string         `json:"runner_caps"`
 	}
 	if err := decode(r, &in); err != nil {
+		if writeMonitorErr(w, err) {
+			return
+		}
 		unprocessable(w, "невалидный JSON")
 		return
 	}
@@ -266,6 +288,9 @@ func (s *Server) patchEnvironment(w http.ResponseWriter, r *http.Request) {
 	}
 	full := environmentInput{Name: env.Name, ExecType: env.ExecType, Trigger: env.Trigger,
 		Config: env.Config, RunnerCaps: env.RunnerCaps}
+	if writeMonitorErr(w, full.Config.Validate(full.execType())) {
+		return
+	}
 	if msg := full.validate(); msg != "" {
 		unprocessable(w, msg)
 		return
@@ -375,6 +400,14 @@ func (s *Server) deleteEnvironment(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if env.ExecType == domain.ExecLocalDocker {
+		if err := s.St.RequestLocalDeletion(r.Context(), env.ID); err != nil {
+			localError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "deleting"})
+		return
+	}
 	if err := s.St.DeleteEnvironment(r.Context(), env.ID); err != nil {
 		writeErr(w, err)
 		return
@@ -391,6 +424,11 @@ func (s *Server) envDeploy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if env.ExecType == domain.ExecLocalDocker {
+		s.publishLocal(w, r, env)
+		return
+	}
+
 	if env.Paused {
 		writeErr(w, store.ErrConflict) // сначала resume (контракт)
 		return

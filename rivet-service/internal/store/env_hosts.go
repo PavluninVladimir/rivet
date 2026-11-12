@@ -407,6 +407,7 @@ func (s *Store) HostRunner(ctx context.Context, env domain.Environment) (string,
 		SELECT id FROM runners
 		WHERE status <> 'offline' AND NOT draining
 		  AND capabilities @> ARRAY['deploy'] AND capabilities @> $1::text[]
+ AND NOT (capabilities @> ARRAY['docker'] AND features @> ARRAY['local_docker_v1'])
 		  AND 'host_jobs' = ANY(features)
           AND (COALESCE((SELECT local_runner FROM env_hosts h WHERE h.env_id=$2::uuid AND h.provider='local' AND h.state NOT IN ('deleted','failed','rejected')), '') IN ('', runners.id))
 		ORDER BY (status = 'idle') DESC, cardinality(capabilities), last_seen DESC LIMIT 1`, caps, env.ID).Scan(&id)

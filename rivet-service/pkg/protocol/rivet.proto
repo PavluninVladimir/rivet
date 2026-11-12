@@ -374,10 +374,15 @@ message DeployJob {
   bool checkout = 12;
   string repo_url = 13;
   string git_token = 14;
+  // Типизированная конфигурация фиксированного драйвера localdocker.Job.
+  // Отправляется только runner-у с feature local_docker_v1.
+  bytes local_docker_job = 15;
+  string local_docker_action = 16;
   // Закреплённый ключ хоста (строки known_hosts): ssh проверяет ключ по нему,
   // а не по known_hosts runner'а (add-environment-provisioning). Пусто:
   // прежнее поведение.
-  string host_key = 15;
+  // Номера 15 и 16 уже заняты выпущенным local_docker_v1.
+  string host_key = 17;
 }
 
 // DeployResult — итог этапа публикации; чужой/stale deployment_id
@@ -388,6 +393,8 @@ message DeployResult {
   bool ok = 3;
   string detail = 4;   // хвост вывода команд / причина
   bool rollback = 5;   // эхо DeployJob.rollback: результат фазы отката
+  // localdocker.Result; CAS привязан к deployment_id операции.
+  bytes local_docker_result = 6;
 
   enum Stage {
     STAGE_UNSPECIFIED = 0;

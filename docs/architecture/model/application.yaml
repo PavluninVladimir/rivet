@@ -1,0 +1,378 @@
+elements:
+  # ── Развёртываемые контейнеры описываемой системы ──────────────────────
+  - id: app.rivetd
+    type: component
+    name: rivetd
+    description: "Control plane Rivet: HTTP API, gRPC-хаб runner'ов, оркестрация и встроенная веб-консоль."
+    props: {technology: "Go 1.26, net/http, gRPC, pgx"}
+    relations:
+      - {type: composition, to: app.webui}
+      - {type: composition, to: app.api}
+      - {type: composition, to: app.stream}
+      - {type: composition, to: app.orchestrator}
+      - {type: composition, to: app.planner}
+      - {type: composition, to: app.cycle}
+      - {type: composition, to: app.ops}
+      - {type: composition, to: app.overview}
+      - {type: composition, to: app.policy}
+      - {type: composition, to: app.architecture}
+      - {type: composition, to: app.analyst}
+      - {type: composition, to: app.discovery}
+      - {type: composition, to: app.scm}
+      - {type: composition, to: app.llm}
+      - {type: composition, to: app.redact}
+      - {type: composition, to: app.history}
+
+  - id: app.runner
+    type: component
+    name: rivet-runner
+    description: "Агент на машине пользователя: подключается к control plane и выполняет этапы задач, публикации и проверки."
+    props: {technology: "Go 1.26, gRPC"}
+    relations:
+      - {type: composition, to: app.runner.engine}
+      - {type: composition, to: app.runner.agent}
+
+  - id: app.cli
+    type: component
+    name: rivet CLI
+    description: "Командная утилита администратора и участника: настройка подключений, импорт истории, проверка архитектуры."
+    props: {technology: "Go 1.26"}
+
+  - id: app.fake-llm
+    type: component
+    name: fake-llm
+    description: Подставная модель для e2e-тестов; в продакшене не разворачивается.
+    props: {c4: none, technology: "Go 1.26"}
+
+  # ── Внутренние компоненты rivetd ───────────────────────────────────────
+  - id: app.webui
+    type: component
+    name: Веб-консоль
+    description: Встроенная одностраничная консоль, раздаваемая rivetd.
+    props: {technology: "Web-сборка в internal/webui"}
+    relations:
+      - {type: composition, to: app.console-ui}
+
+  - id: app.api
+    type: component
+    name: REST API и SSE
+    description: HTTP API консоли и CLI, SSE-канал событий и приём webhook'ов SCM.
+    props: {technology: "Go net/http"}
+    relations:
+      - {type: composition, to: app.console-api}
+      - {type: serving, to: biz.owner}
+      - {type: serving, to: biz.member}
+      - {type: serving, to: biz.admin}
+      - {type: serving, to: biz.lead}
+      - {type: serving, to: biz.analyst}
+      - {type: serving, to: biz.devops}
+      - {type: serving, to: biz.sre}
+      - {type: serving, to: biz.architect}
+      - {type: flow, to: app.planner}
+      - {type: flow, to: app.orchestrator}
+      - {type: flow, to: app.analyst}
+      - {type: flow, to: app.history}
+      - {type: flow, to: app.llm}
+      - {type: access, to: data.project, mode: readwrite}
+      - {type: access, to: data.epic, mode: readwrite}
+      - {type: access, to: data.task, mode: readwrite}
+      - {type: access, to: data.task-step-run, mode: read}
+      - {type: access, to: data.session, mode: readwrite}
+      - {type: access, to: data.event, mode: readwrite}
+      - {type: access, to: data.attention, mode: readwrite}
+      - {type: access, to: data.user, mode: readwrite}
+      - {type: access, to: data.project-member, mode: readwrite}
+      - {type: access, to: data.auth-session, mode: readwrite}
+      - {type: access, to: data.access-token, mode: readwrite}
+      - {type: access, to: data.environment, mode: readwrite}
+      - {type: access, to: data.deployment, mode: readwrite}
+      - {type: access, to: data.release, mode: readwrite}
+      - {type: access, to: data.incident, mode: readwrite}
+      - {type: access, to: data.runner, mode: readwrite}
+      - {type: access, to: data.model-connection, mode: readwrite}
+      - {type: access, to: data.agent, mode: readwrite}
+      - {type: access, to: data.agent-role, mode: readwrite}
+      - {type: access, to: data.team-agent, mode: readwrite}
+      - {type: access, to: data.scm-credential, mode: readwrite}
+      - {type: access, to: data.policy-version, mode: readwrite}
+      - {type: access, to: data.installation-setting, mode: readwrite}
+      - {type: access, to: data.project-architecture, mode: readwrite}
+      - {type: access, to: data.discovery-interview, mode: readwrite}
+      - {type: access, to: data.discovery-run, mode: readwrite}
+      - {type: access, to: data.usage-record, mode: read}
+
+  - id: app.stream
+    type: component
+    name: gRPC-хаб runner'ов
+    description: Двунаправленный gRPC-поток PlaneMsg между control plane и runner'ами.
+    props: {technology: "gRPC"}
+    relations:
+      - {type: composition, to: app.runner-grpc}
+      - {type: serving, to: app.runner.engine}
+      - {type: flow, to: app.orchestrator}
+      - {type: access, to: data.runner, mode: read}
+      - {type: access, to: data.runner-token, mode: read}
+      - {type: access, to: data.runner-token-binding, mode: read}
+
+  - id: app.orchestrator
+    type: component
+    name: Оркестратор
+    description: "Детерминированный конвейер: диспетчеризация этапов, реакции на вердикты, публикации и слияние."
+    props: {technology: "Go"}
+    relations:
+      - {type: flow, to: app.stream}
+      - {type: flow, to: app.architecture}
+      - {type: flow, to: app.ops}
+      - {type: realization, to: app.orchestration-service}
+      - {type: access, to: data.task, mode: readwrite}
+      - {type: access, to: data.task-step-run, mode: readwrite}
+      - {type: access, to: data.epic, mode: readwrite}
+      - {type: access, to: data.session, mode: read}
+      - {type: access, to: data.event, mode: readwrite}
+      - {type: access, to: data.deployment, mode: readwrite}
+      - {type: access, to: data.release, mode: readwrite}
+      - {type: access, to: data.incident, mode: readwrite}
+      - {type: access, to: data.runner, mode: read}
+      - {type: access, to: data.policy-version, mode: read}
+
+  - id: app.planner
+    type: component
+    name: Планировщик
+    description: Декомпозиция Epic в план задач с помощью модели; проверка плана и материализация задач.
+    props: {technology: "Go"}
+    relations:
+      - {type: flow, to: app.llm}
+      - {type: realization, to: app.planning-service}
+      - {type: access, to: data.epic, mode: readwrite}
+      - {type: access, to: data.task, mode: readwrite}
+      - {type: access, to: data.epic-need, mode: read}
+
+  - id: app.cycle
+    type: component
+    name: Цикл разработки
+    description: Агрегирует фазы релизов и инцидентов для обзора проекта.
+    props: {technology: "Go"}
+    relations:
+      - {type: realization, to: app.release-service}
+      - {type: access, to: data.deployment, mode: read}
+      - {type: access, to: data.release, mode: read}
+      - {type: access, to: data.incident, mode: read}
+
+  - id: app.ops
+    type: component
+    name: Релизы и инциденты
+    description: Формирует release notes и описания инцидентов с помощью модели.
+    props: {technology: "Go"}
+    relations:
+      - {type: flow, to: app.llm}
+      - {type: realization, to: app.release-service}
+      - {type: access, to: data.release, mode: readwrite}
+      - {type: access, to: data.incident, mode: readwrite}
+
+  - id: app.overview
+    type: component
+    name: Обзор проекта
+    description: Строит отчёт о ходе проекта для руководителя.
+    props: {technology: "Go"}
+    relations:
+      - {type: realization, to: app.overview-service}
+      - {type: access, to: data.project, mode: read}
+      - {type: access, to: data.epic, mode: read}
+      - {type: access, to: data.task, mode: read}
+      - {type: access, to: data.usage-record, mode: read}
+      - {type: access, to: data.event, mode: read}
+
+  - id: app.policy
+    type: component
+    name: Движок политик
+    description: Вычисляет действующую политику проекта и проверяет решения гейтов, включая режимы OPA/Rego.
+    props: {technology: "Go, OPA Rego"}
+    relations:
+      - {type: access, to: data.policy-version, mode: read}
+
+  - id: app.architecture
+    type: component
+    name: Снимок архитектуры
+    description: Читает docs/architecture, проверяет модель и рисует представления в формате Rivet.
+    props: {technology: "Go"}
+    relations:
+      - {type: realization, to: app.architecture-service}
+      - {type: access, to: data.project-architecture, mode: readwrite}
+      - {type: access, to: data.task, mode: read}
+      - {type: access, to: data.epic, mode: read}
+
+  - id: app.analyst
+    type: component
+    name: Аналитик продукта
+    description: "Фоновый анализ интервью: конспекты, синтез потребностей и черновик бэклога."
+    props: {technology: "Go"}
+    relations:
+      - {type: flow, to: app.llm}
+      - {type: flow, to: app.discovery}
+      - {type: realization, to: app.discovery-service}
+      - {type: access, to: data.discovery-run, mode: readwrite}
+      - {type: access, to: data.discovery-summary, mode: readwrite}
+      - {type: access, to: data.discovery-interview, mode: read}
+
+  - id: app.discovery
+    type: component
+    name: Проверка исследования
+    description: Проверяет и нормализует результаты анализа, связи потребностей и бэклог.
+    props: {technology: "Go"}
+    relations:
+      - {type: realization, to: app.discovery-service}
+      - {type: access, to: data.discovery-run, mode: read}
+      - {type: access, to: data.epic-need, mode: readwrite}
+      - {type: access, to: data.epic, mode: readwrite}
+
+  - id: app.scm
+    type: component
+    name: SCM-адаптеры
+    description: Адаптеры хостингов репозиториев и разбор событий webhook.
+    props: {technology: "Go"}
+    relations:
+      - {type: serving, to: app.api}
+      - {type: serving, to: app.orchestrator}
+
+  - id: app.llm
+    type: component
+    name: Клиенты моделей
+    description: Единый клиент к API-совместимым моделям разных провайдеров.
+    props: {technology: "Go"}
+    relations:
+      - {type: serving, to: app.planner}
+      - {type: serving, to: app.analyst}
+      - {type: serving, to: app.ops}
+
+  - id: app.redact
+    type: component
+    name: Маскировка секретов
+    description: Удаляет секреты из транскриптов сессий перед хранением.
+    props: {technology: "Go"}
+
+  - id: app.history
+    type: component
+    name: Импорт истории
+    description: Разбирает архив OpenSpec и манифест истории, привязывает PR к Epic'ам и задачам.
+    props: {technology: "Go"}
+    relations:
+      - {type: access, to: data.epic, mode: readwrite}
+      - {type: access, to: data.task, mode: readwrite}
+      - {type: access, to: data.event, mode: readwrite}
+
+  # ── Внутренние компоненты runner'а ──────────────────────────────────────
+  - id: app.runner.engine
+    type: component
+    name: Движок runner'а
+    description: Подключение к control plane, получение назначений, исполнение стадий публикации и наблюдения.
+    props: {technology: "Go"}
+    relations:
+      - {type: flow, to: app.runner.agent}
+
+  - id: app.runner.agent
+    type: component
+    name: Агентский цикл Rivet
+    description: "Цикл агента роли: чтение репозитория, вызов модели, инструменты и формирование вердикта."
+    props: {technology: "Go"}
+
+  # ── Интерфейсы и сервисы приложений ─────────────────────────────────────
+  - id: app.console-ui
+    type: interface
+    name: Консоль
+    relations:
+      - {type: serving, to: biz.owner}
+      - {type: serving, to: biz.member}
+      - {type: serving, to: biz.admin}
+
+  - id: app.console-api
+    type: interface
+    name: HTTP API консоли
+    relations:
+      - {type: serving, to: app.webui}
+      - {type: serving, to: app.cli}
+
+  - id: app.runner-grpc
+    type: interface
+    name: Протокол runner'ов
+    relations:
+      - {type: serving, to: app.runner}
+
+  - id: app.planning-service
+    type: application-service
+    name: Планирование Epic
+    relations:
+      - {type: serving, to: biz.lead}
+      - {type: serving, to: biz.proc.epic}
+
+  - id: app.orchestration-service
+    type: application-service
+    name: Оркестрация задач
+    relations:
+      - {type: serving, to: biz.proc.epic}
+      - {type: serving, to: biz.proc.release}
+      - {type: serving, to: biz.proc.architecture}
+
+  - id: app.discovery-service
+    type: application-service
+    name: Анализ исследования
+    relations:
+      - {type: serving, to: biz.analyst}
+      - {type: serving, to: biz.proc.discovery}
+
+  - id: app.architecture-service
+    type: application-service
+    name: Описание архитектуры
+    relations:
+      - {type: serving, to: biz.architect}
+      - {type: serving, to: biz.proc.architecture}
+
+  - id: app.release-service
+    type: application-service
+    name: Релизы и инциденты
+    relations:
+      - {type: serving, to: biz.devops}
+      - {type: serving, to: biz.sre}
+      - {type: serving, to: biz.proc.release}
+
+  - id: app.overview-service
+    type: application-service
+    name: Обзор проекта
+    relations:
+      - {type: serving, to: biz.owner}
+
+  # ── Внешние системы ─────────────────────────────────────────────────────
+  - id: ext.github
+    type: component
+    name: GitHub
+    description: "Хостинг репозитория: REST API, клонирование, PR и webhook'и."
+    props: {c4: system, external: true, technology: "REST + webhooks"}
+    relations:
+      - {type: flow, to: app.api}
+      - {type: serving, to: app.scm}
+
+  - id: ext.gitlab
+    type: component
+    name: GitLab
+    description: "Хостинг репозитория: REST API, клонирование, MR и webhook'и."
+    props: {c4: system, external: true, technology: "REST + webhooks"}
+    relations:
+      - {type: flow, to: app.api}
+      - {type: serving, to: app.scm}
+
+  - id: ext.gitea
+    type: component
+    name: Gitea / Forgejo
+    description: "Хостинг репозитория: REST API, клонирование, PR и webhook'и."
+    props: {c4: system, external: true, technology: "REST + webhooks"}
+    relations:
+      - {type: flow, to: app.api}
+      - {type: serving, to: app.scm}
+
+  - id: ext.llm
+    type: component
+    name: LLM-провайдеры
+    description: "Внешние API моделей: OpenAI, Anthropic, DeepSeek, OpenRouter, Ollama и LM Studio."
+    props: {c4: system, external: true, technology: "OpenAI/Anthropic-совместимые REST API"}
+    relations:
+      - {type: serving, to: app.llm}
+      - {type: serving, to: app.runner.agent}

@@ -2,9 +2,11 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -63,6 +65,9 @@ func (a *agent) executeHostJob(ctx context.Context, job *pb.HostJob, emit func(*
 // runHostJob ждёт SSH нового сервера, исполняет скрипт и возвращает
 // принятый ключ хоста (только при первом подключении).
 func (a *agent) runHostJob(ctx context.Context, job *pb.HostJob, feed func([]byte)) (key string, resultErr error) {
+	if slices.Contains(a.cfg.Capabilities, "docker") {
+		return "", errors.New("docker-runner не исполняет скрипты подготовки хоста")
+	}
 	run := scriptRun{Host: job.Host, HostKey: job.HostKey, Dir: a.cfg.Workdir, Script: job.Script, Env: job.Env}
 	if job.Host != "" && job.AcceptNewHostKey {
 		f, err := os.CreateTemp("", "rivet-known-hosts-*")

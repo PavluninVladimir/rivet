@@ -286,3 +286,24 @@ func TestDockerfileGoMatchesGoMod(t *testing.T) {
 		t.Fatalf("go.mod требует go %s, а Dockerfile собирает на golang:%s-alpine: поднимайте их вместе", m[1], d[1])
 	}
 }
+
+// README называет ту же версию Go, что go.mod: версия поднимается одним
+// изменением. Разошедшийся README просит собрать проект на Go с известной
+// уязвимостью стандартной библиотеки (vulncheck такие находки видит).
+func TestReadmeGoMatchesGoMod(t *testing.T) {
+	mod, err := os.ReadFile("../../go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^go (\S+)$`).FindSubmatch(mod)
+	if m == nil {
+		t.Fatal("в go.mod нет строки go <версия>")
+	}
+	readme, err := os.ReadFile("../../../README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Go " + string(m[1]); !strings.Contains(string(readme), want) {
+		t.Fatalf("go.mod требует go %s, а README не упоминает %q: поднимайте их вместе", m[1], want)
+	}
+}

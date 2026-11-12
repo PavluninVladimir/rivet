@@ -1,0 +1,41 @@
+id: sc.deployment
+title: Публикация окружения и release notes
+process: biz.proc.release
+participants: [biz.devops, app.api, app.orchestrator, app.stream, app.runner.engine, app.ops, tech.postgres]
+steps:
+  - from: biz.devops
+    to: app.api
+    message: "POST /api/v1/environments/{id}/deploy"
+    kind: sync
+  - from: app.api
+    to: tech.postgres
+    message: создать deployment
+    kind: sync
+  - from: app.orchestrator
+    to: app.stream
+    message: PlaneMsg с задачей публикации
+    kind: async
+  - from: app.stream
+    to: app.runner.engine
+    message: назначение по gRPC-потоку
+    kind: async
+  - from: app.runner.engine
+    to: app.stream
+    message: RunnerMsg с результатом публикации
+    kind: async
+  - from: app.stream
+    to: app.orchestrator
+    message: результат публикации
+    kind: async
+  - from: app.orchestrator
+    to: tech.postgres
+    message: обновить deployment и release
+    kind: sync
+  - from: app.orchestrator
+    to: app.ops
+    message: сформировать release notes
+    kind: async
+  - from: app.ops
+    to: tech.postgres
+    message: сохранить release notes
+    kind: sync

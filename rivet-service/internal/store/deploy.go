@@ -52,6 +52,9 @@ func orEmptyCaps(caps []string) []string {
 
 // CreateEnvironment создаёт окружение; дубль имени в проекте — ErrConflict.
 func (s *Store) CreateEnvironment(ctx context.Context, e domain.Environment) (out domain.Environment, err error) {
+	if e.Config.LocalDocker != nil {
+		e.Config.LocalDocker.Defaults()
+	}
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := allocateLocalPort(ctx, tx, &e); err != nil {
 			return err
@@ -75,6 +78,9 @@ func (s *Store) CreateEnvironment(ctx context.Context, e domain.Environment) (ou
 
 // UpdateEnvironment меняет конфигурацию и резервирует порт в одной транзакции.
 func (s *Store) UpdateEnvironment(ctx context.Context, e domain.Environment) (out domain.Environment, err error) {
+	if e.Config.LocalDocker != nil {
+		e.Config.LocalDocker.Defaults()
+	}
 	err = pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
 		if err := allocateLocalPort(ctx, tx, &e); err != nil {
 			return err
@@ -168,6 +174,16 @@ func (s *Store) DeleteEnvironment(ctx context.Context, envID string) error {
 		if live {
 			return fmt.Errorf("у окружения есть хост: сначала удалите его: %w", ErrConflict)
 		}
+		var projectID, name, kind string
+		if err := tx.QueryRow(ctx, `SELECT project_id::text,name,exec_type FROM environments WHERE id=$1`, envID).Scan(&projectID, &name, &kind); err != nil {
+			return nf(err)
+		}
+		if kind == domain.ExecLocalDocker {
+			if _, err := appendEvent(ctx, tx, EventInput{ActorKind: domain.ActorScheduler, Type: "environment.config", ProjectID: projectID, Text: "локальное окружение очищено и удалено: " + name, Payload: map[string]any{"environment_id": envID, "status": "deleted"}}); err != nil {
+				return err
+			}
+		}
+
 		tag, err := tx.Exec(ctx, `DELETE FROM environments WHERE id=$1`, envID)
 		if err != nil {
 			return err
@@ -246,6 +262,17 @@ func (s *Store) ListDeployments(ctx context.Context, envID string, limit int) ([
 // версии version_at, по которому считается состав релиза (спека deployment
 // «Режимы запуска»). Возвращает актуальную queued-запись.
 func (s *Store) EnqueueDeployment(ctx context.Context, envID, version, initiator string) (domain.Deployment, error) {
+	env, lookupErr := s.GetEnvironment(ctx, envID)
+	if lookupErr != nil {
+		return domain.Deployment{}, lookupErr
+	}
+	if env.ExecType == domain.ExecLocalDocker {
+		p, err := s.EnqueueLocalPublication(ctx, envID, version, initiator, initiator == "auto")
+		if err != nil {
+			return domain.Deployment{}, err
+		}
+		return s.GetDeployment(ctx, p.ActiveDeploymentID)
+	}
 	d, err := scanDeployment(s.Pool.QueryRow(ctx, `
 		INSERT INTO deployments (env_id, version, initiator)
 		VALUES ($1,$2,$3)
@@ -308,13 +335,10 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 		err := tx.QueryRow(ctx, `
 			SELECT d.id, d.env_id, r.id
 			FROM deployments d
-			JOIN environments e ON e.id = d.env_id AND NOT e.paused
-				AND e.exec_type IN ('ssh','k8s')
-				-- Окружение с провайдером хоста ждёт готового хоста
-				-- (add-environment-provisioning): до него адреса нет, и
-				-- команды ушли бы на машину runner'а.
-				AND (e.config->'provision' IS NULL OR EXISTS (
-					SELECT 1 FROM env_hosts h WHERE h.env_id = e.id AND h.state = 'ready'))
+			JOIN environments e ON e.id = d.env_id
+                AND (NOT e.paused OR EXISTS(SELECT 1 FROM local_publications lp WHERE lp.active_deployment_id=d.id AND lp.operation<>'publish'))
+                AND e.exec_type IN ('ssh','k8s','local_docker')
+ AND (e.config->'provision' IS NULL OR EXISTS (SELECT 1 FROM env_hosts h WHERE h.env_id=e.id AND h.state='ready'))
 			JOIN LATERAL (
 				SELECT r.id FROM runners r
 				WHERE r.status = 'idle' AND NOT r.draining
@@ -322,6 +346,10 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 				  AND r.capabilities @> e.runner_caps
                       AND (COALESCE(e.config->'provision'->>'provider','') <> 'local' OR EXISTS (
                           SELECT 1 FROM env_hosts h WHERE h.env_id=e.id AND h.state='ready' AND h.local_runner=r.id))
+                  AND (e.exec_type='local_docker' OR NOT (r.capabilities @> ARRAY['docker'] AND r.features @> ARRAY['local_docker_v1']))
+                  AND (e.exec_type<>'local_docker' OR (r.capabilities @> ARRAY['docker'] AND r.features @> ARRAY['local_docker_v1']
+                   AND (NOT EXISTS(SELECT 1 FROM local_publications lp WHERE lp.env_id=e.id AND lp.runner_id<>'')
+                    OR r.id=(SELECT lp.runner_id FROM local_publications lp WHERE lp.env_id=e.id AND lp.runner_id<>'' ORDER BY generation DESC LIMIT 1))))
 				-- Сначала самый «узкий» подходящий runner: иначе обычная
 				-- публикация заняла бы runner с редкими capability, и
 				-- публикация, которой он нужен, ждала бы зря.
@@ -351,6 +379,10 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 			WHERE id=$1`, runnerID, depID); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(ctx, `UPDATE local_environment_preparations SET status='preparing',updated_at=now() WHERE deployment_id=$1`, depID); err != nil {
+			return err
+		}
+
 		var projectID, repo string
 		if err := tx.QueryRow(ctx, `
 			SELECT p.id::text, p.repo_path FROM environments e JOIN projects p ON p.id=e.project_id
@@ -626,7 +658,7 @@ func (s *Store) FailDeploymentIncident(ctx context.Context, depID, runnerID, sta
 // TimedOutDeployments — активные публикации старше дедлайна (watchdog):
 // runner жив, но джоба зависла или результат потерян.
 func (s *Store) TimedOutDeployments(ctx context.Context, olderThan time.Duration) ([]string, error) {
-	return s.timedOutDeployments(ctx, olderThan, "ssh", "k8s")
+	return s.timedOutDeployments(ctx, olderThan, "ssh", "k8s", "local_docker")
 }
 
 // TimedOutExternalDeployments — зависшие публикации внешних окружений:

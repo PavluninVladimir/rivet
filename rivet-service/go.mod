@@ -1,6 +1,6 @@
 module github.com/PavluninVladimir/rivet
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/anthropics/anthropic-sdk-go v1.62.0

@@ -1,0 +1,29 @@
+format: rivet.architecture/v1
+system: Rivet
+description: >-
+  Автономная система разработки: превращает эпики и исследование продукта в
+  выполненные задачи, публикует изменения через SCM и ведёт релизы с наблюдением
+  за окружениями.
+principles:
+  - id: p.postgres-single-source
+    title: PostgreSQL — единственный источник истины состояния
+    rationale: >-
+      Вся изменяемая модель (проекты, эпики, задачи, сессии, релизы) живёт в
+      одной базе; объектное хранилище держит только тяжёлые артефакты по ссылке.
+  - id: p.pull-protocol
+    title: Runner'ы сами забирают работу по gRPC
+    rationale: >-
+      Control plane не адресует runner'ов напрямую: runner регистрируется и
+      получает этапы через двунаправленный поток, поэтому очередей сообщений нет.
+  - id: p.llm-scope
+    title: Модель решает задачу, оркестратор управляет процессом
+    rationale: >-
+      Детерминированные переходы статусов и проверки находятся в коде, а LLM
+      используется для планирования, анализа, разработки, тестирования и review.
+  - id: p.local-runner
+    title: Runner выполняется в среде пользователя
+    rationale: >-
+      Код и песочница находятся на машине runner'а; control plane хранит только
+      отчёты и метаданные сессий.
+scenarios: [sc.epic-decompose, sc.runner-execution, sc.product-discovery, sc.architecture-describe, sc.deployment]
+decisions: [0001-postgres-single-store, 0002-go-deployable-layout, 0003-pull-protocol, 0004-embedded-policy-engine, 0005-scm-and-llm-adapters, 0006-s3-transcripts]

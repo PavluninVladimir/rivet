@@ -51,15 +51,24 @@ func (e *Engine) tickDeployments(ctx context.Context) error {
 		if !ok {
 			break
 		}
-		e.dispatchDeploy(a, a.Deployment.Version, "", false)
+		if !e.dispatchDeploy(a, a.Deployment.Version, "", false) {
+			break
+		}
 	}
 	// Окружения с внешней доставкой идут своим путём: runner им не нужен.
+	if err := e.tickLocalDocker(ctx); err != nil {
+		return err
+	}
 	return e.tickExternalDeployments(ctx)
 }
 
 // dispatchDeploy отправляет деплой-джобу runner'у публикации.
-// Недоступный runner доведёт watchdog (как heartbeat у задач).
-func (e *Engine) dispatchDeploy(a store.DeployAssignment, version, prevVersion string, rollback bool) {
+// Недоставленный local_docker возвращается в очередь без расхода попытки.
+// Остальные публикации восстанавливает watchdog.
+func (e *Engine) dispatchDeploy(a store.DeployAssignment, version, prevVersion string, rollback bool) bool {
+	if a.Env.ExecType == domain.ExecLocalDocker {
+		return e.dispatchLocalDocker(a)
+	}
 	e.mu.Lock()
 	e.deployOwner[a.Deployment.ID] = a.RunnerID
 	e.mu.Unlock()
@@ -106,6 +115,7 @@ func (e *Engine) dispatchDeploy(a store.DeployAssignment, version, prevVersion s
 		slog.Warn("deploy dispatch: runner недоступен, публикацию доведёт watchdog",
 			"runner", a.RunnerID, "deployment", a.Deployment.ID)
 	}
+	return true
 }
 
 // DeployMatches — принадлежит ли сообщение активной публикации этого
@@ -164,6 +174,9 @@ func (e *Engine) OnDeployResult(ctx context.Context, runnerID string, dr *pb.Dep
 		slog.Warn("deploy result чужой публикации отброшен",
 			"deployment", dr.DeploymentId, "runner", runnerID, "stage", dr.Stage)
 		return nil
+	}
+	if len(dr.LocalDockerResult) > 0 {
+		return e.onLocalDockerResult(ctx, runnerID, dr)
 	}
 	dr.Detail = redact.String(dr.Detail)
 	// Фаза отката — durable флаг в БД (память не переживает рестарт rivetd:
@@ -320,6 +333,7 @@ func (e *Engine) failDeployInfra(ctx context.Context, depID, runnerID, detail st
 
 func (e *Engine) failDeployWith(ctx context.Context, depID, runnerID, detail string, incident bool) error {
 	logBuf := e.flushDeployLog(ctx, depID)
+	_ = e.St.FailLocalByDeployment(ctx, depID, detail)
 	var rf *store.ReleaseFailure
 	if incident {
 		rf = e.releaseFailure(ctx, depID, logBuf, detail)

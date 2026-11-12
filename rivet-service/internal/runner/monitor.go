@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -70,6 +71,9 @@ func validText(s string) string { return strings.ToValidUTF8(s, "�") }
 
 // runMonitorCmd исполняет одну команду наблюдения со своим дедлайном.
 func (a *agent) runMonitorCmd(ctx context.Context, job *pb.MonitorJob, script string, timeout time.Duration) (string, error) {
+	if slices.Contains(a.cfg.Capabilities, "docker") {
+		return "", errors.New("docker-runner не исполняет команды наблюдения")
+	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	dj := &pb.DeployJob{Repo: job.Repo, EnvName: job.EnvName, Host: job.Host, HostKey: job.HostKey}
@@ -193,6 +197,9 @@ func (c Config) features() []string {
 	out := []string{featureRoles}
 	if c.Adapter == AdapterNative {
 		out = append(out, featureNative)
+	}
+	if slices.Contains(c.Capabilities, "docker") {
+		return append(out, "local_docker_v1")
 	}
 	for _, cp := range c.Capabilities {
 		if cp == "deploy" {

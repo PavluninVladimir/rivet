@@ -2464,10 +2464,15 @@ type DeployJob struct {
 	Checkout bool   `protobuf:"varint,12,opt,name=checkout,proto3" json:"checkout,omitempty"`
 	RepoUrl  string `protobuf:"bytes,13,opt,name=repo_url,json=repoUrl,proto3" json:"repo_url,omitempty"`
 	GitToken string `protobuf:"bytes,14,opt,name=git_token,json=gitToken,proto3" json:"git_token,omitempty"`
+	// Типизированная конфигурация фиксированного драйвера localdocker.Job.
+	// Отправляется только runner-у с feature local_docker_v1.
+	LocalDockerJob    []byte `protobuf:"bytes,15,opt,name=local_docker_job,json=localDockerJob,proto3" json:"local_docker_job,omitempty"`
+	LocalDockerAction string `protobuf:"bytes,16,opt,name=local_docker_action,json=localDockerAction,proto3" json:"local_docker_action,omitempty"`
 	// Закреплённый ключ хоста (строки known_hosts): ssh проверяет ключ по нему,
 	// а не по known_hosts runner'а (add-environment-provisioning). Пусто:
 	// прежнее поведение.
-	HostKey       string `protobuf:"bytes,15,opt,name=host_key,json=hostKey,proto3" json:"host_key,omitempty"`
+	// Номера 15 и 16 уже заняты выпущенным local_docker_v1.
+	HostKey       string `protobuf:"bytes,17,opt,name=host_key,json=hostKey,proto3" json:"host_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2600,6 +2605,20 @@ func (x *DeployJob) GetGitToken() string {
 	return ""
 }
 
+func (x *DeployJob) GetLocalDockerJob() []byte {
+	if x != nil {
+		return x.LocalDockerJob
+	}
+	return nil
+}
+
+func (x *DeployJob) GetLocalDockerAction() string {
+	if x != nil {
+		return x.LocalDockerAction
+	}
+	return ""
+}
+
 func (x *DeployJob) GetHostKey() string {
 	if x != nil {
 		return x.HostKey
@@ -2610,14 +2629,16 @@ func (x *DeployJob) GetHostKey() string {
 // DeployResult — итог этапа публикации; чужой/stale deployment_id
 // отбрасывается CAS-переходами статусов.
 type DeployResult struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DeploymentId  string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
-	Stage         DeployResult_Stage     `protobuf:"varint,2,opt,name=stage,proto3,enum=rivet.v1.DeployResult_Stage" json:"stage,omitempty"`
-	Ok            bool                   `protobuf:"varint,3,opt,name=ok,proto3" json:"ok,omitempty"`
-	Detail        string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`      // хвост вывода команд / причина
-	Rollback      bool                   `protobuf:"varint,5,opt,name=rollback,proto3" json:"rollback,omitempty"` // эхо DeployJob.rollback: результат фазы отката
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	DeploymentId string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
+	Stage        DeployResult_Stage     `protobuf:"varint,2,opt,name=stage,proto3,enum=rivet.v1.DeployResult_Stage" json:"stage,omitempty"`
+	Ok           bool                   `protobuf:"varint,3,opt,name=ok,proto3" json:"ok,omitempty"`
+	Detail       string                 `protobuf:"bytes,4,opt,name=detail,proto3" json:"detail,omitempty"`      // хвост вывода команд / причина
+	Rollback     bool                   `protobuf:"varint,5,opt,name=rollback,proto3" json:"rollback,omitempty"` // эхо DeployJob.rollback: результат фазы отката
+	// localdocker.Result; CAS привязан к deployment_id операции.
+	LocalDockerResult []byte `protobuf:"bytes,6,opt,name=local_docker_result,json=localDockerResult,proto3" json:"local_docker_result,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *DeployResult) Reset() {
@@ -2683,6 +2704,13 @@ func (x *DeployResult) GetRollback() bool {
 		return x.Rollback
 	}
 	return false
+}
+
+func (x *DeployResult) GetLocalDockerResult() []byte {
+	if x != nil {
+		return x.LocalDockerResult
+	}
+	return nil
 }
 
 // MonitorJob — проверка наблюдения окружения (add-sdlc-cycle, спека
@@ -3315,7 +3343,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"CancelTask\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\"#\n" +
 	"\vPauseRunner\x12\x14\n" +
-	"\x05drain\x18\x01 \x01(\bR\x05drain\"\xb5\x03\n" +
+	"\x05drain\x18\x01 \x01(\bR\x05drain\"\x8f\x04\n" +
 	"\tDeployJob\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12\x19\n" +
 	"\benv_name\x18\x02 \x01(\tR\aenvName\x12\x12\n" +
@@ -3334,14 +3362,17 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\ttimeout_s\x18\v \x01(\x05R\btimeoutS\x12\x1a\n" +
 	"\bcheckout\x18\f \x01(\bR\bcheckout\x12\x19\n" +
 	"\brepo_url\x18\r \x01(\tR\arepoUrl\x12\x1b\n" +
-	"\tgit_token\x18\x0e \x01(\tR\bgitToken\x12\x19\n" +
-	"\bhost_key\x18\x0f \x01(\tR\ahostKey\"\xe3\x01\n" +
+	"\tgit_token\x18\x0e \x01(\tR\bgitToken\x12(\n" +
+	"\x10local_docker_job\x18\x0f \x01(\fR\x0elocalDockerJob\x12.\n" +
+	"\x13local_docker_action\x18\x10 \x01(\tR\x11localDockerAction\x12\x19\n" +
+	"\bhost_key\x18\x11 \x01(\tR\ahostKey\"\x93\x02\n" +
 	"\fDeployResult\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x122\n" +
 	"\x05stage\x18\x02 \x01(\x0e2\x1c.rivet.v1.DeployResult.StageR\x05stage\x12\x0e\n" +
 	"\x02ok\x18\x03 \x01(\bR\x02ok\x12\x16\n" +
 	"\x06detail\x18\x04 \x01(\tR\x06detail\x12\x1a\n" +
-	"\brollback\x18\x05 \x01(\bR\brollback\"6\n" +
+	"\brollback\x18\x05 \x01(\bR\brollback\x12.\n" +
+	"\x13local_docker_result\x18\x06 \x01(\fR\x11localDockerResult\"6\n" +
 	"\x05Stage\x12\x15\n" +
 	"\x11STAGE_UNSPECIFIED\x10\x00\x12\n" +
 	"\n" +

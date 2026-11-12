@@ -129,3 +129,36 @@ func TestRotateInfraToken(t *testing.T) {
 		t.Fatal("токен читается прежним ключом")
 	}
 }
+
+func TestDockerDriverIsNeverSelectedForShellHostOrMonitoring(t *testing.T) {
+	s := testStore(t)
+	ctx := context.Background()
+	local := seedLocal(t, s)
+	env, err := s.CreateEnvironment(ctx, domain.Environment{ProjectID: local.ProjectID, Name: "ssh", ExecType: domain.ExecSSH, Trigger: "manual", Config: domain.EnvConfig{DeployCmd: "true", VerifyCmd: "true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Старый runner уже мог объявить host_jobs до обновления control plane.
+	if err = s.UpsertRunner(ctx, domain.Runner{ID: "docker", Capabilities: []string{"deploy", "docker"}, Features: []string{"local_docker_v1", "host_jobs", "monitor", "monitor_url"}}); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok, err := s.HostRunner(ctx, env); err != nil || ok {
+		t.Fatal("Docker driver selected for host script", id, err)
+	}
+	for _, url := range []bool{false, true} {
+		if id, ok, err := s.MonitorRunner(ctx, env, url); err != nil || ok {
+			t.Fatal("Docker driver selected for generic monitoring", id, err)
+		}
+	}
+	if err = s.UpsertRunner(ctx, domain.Runner{ID: "shell", Capabilities: []string{"deploy"}, Features: []string{"host_jobs", "monitor", "monitor_url"}}); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok, err := s.HostRunner(ctx, env); err != nil || !ok || id != "shell" {
+		t.Fatal("regular deploy runner not selected", id, err)
+	}
+	for _, url := range []bool{false, true} {
+		if id, ok, err := s.MonitorRunner(ctx, env, url); err != nil || !ok || id != "shell" {
+			t.Fatal("regular monitor runner not selected", id, err)
+		}
+	}
+}

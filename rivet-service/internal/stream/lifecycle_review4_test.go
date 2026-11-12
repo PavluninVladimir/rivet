@@ -73,16 +73,22 @@ func (f *lifecycleFixture) register(t *testing.T, boot string, pending []string)
 
 func (f *lifecycleFixture) open(t *testing.T) pb.RunnerService_ChannelClient {
 	t.Helper()
-	s, err := f.client.Channel(f.authed)
+	ctx, cancel := context.WithTimeout(f.authed, 15*time.Second)
+	t.Cleanup(cancel)
+	s, err := f.client.Channel(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Send(&pb.RunnerMsg{MsgId: "hello-" + time.Now().String(), Kind: &pb.RunnerMsg_Hello{Hello: &pb.Hello{RunnerId: "r1"}}}); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 200 && !f.reg.Connected("r1"); i++ {
-		time.Sleep(10 * time.Millisecond)
+	// Registry может ещё указывать на старый канал. Ack нового heartbeat
+	// подтверждает готовность именно этого соединения и RunnerAttached в БД.
+	readyID := "ready-" + time.Now().String()
+	if err := s.Send(&pb.RunnerMsg{MsgId: readyID, Kind: &pb.RunnerMsg_Heartbeat{Heartbeat: &pb.Heartbeat{}}}); err != nil {
+		t.Fatal(err)
 	}
+	recvAck(t, s, readyID)
 	return s
 }
 

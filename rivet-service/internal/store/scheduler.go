@@ -205,14 +205,15 @@ func (s *Store) RecomputeEpic(ctx context.Context, epicID string) error {
 		}
 
 		// Epic done: не осталось нетерминальных задач.
-		var remaining int
+		var total, remaining int
 		if err := tx.QueryRow(ctx, `
-			SELECT count(*) FROM tasks WHERE epic_id=$1 AND status NOT IN ('done','cancelled')`,
-			epicID).Scan(&remaining); err != nil {
+			SELECT count(*), count(*) FILTER (WHERE status NOT IN ('done','cancelled'))
+			FROM tasks WHERE epic_id=$1`,
+			epicID).Scan(&total, &remaining); err != nil {
 			return err
 		}
 		// Epic «Сопровождение» постоянный: новые баги приходят в тот же Epic.
-		if remaining == 0 && epicKind != domain.EpicMaintenance {
+		if total > 0 && remaining == 0 && epicKind != domain.EpicMaintenance {
 			if _, err := tx.Exec(ctx, `UPDATE epics SET status='done' WHERE id=$1`, epicID); err != nil {
 				return err
 			}

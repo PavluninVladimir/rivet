@@ -369,6 +369,9 @@ func agentAllowed(req *pb.RegisterRequest) (string, bool) {
 		}
 		return "", true
 	case "":
+		if len(req.Capabilities) == 2 && slices.Contains(req.Capabilities, "deploy") && slices.Contains(req.Capabilities, "docker") && slices.Contains(req.Features, "local_docker_v1") {
+			return "", true
+		}
 		if len(req.Capabilities) == 1 && req.Capabilities[0] == "deploy" {
 			return "", true
 		}

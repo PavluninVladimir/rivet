@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +30,14 @@ const (
 )
 
 func (a *agent) executeDeploy(ctx context.Context, job *pb.DeployJob, emit func(*pb.RunnerMsg)) {
+	if len(job.LocalDockerJob) > 0 {
+		a.executeLocalDocker(ctx, job, emit)
+		return
+	}
+	if slices.Contains(a.cfg.Capabilities, "docker") {
+		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_DeployResult{DeployResult: &pb.DeployResult{DeploymentId: job.DeploymentId, Stage: pb.DeployResult_DEPLOY, Detail: "Docker-runner исполняет только фиксированный драйвер локальной публикации"}}})
+		return
+	}
 	timeout := defaultDeployTimeout
 	if job.TimeoutS > 0 {
 		timeout = time.Duration(job.TimeoutS) * time.Second

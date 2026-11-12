@@ -316,10 +316,10 @@ func (s *Store) TransitionEpic(ctx context.Context, epicID string, to domain.Epi
 			}
 		}
 		var from domain.EpicStatus
-		var projectID string
+		var projectID, kind string
 		if err := tx.QueryRow(ctx,
-			`SELECT status, project_id FROM epics WHERE id = $1 FOR UPDATE`, epicID).
-			Scan(&from, &projectID); err != nil {
+			`SELECT status, project_id, kind FROM epics WHERE id = $1 FOR UPDATE`, epicID).
+			Scan(&from, &projectID, &kind); err != nil {
 			return err
 		}
 		ev.ProjectID, ev.EpicID = projectID, epicID
@@ -330,6 +330,24 @@ func (s *Store) TransitionEpic(ctx context.Context, epicID string, to domain.Epi
 			d.Text = bad.Error()
 			denied = &d
 			return bad
+		}
+		if to == domain.EpicRunning && kind == domain.KindWork {
+			var hasTasks bool
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tasks WHERE epic_id=$1)`, epicID).Scan(&hasTasks); err != nil {
+				return err
+			}
+			if !hasTasks {
+				err := fmt.Errorf("%w: перед запуском Epic составьте план и добавьте хотя бы одну задачу", ErrConflict)
+				d := ev
+				d.Type, d.Text = "epic.transition_denied", err.Error()
+				denied = &d
+				return err
+			}
+		}
+		if to == domain.EpicRunning && kind == domain.KindWork {
+			if err := prepareLocalStandTx(ctx, tx, projectID); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.Exec(ctx, `UPDATE epics SET status=$2 WHERE id=$1`, epicID, to); err != nil {
 			return err

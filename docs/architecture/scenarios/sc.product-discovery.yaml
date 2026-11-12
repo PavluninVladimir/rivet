@@ -1,0 +1,53 @@
+id: sc.product-discovery
+title: Анализ интервью и утверждение бэклога
+process: biz.proc.discovery
+participants: [biz.owner, app.api, app.analyst, app.discovery, app.llm, ext.llm, tech.postgres]
+steps:
+  - from: biz.owner
+    to: app.api
+    message: "POST /api/v1/projects/{id}/discovery/interviews"
+    kind: sync
+  - from: app.api
+    to: tech.postgres
+    message: сохранить интервью
+    kind: sync
+  - from: biz.owner
+    to: app.api
+    message: "POST /api/v1/projects/{id}/discovery/runs"
+    kind: sync
+  - from: app.api
+    to: app.analyst
+    message: запустить анализ
+    kind: sync
+  - from: app.analyst
+    to: app.discovery
+    message: проверить конспекты и синтез
+    kind: sync
+  - from: app.analyst
+    to: app.llm
+    message: конспект и синтез потребностей
+    kind: sync
+  - from: app.llm
+    to: ext.llm
+    message: REST-запрос к модели
+    kind: sync
+  - from: ext.llm
+    to: app.llm
+    message: ответ модели
+    kind: return
+  - from: app.llm
+    to: app.analyst
+    message: потребности и бэклог
+    kind: return
+  - from: app.analyst
+    to: tech.postgres
+    message: сохранить конспекты и бэклог
+    kind: sync
+  - from: biz.owner
+    to: app.api
+    message: "POST /api/v1/projects/{id}/discovery/runs/{id}/approve"
+    kind: sync
+  - from: app.api
+    to: tech.postgres
+    message: создать Epic'и из бэклога
+    kind: sync
