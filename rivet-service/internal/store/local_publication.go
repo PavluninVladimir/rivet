@@ -94,7 +94,7 @@ func (s *Store) CurrentLocalPublication(ctx context.Context, envID string) (Loca
 }
 func localRunner(ctx context.Context, tx pgx.Tx, envID string) (bool, error) {
 	var ok bool
-	e := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM runners r JOIN environments e ON e.id=$1 WHERE r.status<>'offline' AND NOT r.draining AND r.capabilities @> ARRAY['deploy','docker'] AND r.capabilities @> e.runner_caps AND r.features @> ARRAY['local_docker_v1'] AND (NOT EXISTS(SELECT 1 FROM local_publications p WHERE p.env_id=e.id AND p.runner_id<>'') OR r.id=(SELECT runner_id FROM local_publications p WHERE p.env_id=e.id AND p.runner_id<>'' ORDER BY generation DESC LIMIT 1)))`, envID).Scan(&ok)
+	e := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM runners r JOIN environments e ON e.id=$1 WHERE r.status<>'offline' AND NOT r.draining AND r.capabilities @> ARRAY['deploy','docker'] AND r.capabilities @> e.runner_caps AND r.features @> ARRAY['local_docker_v1'] AND (NOT EXISTS(SELECT 1 FROM environment_secrets es WHERE es.env_id=e.id) OR (r.secure AND cardinality(r.capabilities)=2 AND r.features @> ARRAY['local_docker_secrets_v1'])) AND (NOT EXISTS(SELECT 1 FROM local_publications p WHERE p.env_id=e.id AND p.runner_id<>'') OR r.id=(SELECT runner_id FROM local_publications p WHERE p.env_id=e.id AND p.runner_id<>'' ORDER BY generation DESC LIMIT 1)))`, envID).Scan(&ok)
 	return ok, e
 }
 func localBusy(ctx context.Context, tx pgx.Tx, envID string) (bool, error) {
@@ -180,6 +180,9 @@ func (s *Store) EnqueueLocalPublication(ctx context.Context, envID, version, ini
 		cfg, _ := json.Marshal(env.Config.LocalDocker)
 		p, e = scanLocal(tx.QueryRow(ctx, `INSERT INTO local_publications(env_id,deployment_id,active_deployment_id,version,generation,config,log_ref) VALUES($1,$2::uuid,$2::uuid,$3,(SELECT COALESCE(max(generation),0)+1 FROM local_publications WHERE env_id=$1),$4,$2::text) RETURNING `+localCols, envID, depID, version, cfg))
 		if e != nil {
+			return e
+		}
+		if _, e = tx.Exec(ctx, `INSERT INTO local_publication_secrets(publication_id,name,value_enc) SELECT $1,name,value_enc FROM environment_secrets WHERE env_id=$2`, p.ID, envID); e != nil {
 			return e
 		}
 		_, e = appendEvent(ctx, tx, EventInput{ActorKind: domain.ActorUser, ActorID: initiator, Type: "environment.publish", ProjectID: env.ProjectID, Text: "публикация локального окружения: " + env.Name, Payload: map[string]any{"environment_id": envID, "publication_id": p.ID, "generation": p.Generation, "version": version}})
@@ -286,6 +289,13 @@ func (s *Store) AcceptLocalResult(ctx context.Context, depID, runnerID string, r
 		p, e = scanLocal(tx.QueryRow(ctx, `SELECT `+localCols+` FROM local_publications WHERE active_deployment_id=$1 FOR UPDATE`, depID))
 		if e != nil {
 			return e
+		}
+		var sensitive bool
+		if e = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM local_publication_secrets WHERE publication_id=$1)`, p.ID).Scan(&sensitive); e != nil {
+			return e
+		}
+		if sensitive {
+			res = localdocker.ProtectResult(res)
 		}
 		var repeated bool
 		if e = tx.QueryRow(ctx, `SELECT COALESCE(completed_operation_id=$2::uuid,false) FROM local_publications WHERE id=$1`, p.ID, depID).Scan(&repeated); e != nil {
@@ -414,6 +424,13 @@ func localTail(s string) string {
 	return strings.ReplaceAll(strings.ToValidUTF8(s, ""), "\x00", "")
 }
 func (s *Store) SaveLocalBuilderLog(ctx context.Context, depID string, b []byte) error {
+	sensitive, err := s.DeploymentHasApplicationSecrets(ctx, depID)
+	if err != nil {
+		return err
+	}
+	if sensitive {
+		b = []byte(localdocker.SensitiveLogMessage)
+	}
 	_, e := s.Pool.Exec(ctx, `UPDATE local_publications SET builder_log=$2 WHERE deployment_id=$1`, depID, localTail(string(b)))
 	return e
 }
@@ -424,6 +441,13 @@ func (s *Store) LocalLogs(ctx context.Context, envID, stream string) (string, er
 	}
 	if e != nil {
 		return "", e
+	}
+	var sensitive bool
+	if err := s.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM local_publication_secrets WHERE publication_id=$1)`, p.ID).Scan(&sensitive); err != nil {
+		return "", err
+	}
+	if sensitive {
+		return localdocker.SensitiveLogMessage, nil
 	}
 	if stream == "container" && p.Status == "stopped" {
 		return "", ErrNotFound

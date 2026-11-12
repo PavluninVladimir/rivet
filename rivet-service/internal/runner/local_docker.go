@@ -18,7 +18,11 @@ var _ io.Writer = localLog(nil)
 func (a *agent) executeLocalDocker(ctx context.Context, dep *pb.DeployJob, emit func(*pb.RunnerMsg)) {
 	ctx, cancel := context.WithTimeout(ctx, defaultDeployTimeout)
 	defer cancel()
+	sensitive := false
 	send := func(v localdocker.Result) {
+		if sensitive {
+			v = localdocker.ProtectResult(v)
+		}
 		b, _ := json.Marshal(v)
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_DeployResult{DeployResult: &pb.DeployResult{DeploymentId: dep.DeploymentId, Stage: pb.DeployResult_VERIFY, Ok: v.Status == "running" || v.Status == "stopped", LocalDockerResult: b}}})
 	}
@@ -31,7 +35,15 @@ func (a *agent) executeLocalDocker(ctx context.Context, dep *pb.DeployJob, emit 
 		send(localdocker.Result{Status: "failed", Reason: &localdocker.Failure{Code: "config_invalid", Message: "повреждённое задание публикации"}})
 		return
 	}
+	if len(job.Secrets) > 0 {
+		job.Sensitive = true
+	}
+	sensitive = job.Sensitive
+	// Never stream raw Docker or checkout output for a secret-bearing job.
 	log := localLog(func(b []byte) {
+		if job.Sensitive {
+			return
+		}
 		emit(&pb.RunnerMsg{MsgId: newMsgID(), Kind: &pb.RunnerMsg_Transcript{Transcript: &pb.TranscriptChunk{DeployId: dep.DeploymentId, Data: b}}})
 	})
 	rt := localdocker.Runtime{Log: log, Progress: func(status string) error { send(localdocker.Result{Status: status}); return ctx.Err() }}

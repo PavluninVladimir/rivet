@@ -34,7 +34,7 @@ func rotateKey(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 	slog.Info("секреты перешифрованы новым ключом: запускайте rivetd с RIVET_SECRET_KEY, прежний ключ больше не нужен",
-		"scm_credentials", res.Credentials, "connection_keys", res.ConnectionKeys, "infra_tokens", res.InfraTokens,
+		"scm_credentials", res.Credentials, "connection_keys", res.ConnectionKeys, "infra_tokens", res.InfraTokens, "application_secrets", res.ApplicationSecrets,
 		"connection_headers", res.ConnectionHeaders, "already_new", res.AlreadyNew)
 	return nil
 }

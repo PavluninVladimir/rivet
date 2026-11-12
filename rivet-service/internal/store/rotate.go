@@ -34,7 +34,8 @@ type RotateResult struct {
 	InfraTokens int `json:"infra_tokens"`
 	// AlreadyNew: секреты, которые уже читаются новым ключом (их
 	// сохранили после смены ключа): остаются как есть.
-	AlreadyNew int `json:"already_new"`
+	AlreadyNew         int `json:"already_new"`
+	ApplicationSecrets int `json:"application_secrets"`
 }
 
 // UndecryptableError: секреты, которые не читаются ни прежним, ни новым
@@ -89,7 +90,7 @@ func (s *Store) RotateSecrets(ctx context.Context, oldBox, newBox *secretbox.Box
 		// Запись секретов работающим rivetd ждёт конца транзакции: иначе
 		// секрет, сохранённый прежним ключом посреди перешифровки, остался
 		// бы под ним.
-		if _, err := tx.Exec(ctx, `LOCK TABLE scm_credentials, model_connections, infra_connections IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		if _, err := tx.Exec(ctx, `LOCK TABLE scm_credentials, model_connections, infra_connections, environment_secrets, local_publication_secrets IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 			var pgErr *pgconn.PgError
 			if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
 				return ErrSecretsBusy
@@ -246,12 +247,50 @@ func (s *Store) RotateSecrets(ctx context.Context, oldBox, newBox *secretbox.Box
 			res.InfraTokens++
 		}
 
+		// Both current values and immutable generation snapshots rotate atomically.
+		for _, table := range []struct{ name, key string }{{"environment_secrets", "env_id"}, {"local_publication_secrets", "publication_id"}} {
+			rows, err := tx.Query(ctx, "SELECT "+table.key+"::text,name,value_enc FROM "+table.name+" ORDER BY "+table.key+",name")
+			if err != nil {
+				return err
+			}
+			type appRow struct {
+				id, name string
+				enc      []byte
+			}
+			var apps []appRow
+			for rows.Next() {
+				var v appRow
+				if err := rows.Scan(&v.id, &v.name, &v.enc); err != nil {
+					rows.Close()
+					return err
+				}
+				apps = append(apps, v)
+			}
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			for _, v := range apps {
+				enc, changed, err := recrypt(v.enc, "секрет приложения "+v.id+" "+v.name)
+				if err != nil {
+					return err
+				}
+				if !changed {
+					continue
+				}
+				if _, err = tx.Exec(ctx, "UPDATE "+table.name+" SET value_enc=$3 WHERE "+table.key+"=$1 AND name=$2", v.id, v.name, enc); err != nil {
+					return err
+				}
+				res.ApplicationSecrets++
+			}
+		}
+
 		if len(bad) > 0 {
 			return &UndecryptableError{Items: bad}
 		}
 		_, err = appendEvent(ctx, tx, EventInput{
 			ActorKind: domain.ActorSystem, ActorID: "rotate-key", Type: "secret_key.rotated",
-			Text:    fmt.Sprintf("ключ шифрования секретов сменён: перешифровано %d", res.Credentials+res.ConnectionKeys+res.ConnectionHeaders+res.InfraTokens),
+			Text:    fmt.Sprintf("ключ шифрования секретов сменён: перешифровано %d", res.Credentials+res.ConnectionKeys+res.ConnectionHeaders+res.InfraTokens+res.ApplicationSecrets),
 			Payload: res,
 		})
 		return err

@@ -199,7 +199,7 @@ func (c Config) features() []string {
 		out = append(out, featureNative)
 	}
 	if slices.Contains(c.Capabilities, "docker") {
-		return append(out, "local_docker_v1")
+		return append(out, "local_docker_v1", "local_docker_secrets_v1")
 	}
 	for _, cp := range c.Capabilities {
 		if cp == "deploy" {

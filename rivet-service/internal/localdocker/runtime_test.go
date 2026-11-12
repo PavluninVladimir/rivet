@@ -98,6 +98,8 @@ func TestDockerLifecycle(t *testing.T) {
 	defer cancel()
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
 	j := fixtureJob()
+	j.Secrets = map[string]string{"APP_GREETING": "runtime-only-fixture-value"}
+	j.Sensitive = true
 	j.EnvironmentID = "fixture-" + suffix
 	j.PublicationID = "fixture-pub-" + suffix
 	j.Config.StartupTimeoutS = 15
@@ -115,7 +117,7 @@ func TestDockerLifecycle(t *testing.T) {
 	})
 	root := files(t, map[string]string{"go.mod": "module fixture\ngo 1.26.11\n", "main.go": `package main
 import("net/http";"os")
-func main(){http.HandleFunc("/",func(w http.ResponseWriter,r *http.Request){p:="/data/marker";b,_:=os.ReadFile(p);if len(b)==0{b=[]byte("persisted");_ = os.WriteFile(p,b,0600)};_,_=w.Write(b)});_ = http.ListenAndServe(":"+os.Getenv("PORT"),nil)}
+func main(){http.HandleFunc("/",func(w http.ResponseWriter,r *http.Request){w.Header().Set("X-Secret-Probe",os.Getenv("APP_GREETING"));p:="/data/marker";b,_:=os.ReadFile(p);if len(b)==0{b=[]byte("persisted");_ = os.WriteFile(p,b,0600)};_,_=w.Write(b)});_ = http.ListenAndServe(":"+os.Getenv("PORT"),nil)}
 `})
 	res := r.Publish(ctx, root, j)
 	if res.Status != "running" {
@@ -137,6 +139,12 @@ func main(){http.HandleFunc("/",func(w http.ResponseWriter,r *http.Request){p:="
 	resp, e := http.Get(res.HealthURL)
 	if e != nil {
 		t.Fatal(e)
+	}
+	if resp.Header.Get("X-Secret-Probe") != j.Secrets["APP_GREETING"] {
+		t.Fatal("runtime secret not delivered")
+	}
+	if logs := r.Operate(ctx, "logs", j); logs.Logs != SensitiveLogMessage {
+		t.Fatal("secret-bearing output exposed")
 	}
 	b, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
