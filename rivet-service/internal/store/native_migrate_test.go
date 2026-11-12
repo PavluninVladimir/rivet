@@ -80,9 +80,18 @@ func TestMigration0034NativeAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	exec(`UPDATE epics SET status='running' WHERE id=$1`, epic.ID)
-	running, _ := s.CreateTask(ctx, epic.ID, NewTask{Title: "идёт на старом runner'е"})
-	waiting, _ := s.CreateTask(ctx, epic.ID, NewTask{Title: "ждёт ревьюера"})
-	done, _ := s.CreateTask(ctx, epic.ID, NewTask{Title: "готова"})
+	// Seed the old schema directly: current CreateTask requires schema 0051.
+	legacyTask := func(title string) struct{ ID string } {
+		var out struct{ ID string }
+		if err := s.Pool.QueryRow(ctx, `INSERT INTO tasks(epic_id,title) VALUES($1,$2) RETURNING id`, epic.ID, title).Scan(&out.ID); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	running := legacyTask("running on retired runner")
+	waiting := legacyTask("waiting for reviewer")
+	done := legacyTask("completed")
+
 	snapshot := `{"steps":[
 		{"id":"code","kind":"code","participants":[{"id":"p1","agent":{"role":"developer","kind":"claude-code","model":"claude-sonnet-x"}}],"x_future":1},
 		{"id":"review","kind":"review","participants":[{"id":"p1","agent":{"kind":"codex","model":"gpt-5"}},{"id":"p2","user":{"login":"vova"}}]}]}`

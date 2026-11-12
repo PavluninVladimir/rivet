@@ -29,6 +29,7 @@ const (
 	JobDeployAnalysis      = "deploy_analysis"
 	JobIncidentDescription = "incident_description"
 	JobGitHubIssues        = "github_issues"
+	JobEpicAssessment      = "epic_architecture_assessment"
 )
 
 const (
@@ -49,6 +50,9 @@ type OpsJob struct {
 }
 
 func (j OpsJob) role() string {
+	if j.Kind == JobEpicAssessment {
+		return domain.RoleArchitect
+	}
 	if j.Kind == JobIncidentDescription || j.Kind == JobGitHubIssues {
 		return domain.RoleSRE
 	}
@@ -256,6 +260,10 @@ var errNoModel = errors.New("модель агента не настроена")
 
 // complete — вызов модели исполнителя с учётом usage проекта по роли.
 func (e *Engine) complete(ctx context.Context, a opsAgent, projectID, prompt string) (string, error) {
+	return e.completeBounded(ctx, a, projectID, prompt, 0)
+}
+
+func (e *Engine) completeBounded(ctx context.Context, a opsAgent, projectID, prompt string, maxTokens int) (string, error) {
 	if a.model == "" {
 		return "", errNoModel
 	}
@@ -275,7 +283,7 @@ func (e *Engine) complete(ctx context.Context, a opsAgent, projectID, prompt str
 		case !c.Enabled:
 			return "", fmt.Errorf("подключение %s отключено", c.ID)
 		}
-		out, use, err = cl.CompleteWithUsage(ctx, a.model, prompt, 0)
+		out, use, err = cl.CompleteWithUsage(ctx, a.model, prompt, maxTokens)
 	}
 	// Usage проекта с ролью шаблона: runner'а у задания нет, токены — как
 	// сообщил провайдер (nil — не сообщил).
@@ -294,16 +302,23 @@ func (e *Engine) opsEvent(ctx context.Context, job OpsJob, a opsAgent, state, te
 	if agentID == "" {
 		agentID = "role:" + a.role.ID
 	}
+	payload := map[string]any{"agent_id": agentID, "kind": job.Kind, "ref_id": job.RefID, "state": state}
+	if job.Kind == JobEpicAssessment {
+		payload["phase_from"], payload["phase_to"] = "architecture", "architecture"
+	}
 	if _, err := e.St.AppendEvent(context.WithoutCancel(ctx), store.EventInput{
 		ActorKind: domain.ActorSystem, ActorID: a.id(), Type: "ops.job", ProjectID: job.ProjectID,
 		Text:    text,
-		Payload: map[string]any{"agent_id": agentID, "kind": job.Kind, "ref_id": job.RefID, "state": state},
+		Payload: payload,
 	}); err != nil {
 		slog.Error("событие ops.job", "kind", job.Kind, "err", err)
 	}
 }
 
 func (e *Engine) runOpsJob(ctx context.Context, job OpsJob, agentID string) error {
+	if job.Kind == JobEpicAssessment {
+		return e.runEpicAssessment(ctx, job, agentID)
+	}
 	a, err := e.resolveOpsAgent(ctx, job.role(), agentID)
 	if err != nil {
 		return err

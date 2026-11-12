@@ -253,9 +253,17 @@ func (s *Server) listTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	member := map[string]bool{}
+	assessmentWork, err := s.St.ActiveAssessmentWork(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	out := make([]teamAgentView, 0, len(team))
 	for _, a := range team {
 		v := teamAgentDTO(a, roles)
+		if work := assessmentWork[a.ID]; work != nil && !v.Busy {
+			v.Busy, v.Step, v.EpicID, v.ProjectID = true, "architecture_assessment", work.ID, work.ProjectID
+		}
 		// Тимлид составляет план (декомпозиция идёт в этом процессе rivetd).
 		if d, ok := s.decompositionOf(a.ID); ok && !v.Busy {
 			v.Busy, v.Step, v.EpicID, v.ProjectID = true, stepDecompose, d.EpicID, d.ProjectID

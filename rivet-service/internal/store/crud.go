@@ -142,6 +142,10 @@ type PlanTask struct {
 // задач. Две одновременные декомпозиции не дают двух планов, а сбой
 // посередине не оставляет половину плана.
 func (s *Store) CreatePlan(ctx context.Context, epicID string, plan []PlanTask) ([]domain.Task, error) {
+	return s.CreatePlanAtArchitectureRevision(ctx, epicID, plan, 0)
+}
+
+func (s *Store) CreatePlanAtArchitectureRevision(ctx context.Context, epicID string, plan []PlanTask, revision int64) ([]domain.Task, error) {
 	epic, err := s.GetEpic(ctx, epicID)
 	if err != nil {
 		return nil, err
@@ -159,6 +163,9 @@ func (s *Store) CreatePlan(ctx context.Context, epicID string, plan []PlanTask) 
 		}
 		if status != domain.EpicPlanned {
 			return domain.ErrBadTransition{Entity: "epic", From: string(status), To: "decompose"}
+		}
+		if err := requireArchitectureTx(ctx, tx, epicID, revision); err != nil {
+			return err
 		}
 		var n int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM tasks WHERE epic_id=$1`, epicID).Scan(&n); err != nil {
@@ -239,6 +246,9 @@ func (s *Store) CreateTask(ctx context.Context, epicID string, in NewTask) (doma
 	crit, _ := json.Marshal(in.Criteria)
 	var t domain.Task
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if err := requireArchitectureTx(ctx, tx, epicID, 0); err != nil {
+			return err
+		}
 		err := tx.QueryRow(ctx, `
 			INSERT INTO tasks (epic_id, title, description, estimate, capabilities, criteria, attempt_limit)
 			VALUES ($1,$2,$3,$4,$5,$6,$7)

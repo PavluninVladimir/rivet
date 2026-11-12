@@ -168,6 +168,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/epics/{id}", s.patchEpic)
 	mux.HandleFunc("POST /api/v1/epics/{id}/tasks", s.addTask)
 	mux.HandleFunc("POST /api/v1/epics/{id}/decompose", s.decompose)
+	mux.HandleFunc("GET /api/v1/epics/{id}/architecture-assessment", s.getEpicAssessment)
+	mux.HandleFunc("POST /api/v1/epics/{id}/architecture-assessment/retry", s.retryEpicAssessment)
 	mux.HandleFunc("PUT /api/v1/epics/{id}/deps", s.putEpicDeps)
 	mux.HandleFunc("GET /api/v1/projects/{id}/discovery", s.getDiscovery)
 	mux.HandleFunc("POST /api/v1/projects/{id}/discovery/interviews", s.addInterview)
@@ -268,6 +270,8 @@ func writeErr(w http.ResponseWriter, err error) {
 	code := "internal"
 	var bad domain.ErrBadTransition
 	switch {
+	case store.IsArchitectureRequired(err):
+		status, code = http.StatusConflict, "architecture_required"
 	case errors.Is(err, store.ErrNotFound):
 		status, code = http.StatusNotFound, "not_found"
 	case errors.As(err, &bad):
@@ -645,10 +649,11 @@ func (s *Server) enrichedEpic(r *http.Request, e domain.Epic) domain.Epic {
 
 type epicView struct {
 	domain.Epic
-	Tasks      []domain.Task    `json:"tasks"`
-	Progress   map[string]any   `json:"progress"`
-	Usage      []store.UsageRow `json:"usage,omitempty"`
-	UsageTotal *store.UsageRow  `json:"usage_total,omitempty"`
+	ArchitectureAssessment *store.AssessmentView `json:"architecture_assessment,omitempty"`
+	Tasks                  []domain.Task         `json:"tasks"`
+	Progress               map[string]any        `json:"progress"`
+	Usage                  []store.UsageRow      `json:"usage,omitempty"`
+	UsageTotal             *store.UsageRow       `json:"usage_total,omitempty"`
 	// Оценка стоимости плана и состояние бюджета Epic
 	// (api-contract add-cost-transparency).
 	Estimate store.CostEstimate `json:"estimate"`
@@ -769,8 +774,14 @@ func (s *Server) getEpic(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	assessment, err := s.St.EpicAssessment(r.Context(), e.ID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, epicView{
-		Epic: e, Tasks: tasks,
+		ArchitectureAssessment: &assessment,
+		Epic:                   e, Tasks: tasks,
 		Progress:   map[string]any{"pct": pct, "weighted": true},
 		Usage:      usage,
 		UsageTotal: usageTotal,

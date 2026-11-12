@@ -80,6 +80,10 @@ func TestLocalDockerAPIToContainer(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer st.Close()
+	// This fixture deploys an existing tested artifact, not a new product request.
+	if _, e = st.Pool.Exec(ctx, `ALTER TABLE epics DISABLE TRIGGER prepare_epic_architecture`); e != nil {
+		t.Fatal(e)
+	}
 	root := t.TempDir()
 	repos := filepath.Join(root, "repos")
 	bare := filepath.Join(repos, "fixture", "app.git")

@@ -173,6 +173,9 @@ func (s *Store) LoadCycle(ctx context.Context, projectID, period string, loc *ti
 		if err := loadCycleArchitecture(ctx, tx, projectID, from, &in); err != nil {
 			return err
 		}
+		if err := loadCycleAssessments(ctx, tx, projectID, from, &in); err != nil {
+			return err
+		}
 		if err := loadCycleAgents(ctx, tx, projectID, busy, &in); err != nil {
 			return err
 		}
@@ -193,6 +196,8 @@ func loadCycleTasks(ctx context.Context, tx pgx.Tx, projectID string, in *cycle.
 	rows, err := tx.Query(ctx, `SELECT `+cycleTaskCols+`
 		FROM tasks t JOIN epics ep ON ep.id = t.epic_id
 		WHERE ep.project_id=$1 AND ep.status <> 'archived'
+		  AND (NOT ep.architecture_required OR ep.started_at IS NOT NULL OR EXISTS(SELECT 1 FROM epic_architecture_assessments aa
+		       WHERE aa.epic_id=ep.id AND aa.revision=ep.architecture_revision AND aa.status='passed'))
 		  AND (t.status NOT IN ('done','cancelled')
 		       OR (t.status = 'done' AND $2 AND t.merged_at IS NOT NULL
 		           AND ($3::timestamptz IS NULL OR t.merged_at > $3)))`,
@@ -213,15 +218,17 @@ func loadCycleTasks(ctx context.Context, tx pgx.Tx, projectID string, in *cycle.
 
 func loadCycleEpics(ctx context.Context, tx pgx.Tx, projectID string, in *cycle.Input) error {
 	rows, err := tx.Query(ctx, `
-		SELECT e.id::text, e.title, e.kind, e.status, e.created_at
-		FROM epics e WHERE e.project_id=$1 AND e.status NOT IN ('done','archived')`, projectID)
+		SELECT e.id::text, e.title, e.kind, e.status, e.created_at,
+		CASE WHEN e.architecture_required AND e.started_at IS NULL AND (a.status IS DISTINCT FROM 'passed' OR a.revision<>e.architecture_revision)
+		THEN COALESCE(a.status,'pending') ELSE '' END
+		FROM epics e LEFT JOIN epic_architecture_assessments a ON a.epic_id=e.id WHERE e.project_id=$1 AND e.status NOT IN ('done','archived')`, projectID)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var e cycle.Epic
-		if err := rows.Scan(&e.ID, &e.Title, &e.Kind, &e.Status, &e.Since); err != nil {
+		if err := rows.Scan(&e.ID, &e.Title, &e.Kind, &e.Status, &e.Since, &e.ArchitectureStatus); err != nil {
 			return err
 		}
 		in.Epics = append(in.Epics, e)
@@ -359,6 +366,10 @@ func loadCycleAgents(ctx context.Context, tx pgx.Tx, projectID string, busy Cycl
 	if err != nil {
 		return err
 	}
+	assessments, err := cycleAssessmentAgents(ctx, tx)
+	if err != nil {
+		return err
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT a.id, a.name, a.role_id, ro.title, ro.capability, a.connection_id, a.model,
 			COALESCE(ro.default_model->>'connection_id', ''), COALESCE(ro.default_model->>'model', ''),
@@ -408,7 +419,7 @@ func loadCycleAgents(ctx context.Context, tx pgx.Tx, projectID string, busy Cycl
 		default:
 			a.RunnerID = ""
 		}
-		for _, w := range []*cycle.Work{busy[a.ID], analyses[a.ID]} {
+		for _, w := range []*cycle.Work{busy[a.ID], analyses[a.ID], assessments[a.ID]} {
 			if w == nil || a.Current != nil {
 				continue
 			}

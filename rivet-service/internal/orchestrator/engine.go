@@ -587,6 +587,10 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	if model == "" {
 		model = runner.Model
 	}
+	description, err := e.assessedTaskDescription(ctx, task)
+	if err != nil {
+		return "", false, err
+	}
 	// Сессия создаётся до отправки Assignment: runner повторяет session_id
 	// во всех сообщениях стадии, сообщения без него отбрасываются (design,
 	// решение 4). Без сессии стадию не запускаем — задачу вернёт
@@ -595,8 +599,8 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 		// Запрос сессии — снимок задачи на момент запуска (история и поиск,
 		// спека team-visibility): описание задачи меняется ответами человека.
 		prompt := task.Title
-		if task.Description != "" {
-			prompt += "\n" + task.Description
+		if description != "" {
+			prompt += "\n" + description
 		}
 		spec = &sessionSpec{driverKind: "scheduler", prompt: prompt}
 	}
@@ -653,7 +657,7 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 		MsgId: fmt.Sprintf("assign-%s-%s-%d", task.ID, stage, time.Now().UnixNano()),
 		Kind: &pb.PlaneMsg_Assign{Assign: &pb.Assignment{
 			TaskId: task.ID, TaskNum: task.Num, Stage: stage,
-			Title: task.Title, Description: task.Description,
+			Title: task.Title, Description: description,
 			Criteria: criteria, Repo: p.Repo(), Branch: task.Branch,
 			Checks: checks, ExtraContext: extra, SessionId: sessionID,
 			RepoUrl: repoURL, GitToken: gitToken, BaseBranch: p.DefaultBranch,

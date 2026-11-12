@@ -256,8 +256,9 @@ func PhaseOfTask(t Task, cut ReleaseCut) Placement {
 
 // Epic — то, что нужно знать об Epic'е.
 type Epic struct {
-	ID    string
-	Title string
+	ArchitectureStatus string
+	ID                 string
+	Title              string
 	// Kind — work, architecture или maintenance; пусто читается как work.
 	Kind string
 	// Status — planning, planned, exploring, running, paused, done, archived.
@@ -270,6 +271,16 @@ type Epic struct {
 // Epic вида work без утверждённого плана к планированию. План в работе у
 // Тимлида активен, готовый план ждёт человека.
 func PhaseOfEpic(e Epic) Placement {
+	if e.ArchitectureStatus != "" {
+		switch e.ArchitectureStatus {
+		case "running":
+			return Placement{Phase: Architecture, State: StateActive}
+		case "failed":
+			return Placement{Phase: Architecture, State: StateNeedsHuman}
+		default:
+			return Placement{Phase: Architecture, State: StateWaiting}
+		}
+	}
 	if e.Status == "exploring" {
 		return at(Architecture, e.NeedsHuman, StateActive)
 	}

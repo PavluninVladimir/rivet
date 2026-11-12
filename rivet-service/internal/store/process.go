@@ -663,6 +663,7 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 				-- запуска, runner подходит ему по профилю и модели
 				LEFT JOIN team_agents ag ON r.role <> '' AND ag.role_id = r.role AND ag.enabled
 					AND NOT EXISTS (SELECT 1 FROM task_step_runs o WHERE o.agent_id = ag.id AND o.verdict IS NULL)
+					AND NOT EXISTS (SELECT 1 FROM epic_architecture_assessments aa WHERE aa.agent_id=ag.id AND aa.lease_until>now())
 					AND (ag.model = '' OR ag.model = ANY(x.models) OR x.model = ag.model)
 					-- агенты без рабочей модели исключаются только там, где
 					-- модель задаёт агент: у явной модели участника она своя
@@ -715,6 +716,22 @@ func (s *Store) AssignRunExcept(ctx context.Context, excludedProjects, excludedE
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
+		if err != nil {
+			return err
+		}
+		if agentID != "" {
+			if _, err = tx.Exec(ctx, `SELECT 1 FROM team_agents WHERE id=$1 FOR UPDATE`, agentID); err != nil {
+				return err
+			}
+			var busy bool
+			if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM epic_architecture_assessments WHERE agent_id=$1 AND lease_until>now())`, agentID).Scan(&busy); err != nil {
+				return err
+			}
+			if busy {
+				return nil
+			}
+		}
+
 		// Исполнитель для людей: роль и имя runner'а (спека agent-roles
 		// «Роль исполнителя в событиях и API»).
 		who := "runner " + runnerID

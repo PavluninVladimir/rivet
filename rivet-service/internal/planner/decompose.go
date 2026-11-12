@@ -271,6 +271,10 @@ func Validate(plan []PlannedTask) error {
 // одной транзакцией: только у Epic'а без задач (store.ErrPlanExists), без
 // половины плана при сбое.
 func Materialize(ctx context.Context, st *store.Store, epicID string, plan []PlannedTask) ([]domain.Task, error) {
+	return MaterializeAtArchitectureRevision(ctx, st, epicID, plan, 0)
+}
+
+func MaterializeAtArchitectureRevision(ctx context.Context, st *store.Store, epicID string, plan []PlannedTask, revision int64) ([]domain.Task, error) {
 	order, err := topoOrder(plan)
 	if err != nil {
 		return nil, err
@@ -295,7 +299,7 @@ func Materialize(ctx context.Context, st *store.Store, epicID string, plan []Pla
 			Capabilities: pt.Capabilities, Estimate: pt.Estimate,
 		}, DepIdx: deps})
 	}
-	return st.CreatePlan(ctx, epicID, tasks)
+	return st.CreatePlanAtArchitectureRevision(ctx, epicID, tasks, revision)
 }
 
 func topoOrder(plan []PlannedTask) ([]int, error) {

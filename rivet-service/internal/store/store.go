@@ -331,6 +331,11 @@ func (s *Store) TransitionEpic(ctx context.Context, epicID string, to domain.Epi
 			denied = &d
 			return bad
 		}
+		if to == domain.EpicRunning {
+			if err := requireArchitectureTx(ctx, tx, epicID, 0); err != nil {
+				return err
+			}
+		}
 		if to == domain.EpicRunning && kind == domain.KindWork {
 			var hasTasks bool
 			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM tasks WHERE epic_id=$1)`, epicID).Scan(&hasTasks); err != nil {

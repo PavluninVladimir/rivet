@@ -62,6 +62,10 @@ func checkKinds(t *testing.T, url string) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	// This fixture represents pre-SDLC work, while independent later migrations are present.
+	if _, err = s.Pool.Exec(ctx, `ALTER TABLE epics DISABLE TRIGGER prepare_epic_architecture`); err != nil {
+		t.Fatal(err)
+	}
 	owner := mustOwner(t, s)
 	p, err := s.CreateProject(ctx, "demo", "o/r", nil, owner.ID)
 	if err != nil {
@@ -158,6 +162,10 @@ func TestMigrationsArchitectureAfter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
+	// This fixture represents pre-SDLC work, while independent later migrations are present.
+	if _, err = s.Pool.Exec(ctx, `ALTER TABLE epics DISABLE TRIGGER prepare_epic_architecture`); err != nil {
+		t.Fatal(err)
+	}
 	for _, msg := range []string{"первое", "второе"} {
 		if err := s.EscalateOnce(ctx, projectID, taskID, "TEST_FAILED", "architecture_files_unavailable", msg); err != nil {
 			t.Fatal(err)
@@ -197,6 +205,9 @@ func TestMigrationsTeamWorkFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close(ctx)
+	if _, err = conn.Exec(ctx, `ALTER TABLE epics DISABLE TRIGGER prepare_epic_architecture`); err != nil {
+		t.Fatal(err)
+	}
 	var taskID string
 	if err := conn.QueryRow(ctx, `
 		WITH p AS (INSERT INTO projects (name, repo_path) VALUES ('demo', 'o/r') RETURNING id),
