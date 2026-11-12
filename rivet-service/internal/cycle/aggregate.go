@@ -186,15 +186,16 @@ type Input struct {
 	Period      string
 	GeneratedAt time.Time
 
-	Tasks       []Task
-	Epics       []Epic
-	Deployments []Deployment
-	Incidents   []Incident
-	Materials   []Material
-	LastRun     LastRun
-	Analyses    []Analysis
-	Envs        []EnvMonitor
-	Cut         ReleaseCut
+	Tasks        []Task
+	Epics        []Epic
+	Deployments  []Deployment
+	Incidents    []Incident
+	Materials    []Material
+	LastRun      LastRun
+	Analyses     []Analysis
+	Envs         []EnvMonitor
+	IssueIntakes []Item
+	Cut          ReleaseCut
 
 	Agents    []Agent
 	Artifacts []Artifact
@@ -333,6 +334,9 @@ func Build(in Input) View {
 		add(PhaseOfEnv(e), Item{Kind: "environment", ID: e.EnvID, Title: e.Name, Since: e.Since})
 	}
 	feedback := 0
+	for _, it := range in.IssueIntakes {
+		add(Placement{Phase: Operations, State: it.State}, it)
+	}
 	for _, m := range in.Materials {
 		p := PhaseOfMaterial(m, in.LastRun)
 		if p.In() && m.Kind == MaterialFeedback {

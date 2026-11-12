@@ -28,6 +28,7 @@ const (
 	JobReleaseNotes        = "release_notes"
 	JobDeployAnalysis      = "deploy_analysis"
 	JobIncidentDescription = "incident_description"
+	JobGitHubIssues        = "github_issues"
 )
 
 const (
@@ -48,7 +49,7 @@ type OpsJob struct {
 }
 
 func (j OpsJob) role() string {
-	if j.Kind == JobIncidentDescription {
+	if j.Kind == JobIncidentDescription || j.Kind == JobGitHubIssues {
 		return domain.RoleSRE
 	}
 	return domain.RoleDevops
@@ -315,9 +316,12 @@ func (e *Engine) runOpsJob(ctx context.Context, job OpsJob, agentID string) erro
 	// не мелькает занятым, пары ops.job нет.
 	var st opsStart
 	var ok bool
-	if job.Kind == JobReleaseNotes {
+	switch job.Kind {
+	case JobGitHubIssues:
+		ok = e.IssueWatch != nil
+	case JobReleaseNotes:
 		st.requestedAt, st.attempt, ok, err = e.St.StartNotesJob(ctx, job.RefID)
-	} else {
+	default:
 		st.requestedAt, st.attempt, ok, err = e.St.StartDescriptionJob(ctx, job.RefID)
 	}
 	if err != nil || !ok {
@@ -325,6 +329,8 @@ func (e *Engine) runOpsJob(ctx context.Context, job OpsJob, agentID string) erro
 	}
 	work := &cycle.Work{ID: job.RefID, Phase: cycle.Release, ProjectID: job.ProjectID}
 	switch job.Kind {
+	case JobGitHubIssues:
+		work.Kind, work.Title, work.Action, work.Phase = "issue_watch", "GitHub Issues", "проверяет Issues и передаёт обратную связь в исследование", cycle.Operations
 	case JobReleaseNotes:
 		work.Kind, work.Action = "release", "пишет release notes"
 	case JobDeployAnalysis:
@@ -346,6 +352,8 @@ func (e *Engine) runOpsJob(ctx context.Context, job OpsJob, agentID string) erro
 	e.opsEvent(ctx, job, a, "started", who+": "+work.Action)
 	var runErr error
 	switch job.Kind {
+	case JobGitHubIssues:
+		runErr = e.IssueWatch(ctx, job.ProjectID, a.id())
 	case JobReleaseNotes:
 		runErr = e.releaseNotesJob(ctx, job, a, work, st)
 	case JobDeployAnalysis:

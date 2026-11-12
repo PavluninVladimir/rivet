@@ -1258,31 +1258,45 @@ func (s *Store) StartRun(ctx context.Context, projectID string, in NewRun) (Disc
 		if _, err := lockProjectDiscovery(ctx, tx, projectID); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT `+interviewCols+`, i.text FROM discovery_interviews i
-			LEFT JOIN users u ON u.id = i.created_by
-			WHERE i.project_id=$1 AND i.deleted_at IS NULL ORDER BY i.created_at, i.id`, projectID)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			iv, err := scanInterview(rows, true)
-			if err != nil {
-				rows.Close()
-				return err
-			}
-			ivs = append(ivs, iv)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		in.Interviews = make([]RunInterview, 0, len(ivs))
-		for _, iv := range ivs {
-			in.Interviews = append(in.Interviews, RunInterview{ID: iv.ID, Title: iv.Title, SHA256: iv.SHA256})
-		}
-		out, err = createRunTx(ctx, tx, projectID, in)
+		var err error
+		out, ivs, err = startRunTx(ctx, tx, projectID, in)
 		return err
 	})
+	return out, ivs, err
+}
+
+// startRunTx is shared by manual research and SRE feedback handoff.
+func startRunTx(ctx context.Context, tx pgx.Tx, projectID string, in NewRun) (DiscoveryRun, []DiscoveryInterview, error) {
+	var out DiscoveryRun
+	var ivs []DiscoveryInterview
+	rows, err := tx.Query(ctx, `SELECT `+interviewCols+`, i.text FROM discovery_interviews i
+		LEFT JOIN users u ON u.id = i.created_by
+		WHERE i.project_id=$1 AND i.deleted_at IS NULL ORDER BY i.created_at, i.id`, projectID)
+	if err != nil {
+		return out, ivs, err
+	}
+	for rows.Next() {
+		iv, err := scanInterview(rows, true)
+		if err != nil {
+			rows.Close()
+			return out, ivs, err
+		}
+		ivs = append(ivs, iv)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return out, ivs, err
+	}
+	in.Interviews = make([]RunInterview, 0, len(ivs))
+	for _, iv := range ivs {
+		in.Interviews = append(in.Interviews, RunInterview{ID: iv.ID, Title: iv.Title, SHA256: iv.SHA256})
+	}
+	out, err = createRunTx(ctx, tx, projectID, in)
+	if err == nil {
+		_, err = tx.Exec(ctx, `UPDATE github_issue_sources s SET research_run_id=$2,attempts=attempts+1
+			WHERE project_id=$1 AND (research_run_id IS NULL OR EXISTS(SELECT 1 FROM discovery_runs r WHERE r.id=s.research_run_id AND r.status='failed'))
+			AND EXISTS(SELECT 1 FROM discovery_interviews i WHERE i.id=s.material_id AND i.deleted_at IS NULL)`, projectID, out.ID)
+	}
 	return out, ivs, err
 }
 

@@ -207,6 +207,13 @@ func run(ctx context.Context, cfg config.Config) error {
 	if err := apiSrv.RecoverDiscovery(ctx); err != nil {
 		return fmt.Errorf("восстановление исследования: %w", err)
 	}
+	engine.IssueWatch = func(jobCtx context.Context, projectID, agentID string) error {
+		jobCtx, cancel := context.WithCancel(jobCtx)
+		stop := context.AfterFunc(ctx, cancel)
+		defer stop()
+		defer cancel()
+		return apiSrv.PollProjectIssues(jobCtx, projectID, agentID)
+	}
 	root := http.NewServeMux()
 	root.Handle("/api/", apiSrv.Handler())
 	root.Handle("/", webui.Handler())
@@ -240,6 +247,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		return nil
 	})
 	g.Go(func() error { engine.Run(ctx); return nil })
+	g.Go(func() error { apiSrv.RunIssueIntake(ctx); return nil })
 	// После старта в фоне: переподписка webhook'ов на push и сверка SHA уже
 	// построенных снимков архитектуры, чтобы не потерять обновление,
 	// отложенное до рестарта (add-architecture-c4). Старт хостинга не ждёт.

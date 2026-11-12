@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -294,11 +295,56 @@ func loadCycleOps(ctx context.Context, tx pgx.Tx, projectID string, in *cycle.In
 	var opsAvail bool
 	if err := tx.QueryRow(ctx, `
 		SELECT EXISTS (SELECT 1 FROM environments WHERE project_id=$1 AND COALESCE((config->'monitor'->>'enabled')::boolean, false))
-		    OR EXISTS (SELECT 1 FROM incidents WHERE project_id=$1)`, projectID).Scan(&opsAvail); err != nil {
+		    OR EXISTS (SELECT 1 FROM incidents WHERE project_id=$1)
+		    OR EXISTS (SELECT 1 FROM project_issue_intake WHERE project_id=$1 AND enabled)
+		    OR EXISTS (SELECT 1 FROM github_issue_sources WHERE project_id=$1)`, projectID).Scan(&opsAvail); err != nil {
 		return err
 	}
 	in.Available[cycle.Operations] = opsAvail
-	return nil
+	return loadCycleIssueIntake(ctx, tx, projectID, in)
+}
+
+func loadCycleIssueIntake(ctx context.Context, tx pgx.Tx, projectID string, in *cycle.Input) error {
+	var enabled bool
+	var detail string
+	var checked *time.Time
+	err := tx.QueryRow(ctx, `SELECT enabled,error,last_check_at FROM project_issue_intake WHERE project_id=$1`, projectID).Scan(&enabled, &detail, &checked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if enabled {
+		it := cycle.Item{Kind: "issue_watch", ID: projectID, Title: "GitHub Issues → Исследование", State: cycle.StateWaiting}
+		if checked != nil {
+			it.Since = *checked
+		}
+		if detail != "" {
+			it.Title += ": " + detail
+			it.State = cycle.StateNeedsHuman
+			if strings.Contains(detail, "ждёт") || strings.Contains(detail, "позже") {
+				it.State = cycle.StateWaiting
+			}
+		}
+		in.IssueIntakes = append(in.IssueIntakes, it)
+	}
+	rows, err := tx.Query(ctx, `SELECT material_id,number,title,created_at,COALESCE(research_run_id::text,'') FROM github_issue_sources WHERE project_id=$1 ORDER BY created_at DESC,number DESC LIMIT $2`, projectID, cycle.MaxArtifacts)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var a cycle.Artifact
+		var number int
+		if err = rows.Scan(&a.ID, &number, &a.Title, &a.At, &a.Ref.ID); err != nil {
+			return err
+		}
+		a.Phase, a.Kind, a.Ref.View = cycle.Operations, "feedback", "discovery"
+		a.Title = fmt.Sprintf("GitHub #%d · %s", number, a.Title)
+		in.Artifacts = append(in.Artifacts, a)
+	}
+	return rows.Err()
 }
 
 // loadCycleAgents — команда с текущей работой: сессии runner'ов из
@@ -532,16 +578,17 @@ func loadCycleArtifacts(ctx context.Context, tx pgx.Tx, projectID string, in *cy
 
 // loadCyclePeriod — завершённые за период, последний релиз и расход.
 func loadCyclePeriod(ctx context.Context, tx pgx.Tx, projectID string, from time.Time, in *cycle.Input) error {
-	var devDone, released, resolved, planned int
+	var devDone, released, opsDone, planned int
 	if err := tx.QueryRow(ctx, `
 		SELECT
 		  (SELECT count(*) FROM tasks t JOIN epics e ON e.id = t.epic_id
 		   WHERE e.project_id=$1 AND t.status='done' AND t.kind <> 'architecture' AND t.merged_at >= $2),
 		  (SELECT COALESCE(sum(jsonb_array_length(r.composition)), 0) FROM releases r WHERE r.project_id=$1 AND r.created_at >= $2),
-		  (SELECT count(*) FROM incidents WHERE project_id=$1 AND status='resolved' AND resolved_at >= $2),
+		  (SELECT count(*) FROM incidents WHERE project_id=$1 AND status='resolved' AND resolved_at >= $2)
+		    + (SELECT count(*) FROM github_issue_sources WHERE project_id=$1 AND created_at >= $2),
 		  (SELECT count(DISTINCT ev.epic_id) FROM events ev WHERE ev.project_id=$1 AND ev.type='epic.status'
 		     AND ev.payload->>'status' = 'running' AND ev.ts >= $2)`, projectID, from).
-		Scan(&devDone, &released, &resolved, &planned); err != nil {
+		Scan(&devDone, &released, &opsDone, &planned); err != nil {
 		return err
 	}
 	// Завершённая задача прошла разработку, тестирование и ревью. Задача
@@ -551,7 +598,7 @@ func loadCyclePeriod(ctx context.Context, tx pgx.Tx, projectID string, from time
 	in.DonePeriod[cycle.Testing] = devDone
 	in.DonePeriod[cycle.Review] = devDone
 	in.DonePeriod[cycle.Release] = released
-	in.DonePeriod[cycle.Operations] = resolved
+	in.DonePeriod[cycle.Operations] = opsDone
 
 	var lr cycle.LastRelease
 	err := tx.QueryRow(ctx, `
