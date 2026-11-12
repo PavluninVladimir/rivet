@@ -25,7 +25,7 @@ import (
 
 const LogLimit = 2 << 20
 
-// ProtectResult removes all application-controlled text from secret-bearing jobs.
+// ProtectResult скрывает журналы и причину ошибки секретной публикации.
 func ProtectResult(v Result) Result {
 	v.Logs = SensitiveLogMessage
 	if v.Reason != nil {

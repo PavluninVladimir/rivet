@@ -98,6 +98,10 @@ func TestApplicationSecretsSnapshotAssignmentRotation(t *testing.T) {
 	if _, err = s.Pool.Exec(ctx, `UPDATE runners SET secure=true WHERE id='docker'`); err != nil {
 		t.Fatal(err)
 	}
+	metadataOnly, hidden, err := s.LocalSecretsForRunner(ctx, a.Deployment.ID, a.RunnerID, nil, false)
+	if err != nil || !hidden || len(metadataOnly) != 0 {
+		t.Fatal("technical operation required a decryption key", err)
+	}
 	res, err := s.RotateSecrets(ctx, box, nextBox)
 	if err != nil || res.ApplicationSecrets != 2 {
 		t.Fatal(res, err)
