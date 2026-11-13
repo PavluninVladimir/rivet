@@ -185,6 +185,9 @@ func (e *Engine) Tick(ctx context.Context) error {
 	// Наблюдение и задания control plane идут и при сбое тика конвейера.
 	defer e.tickLoadTests(ctx)
 	defer e.tickOps(ctx)
+	if err := e.replayLocalTerminals(ctx); err != nil {
+		return fmt.Errorf("replay local terminal: %w", err)
+	}
 	lost, lostDeps, err := e.St.MarkStaleRunnersOffline(ctx, int(e.HeartbeatTimeout.Seconds()))
 	if err != nil {
 		return fmt.Errorf("stale runners: %w", err)
@@ -593,6 +596,13 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	description, err := e.assessedTaskDescription(ctx, task)
 	if err != nil {
 		return "", false, err
+	}
+	designContext, err := e.St.DesignTaskContext(ctx, task.ID)
+	if err != nil {
+		return "", false, fmt.Errorf("контекст дизайна: %w", err)
+	}
+	if designContext != "" {
+		description += "\n\n" + designContext
 	}
 	// Сессия создаётся до отправки Assignment: runner повторяет session_id
 	// во всех сообщениях стадии, сообщения без него отбрасываются (design,

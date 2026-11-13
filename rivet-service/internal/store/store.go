@@ -310,6 +310,12 @@ func (s *Store) transitionTask(ctx context.Context, taskID string, path []domain
 func (s *Store) TransitionEpic(ctx context.Context, epicID string, to domain.EpicStatus, ev EventInput) error {
 	var denied *EventInput
 	err := pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if to == domain.EpicRunning {
+			done, err := assistantMutationBeginTx(ctx, tx, "epic.resume", epicID)
+			if err != nil || done {
+				return err
+			}
+		}
 		if to == domain.EpicArchived {
 			if err := maintenanceArchiveTx(ctx, tx, epicID); err != nil {
 				return err
@@ -358,7 +364,10 @@ func (s *Store) TransitionEpic(ctx context.Context, epicID string, to domain.Epi
 			return err
 		}
 		_, err := appendEvent(ctx, tx, ev)
-		return err
+		if err != nil {
+			return err
+		}
+		return assistantMutationDoneTx(ctx, tx, string(to))
 	})
 	if denied != nil {
 		if _, evErr := s.AppendEvent(ctx, *denied); evErr != nil {

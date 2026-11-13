@@ -230,6 +230,22 @@ func recordFailureTx(ctx context.Context, tx pgx.Tx, in FailureInput, attemptLim
 	in.Stage = CleanText(in.Stage)
 	fp := ops.Fingerprint(in.EnvID, in.Source, output)
 	errLine := ops.ErrorLine(output)
+	// Reason is read from the accepted, durable local result. It survives
+	// control-plane restart and incident_pending replay without trusting logs.
+	if in.Source == ops.SourceRelease && in.DeploymentID != "" {
+		var operation, code, message string
+		err := tx.QueryRow(ctx, `SELECT operation,COALESCE(reason->>'code',''),COALESCE(reason->>'message','') FROM local_publications WHERE deployment_id=$1 AND active_deployment_id=$1 AND completed_operation_id=$1 AND status='failed' AND env_id=$2`, in.DeploymentID, in.EnvID).Scan(&operation, &code, &message)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return res, err
+		}
+		if err == nil {
+			if structured, ok := ops.LocalPublishFingerprint(in.EnvID, operation, ops.LocalFailurePhase(code), code); ok {
+				fp = structured
+				errLine = clipRunes(strings.Join(strings.Fields(redact.String(CleanText(code+": "+message))), " "), 2000)
+			}
+		}
+	}
+
 	ev := IncidentEvidence{Stage: in.Stage}
 	if in.Source == ops.SourceRelease {
 		ev.DeployLog = ops.Tail(output, evidenceLines, evidenceBytes)

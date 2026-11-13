@@ -1,0 +1,13 @@
+{
+  "source_url": "https://raw.githubusercontent.com/moby/profiles/9ee3204f0d0cfa19ca2c6a7b0fcf5a2b353954ae/seccomp/default.json",
+  "source_sha256": "3320527d4568265ac97a077609b1bfd4cfd0d789eeb9239b7e094b1526675406",
+  "derived_sha256": "db2a49ee5703e12013651a051ad4d159d0edaba68929669667e558e0f4ea4aee",
+  "addition": [
+    "clone",
+    "setns",
+    "unshare"
+  ],
+  "source_commit": "9ee3204f0d0cfa19ca2c6a7b0fcf5a2b353954ae",
+  "license": "Apache-2.0",
+  "license_url": "https://raw.githubusercontent.com/moby/profiles/9ee3204f0d0cfa19ca2c6a7b0fcf5a2b353954ae/LICENSE"
+}

@@ -199,6 +199,7 @@ func (a *analysis) run(ctx context.Context) error {
 	if !anyFindings(inputs) {
 		return &failure{reason: NoFindingsReason}
 	}
+
 	a.progress(ctx, store.StageSynthesis, total, total)
 
 	existing, err := a.st().ExistingEpicsForDiscovery(ctx, a.job.Run.ProjectID)
@@ -264,7 +265,7 @@ func (a *analysis) run(ctx context.Context) error {
 		if ok {
 			a.event(context.WithoutCancel(ctx), "discovery.analysis_ready",
 				fmt.Sprintf("%s закончил анализ: персон %d, потребностей %d, Epic'ов %d", a.who(),
-					len(check.Result.Personas), len(check.Result.Needs), len(check.Result.Epics)), nil)
+					len(check.Result.Personas), len(check.Result.Needs), len(check.Result.Epics))+": "+check.Result.Outcome, map[string]any{"outcome": check.Result.Outcome})
 		}
 		return nil
 	}

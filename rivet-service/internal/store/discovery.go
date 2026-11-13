@@ -60,13 +60,14 @@ const (
 
 // Ошибки исследования (api-contract add-product-discovery).
 var (
-	ErrInterviewTooLarge = fmt.Errorf("интервью длиннее %d символов", MaxInterviewChars)
-	ErrInterviewsLimit   = fmt.Errorf("в проекте уже %d интервью", MaxInterviews)
-	ErrNoInterviews      = errors.New("в проекте нет интервью и отзывов для анализа")
-	ErrFeedbackLimit     = fmt.Errorf("в проекте уже %d отзывов", MaxFeedback)
-	ErrRunNotEditable    = errors.New("бэклог можно править только у версии в статусе ready")
-	ErrRunNotApprovable  = errors.New("утвердить можно только актуальную версию в статусе ready")
-	ErrEpicClosed        = errors.New("зависимости завершённого или архивированного Epic'а не меняются")
+	ErrInterviewTooLarge             = fmt.Errorf("интервью длиннее %d символов", MaxInterviewChars)
+	ErrInterviewsLimit               = fmt.Errorf("в проекте уже %d интервью", MaxInterviews)
+	ErrNoInterviews                  = errors.New("в проекте нет интервью и отзывов для анализа")
+	ErrFeedbackLimit                 = fmt.Errorf("в проекте уже %d отзывов", MaxFeedback)
+	ErrDiscoveryOutcomeNotActionable = errors.New("исход исследования не допускает создание работы")
+	ErrRunNotEditable                = errors.New("бэклог можно править только у версии в статусе ready")
+	ErrRunNotApprovable              = errors.New("утвердить можно только актуальную версию в статусе ready")
+	ErrEpicClosed                    = errors.New("зависимости завершённого или архивированного Epic'а не меняются")
 )
 
 // AnalysisRunningError — в проекте уже идёт анализ.
@@ -346,6 +347,8 @@ type DiscoveryRun struct {
 	Model          string
 	ConnectionID   string
 	InstructionSHA string
+	OutcomeLegacy  bool
+	OutcomeError   string
 	Result         *discovery.Synthesis
 	Dropped        []discovery.Dropped
 	Defects        []string
@@ -386,10 +389,7 @@ func scanDiscRun(row pgx.Row) (DiscoveryRun, error) {
 	}
 	_ = json.Unmarshal(interviews, &r.Interviews)
 	if len(result) > 0 && string(result) != "null" {
-		var syn discovery.Synthesis
-		if err := json.Unmarshal(result, &syn); err == nil {
-			r.Result = &syn
-		}
+		r.Result, r.OutcomeLegacy, r.OutcomeError = discovery.ReadSavedSynthesis(result)
 	}
 	_ = json.Unmarshal(dropped, &r.Dropped)
 	_ = json.Unmarshal(defects, &r.Defects)
@@ -764,6 +764,9 @@ func (s *Store) SaveBacklog(ctx context.Context, projectID, runID string, rev in
 		if r.Status != RunReady {
 			return ErrRunNotEditable
 		}
+		if r.Result == nil || r.Result.Outcome != discovery.OutcomeBacklogReady || r.OutcomeError != "" {
+			return ErrDiscoveryOutcomeNotActionable
+		}
 		if rev != r.BacklogRev {
 			return &BacklogConflictError{Rev: r.BacklogRev}
 		}
@@ -840,6 +843,9 @@ func (s *Store) ApproveRun(ctx context.Context, projectID, runID, userID string,
 		}
 		if r.Status != RunReady || r.Outdated {
 			return ErrRunNotApprovable
+		}
+		if r.Result == nil || r.Result.Outcome != discovery.OutcomeBacklogReady || r.OutcomeError != "" {
+			return ErrDiscoveryOutcomeNotActionable
 		}
 		if rev != r.BacklogRev {
 			return &BacklogConflictError{Rev: r.BacklogRev}

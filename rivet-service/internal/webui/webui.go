@@ -17,11 +17,14 @@ var distFS embed.FS
 
 // CSP — политика безопасности содержимого консоли (спека access-policy
 // «Заголовки безопасности HTTP»). Всё только со своего адреса: модули
-// сборки Vite, запросы к API и поток событий. Встроенных скриптов и eval
-// нет. Встроенные стили нужны схемам Mermaid: SVG вставляется разметкой со
+// сборки Vite, запросы к API и поток событий. Единственный inline script
+// разрешён по фиксированному SHA256: trusted selection в opaque design iframe.
+// Данные документа не входят в код. eval и произвольный inline не разрешены. Встроенные стили нужны схемам Mermaid: SVG вставляется разметкой со
 // своим <style> и атрибутами style, хэш или nonce для них невозможны.
 // data: в картинках — стрелка select в forms.css. Внешних шрифтов нет.
-const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+const DesignPreviewScriptHash = "'sha256-G1oTaUgBWCiHlmC7lbR+nvCWXc1B/gjzwMgpimcARI0='"
+
+const CSP = "default-src 'self'; script-src 'self' " + DesignPreviewScriptHash + "; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
 	"font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 
 // Handler раздаёт статику консоли; неизвестные пути отдают index.html (SPA).

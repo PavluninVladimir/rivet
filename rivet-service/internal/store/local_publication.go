@@ -478,6 +478,10 @@ func (s *Store) FinishLocalOperation(ctx context.Context, depID, runnerID string
 			return e
 		}
 		_, e = tx.Exec(ctx, `UPDATE runners SET status='idle',deployment_id=NULL WHERE deployment_id=$1`, depID)
+		if e != nil {
+			return e
+		}
+		_, e = resolveStaleDeployAttentionTx(ctx, tx, "")
 		return e
 	})
 }

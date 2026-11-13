@@ -268,7 +268,7 @@ func TestSynthesisInvariantFuzz(t *testing.T) {
 			eps = append(eps, fmt.Sprintf(`{"key":"e%d","title":%q,"goal":%q,"needs":%s,"priority":"must","size":"M","depends_on":[%s],"existing_epic":%s}`,
 				i+1, titles[rng.Intn(len(titles))], g, needs, strings.Join(deps, ","), ex))
 		}
-		raw := `{"personas":[{"id":"p1","name":"М","description":"","interviews":["iv"]}],
+		raw := `{"outcome":"backlog_ready","rationale":"Подтвержденные требования","questions":[],"sources":[],"personas":[{"id":"p1","name":"М","description":"","interviews":["iv"]}],
 "needs":[{"id":"n1","title":"отчёт","kind":"pain","persona":"p1","importance":"high","evidence":[{"interview":"iv","quote":"Это минут сорок по пятницам"}]}],
 "epics":[` + strings.Join(eps, ",") + `]}`
 		c := CheckSynthesis(ivs, existing, raw)

@@ -34,6 +34,9 @@ func (e *Engine) FailDeploymentNow(ctx context.Context, depID, detail string) er
 
 // tickDeployments — планирование публикаций и watchdog (вызывается из Tick).
 func (e *Engine) tickDeployments(ctx context.Context) error {
+	if _, err := e.St.ResolveStaleDeployAttention(ctx); err != nil {
+		return err
+	}
 	timedOut, err := e.St.TimedOutDeployments(ctx, deployTimeout+deployWatchdogGrace)
 	if err != nil {
 		return err

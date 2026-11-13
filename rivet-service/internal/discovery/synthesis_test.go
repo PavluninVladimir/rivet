@@ -21,13 +21,14 @@ func demoInterviews(t *testing.T) []InterviewInput {
 }
 
 type synthIn struct {
+	Decision
 	Personas []map[string]any `json:"personas"`
 	Needs    []map[string]any `json:"needs"`
 	Epics    []map[string]any `json:"epics"`
 }
 
 func baseSynthesis() synthIn {
-	return synthIn{
+	return synthIn{Decision: Decision{Outcome: OutcomeBacklogReady, Rationale: "Достаточно подтвержденных требований", Questions: []Question{}, Sources: []DecisionSource{}},
 		Personas: []map[string]any{
 			{"id": "p1", "name": "Менеджер", "description": "продаёт", "interviews": []string{"iv-manager"}},
 			{"id": "p2", "name": "Руководитель", "description": "отвечает за план", "interviews": []string{"iv-head", "iv-ghost"}},

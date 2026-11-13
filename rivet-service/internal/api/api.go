@@ -26,9 +26,10 @@ import (
 )
 
 type Server struct {
-	St     *store.Store
-	Engine *orchestrator.Engine
-	Hub    *stream.Hub
+	DesignScreenshot DesignScreenshotRenderer
+	St               *store.Store
+	Engine           *orchestrator.Engine
+	Hub              *stream.Hub
 	// Policy — движок политик: режим и состояние в состоянии установки,
 	// решения точек принуждения для мутаций людей (спека access-policy).
 	Policy policy.Engine
@@ -93,6 +94,8 @@ func (s *Server) Handler() http.Handler {
 	s.throttle = newLoginThrottle()
 	mux := http.NewServeMux()
 	s.registerLoadTesting(mux)
+	s.registerAssistant(mux)
+	s.registerDesignWorkspace(mux)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
 	mux.HandleFunc("GET /api/v1/auth/me", s.me)

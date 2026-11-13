@@ -68,6 +68,8 @@ func writeDiscoveryErr(w http.ResponseWriter, err error) {
 		discErr(w, http.StatusConflict, "analysis_running", "анализ проекта уже идёт", "", map[string]any{"run_id": running.RunID})
 	case errors.As(err, &conflict):
 		discErr(w, http.StatusConflict, "backlog_conflict", "бэклог уже изменён: перечитайте его", "", map[string]any{"backlog_rev": conflict.Rev})
+	case errors.Is(err, store.ErrDiscoveryOutcomeNotActionable):
+		discErr(w, http.StatusConflict, "discovery_outcome_not_actionable", err.Error(), "", nil)
 	case errors.Is(err, store.ErrRunNotEditable):
 		discErr(w, http.StatusConflict, "run_not_editable", err.Error(), "", nil)
 	case errors.Is(err, store.ErrRunNotApprovable):
@@ -93,18 +95,26 @@ func pathIDs(w http.ResponseWriter, ids ...string) bool {
 // ─── DTO ─────────────────────────────────────────────────────────────────
 
 type discRunSummaryView struct {
-	ID         string     `json:"id"`
-	Version    int        `json:"version"`
-	Status     string     `json:"status"`
-	CreatedAt  time.Time  `json:"created_at"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
-	AgentName  string     `json:"agent_name,omitempty"`
-	Model      string     `json:"model"`
-	Outdated   bool       `json:"outdated"`
+	Outcome       *string    `json:"outcome"`
+	OutcomeLegacy bool       `json:"outcome_legacy"`
+	OutcomeError  string     `json:"outcome_error,omitempty"`
+	ID            string     `json:"id"`
+	Version       int        `json:"version"`
+	Status        string     `json:"status"`
+	CreatedAt     time.Time  `json:"created_at"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	AgentName     string     `json:"agent_name,omitempty"`
+	Model         string     `json:"model"`
+	Outdated      bool       `json:"outdated"`
 }
 
 func discRunSummaryDTO(r store.DiscoveryRun) discRunSummaryView {
-	return discRunSummaryView{ID: r.ID, Version: r.Version, Status: r.Status, CreatedAt: r.StartedAt,
+	var outcome *string
+	if r.Result != nil && r.Result.Outcome != "" && r.OutcomeError == "" {
+		v := r.Result.Outcome
+		outcome = &v
+	}
+	return discRunSummaryView{Outcome: outcome, OutcomeLegacy: r.OutcomeLegacy, OutcomeError: r.OutcomeError, ID: r.ID, Version: r.Version, Status: r.Status, CreatedAt: r.StartedAt,
 		FinishedAt: r.FinishedAt, AgentName: r.AgentName, Model: r.Model, Outdated: r.Outdated}
 }
 
@@ -117,6 +127,9 @@ type backlogRow struct {
 }
 
 type discRunView struct {
+	Rationale string                     `json:"rationale"`
+	Questions []discovery.Question       `json:"questions"`
+	Sources   []discovery.DecisionSource `json:"sources"`
 	discRunSummaryView
 	Stage      string               `json:"stage"`
 	Progress   map[string]int       `json:"progress"`
@@ -137,7 +150,7 @@ type discRunView struct {
 }
 
 func discRunDTO(r store.DiscoveryRun) discRunView {
-	v := discRunView{
+	v := discRunView{Questions: []discovery.Question{}, Sources: []discovery.DecisionSource{},
 		discRunSummaryView: discRunSummaryDTO(r),
 		Stage:              r.Stage,
 		Progress:           map[string]int{"done": r.ProgressDone, "total": r.ProgressTotal},
@@ -160,6 +173,9 @@ func discRunDTO(r store.DiscoveryRun) discRunView {
 		v.Agent = map[string]string{"id": r.AgentID, "name": r.AgentName}
 	}
 	if r.Result != nil {
+		v.Rationale = r.Result.Rationale
+		v.Questions = nonNilSlice(r.Result.Questions)
+		v.Sources = nonNilSlice(r.Result.Sources)
 		v.Personas, v.Needs = nonNilSlice(r.Result.Personas), nonNilSlice(r.Result.Needs)
 		for _, e := range r.Result.Epics {
 			v.Proposed = append(v.Proposed, backlogRow{BacklogEpic: e})

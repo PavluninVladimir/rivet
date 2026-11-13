@@ -516,6 +516,12 @@ func endOpenSessions(ctx context.Context, tx pgx.Tx, taskID string) error {
 // задача возвращается в планирование, эскалация закрывается.
 func (s *Store) ResolveTask(ctx context.Context, taskID, answer, userID string, cancel bool) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if !cancel {
+			done, err := assistantMutationBeginTx(ctx, tx, "task.retry", taskID)
+			if err != nil || done {
+				return err
+			}
+		}
 		// Отмена задачи-бага меняет её инцидент: блокировки идут в том же
 		// порядке, что у решений сопровождения (advisory lock проекта →
 		// инцидент → задача), иначе возможен взаимный дедлок.
@@ -585,12 +591,23 @@ func (s *Store) ResolveTask(ctx context.Context, taskID, answer, userID string, 
 		if cancel {
 			text = "решение человека: задача отменена"
 		}
+		actorKind, actorID := domain.ActorUser, userID
+		payload := map[string]any{"status": string(to)}
+		if m, ok := ctx.Value(assistantMutationKey{}).(assistantMutation); ok {
+			actorKind, actorID = domain.ActorSystem, "project-assistant"
+			text = "действие ассистента: задача возвращена в планирование по существующим правилам retry"
+			payload["assistant_run_id"] = m.Job.Run.ID
+			payload["initiator_id"] = m.Job.Run.InitiatorID
+		}
 		_, err := appendEvent(ctx, tx, EventInput{
-			ActorKind: domain.ActorUser, ActorID: userID, Type: "task.status",
+			ActorKind: actorKind, ActorID: actorID, Type: "task.status",
 			ProjectID: projectID, EpicID: epicID, TaskID: taskID,
-			Text: text, Payload: map[string]any{"status": string(to)},
+			Text: text, Payload: payload,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		return assistantMutationDoneTx(ctx, tx, string(to))
 	})
 }
 

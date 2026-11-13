@@ -319,14 +319,27 @@ func (s *Store) EnqueueAutoDeployments(ctx context.Context, projectID, version s
 
 // SetEnvPaused — пауза/возобновление автопубликаций окружения.
 func (s *Store) SetEnvPaused(ctx context.Context, envID string, paused bool) error {
-	tag, err := s.Pool.Exec(ctx, `UPDATE environments SET paused=$2 WHERE id=$1`, envID, paused)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
-	}
-	return nil
+	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if !paused {
+			done, err := assistantMutationBeginTx(ctx, tx, "environment.resume", envID)
+			if err != nil || done {
+				return err
+			}
+		}
+		tag, err := tx.Exec(ctx, `UPDATE environments SET paused=$2 WHERE id=$1`, envID, paused)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		if m, ok := ctx.Value(assistantMutationKey{}).(assistantMutation); ok {
+			if err = assistantEventTx(ctx, tx, m.Job.Project, m.Job.Run.ID, "deploy.status", "автопубликации возобновлены", map[string]any{"environment_id": envID}); err != nil {
+				return err
+			}
+		}
+		return assistantMutationDoneTx(ctx, tx, "resumed")
+	})
 }
 
 // DeployAssignment — публикация, готовая к отправке deploy-runner'у.
@@ -584,7 +597,11 @@ func (s *Store) CompleteDeployment(ctx context.Context, depID, runnerID string) 
 		}
 		// Релиз окружения с составом по времени merge и переходы его
 		// инцидентов — в той же транзакции (add-sdlc-cycle).
-		return createReleaseTx(ctx, tx, depID)
+		if err := createReleaseTx(ctx, tx, depID); err != nil {
+			return err
+		}
+		_, err = resolveStaleDeployAttentionTx(ctx, tx, envID)
+		return err
 	})
 	return claimed, err
 }
