@@ -39,9 +39,9 @@ type Limits struct {
 	MaxDuration time.Duration
 }
 
-// DefaultLimits — 80 ходов, 1 000 000 токенов, 30 минут.
+// DefaultLimits — 80 ходов, 1 000 000 токенов, без временного предела.
 func DefaultLimits() Limits {
-	return Limits{MaxTurns: 80, MaxTokens: 1_000_000, MaxDuration: 30 * time.Minute}
+	return Limits{MaxTurns: 80, MaxTokens: 1_000_000}
 }
 
 // ExecConfig — исполнение команд run; нулевое поле — по умолчанию.
@@ -286,8 +286,12 @@ func Run(ctx context.Context, cfg Config, task string) (Result, error) {
 	defer RemoveTree(home)
 	s := &session{cfg: cfg, ws: ws, fs: &fsTools{ws: ws}, home: home}
 
-	runCtx, cancel := context.WithTimeout(ctx, cfg.Limits.MaxDuration)
-	defer cancel()
+	runCtx := ctx
+	if cfg.Limits.MaxDuration > 0 {
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(ctx, cfg.Limits.MaxDuration)
+		defer cancel()
+	}
 	res, err := s.loop(runCtx, task)
 	if err != nil && ctx.Err() == nil && errors.Is(runCtx.Err(), context.DeadlineExceeded) {
 		err = &LimitError{Name: "времени"}
