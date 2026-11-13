@@ -97,3 +97,22 @@ func TestZeroErrorInclusiveAndIncompleteMetrics(t *testing.T) {
 		t.Fatal(st)
 	}
 }
+
+func TestGeneratorShortageTakesPrecedenceOverSLOFailure(t *testing.T) {
+	p := testProfile()
+	p.Ceiling = 5
+	good := `{"state":{"testRunDurationMs":10000},"metrics":{"vus":{"values":{"max":2}},"vus_max":{"values":{"max":2}},"dropped_iterations":{"values":{"count":0},"thresholds":{"count<=0":{"ok":true}}},"http_reqs":{"values":{"count":20,"rate":2}},"http_req_duration":{"values":{"p(95)":1,"p(99)":2},"thresholds":{"p(95)<=500":{"ok":true}}},"request_errors":{"values":{"rate":0},"thresholds":{"rate<=0":{"ok":true}}},"route_0_requests":{"values":{"count":20}},"route_0_latency":{"values":{"p(95)":1,"p(99)":2}},"route_0_errors":{"values":{"rate":0}}}}`
+	bad := strings.ReplaceAll(good, `"p(95)":1`, `"p(95)":9999`)
+	bad = strings.Replace(bad, `"count":0`, `"count":7`, 1)
+	bad = strings.ReplaceAll(bad, `"ok":true`, `"ok":false`)
+	first := Evidence{Phase: p.Phases()[0], Summary: json.RawMessage(good)}
+	shortage := Evidence{Phase: p.Phases()[1], Summary: json.RawMessage(bad), ExitCode: 99}
+	stage, err := ParseStage(p, shortage)
+	if err != nil || stage.Status != "inconclusive" || stage.Dropped != 7 || stage.P95 == nil || *stage.P95 != 9999 {
+		t.Fatal(stage, err)
+	}
+	report, err := BuildReport(p, Binding{}, Result{State: "inconclusive", Stages: []Evidence{first, shortage}})
+	if err != nil || report.TargetResult != "passed" || report.CapacityResult != "inconclusive" || report.FirstFailing != nil {
+		t.Fatal(report, err)
+	}
+}

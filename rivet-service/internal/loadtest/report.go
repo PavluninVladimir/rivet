@@ -154,6 +154,14 @@ func ParseStage(p Profile, e Evidence) (Stage, error) {
 	if !complete {
 		return st, nil
 	}
+	if st.Dropped > 0 || (p.Unit == "rps" && *st.RPS < float64(e.Phase.Load)*0.95) {
+		st.Reason = "generator_or_sut_limited"
+		return st, nil
+	}
+	if p.Unit == "vus" && (st.VUs == nil || *st.VUs < float64(e.Phase.Load)) {
+		st.Reason = "vus_not_reached"
+		return st, nil
+	}
 	// Inclusive boundaries are intentional: an error budget of zero must pass
 	// when every request succeeded. A threshold exit is never ignored.
 	if *st.P95 > float64(p.P95MS) || *st.ErrorRate > p.MaxErrorRatePct/100 {
@@ -165,14 +173,6 @@ func ParseStage(p Profile, e Evidence) (Stage, error) {
 			st.Status, st.Reason = "failed", "slo_failed"
 			return st, nil
 		}
-	}
-	if st.Dropped > 0 || (p.Unit == "rps" && *st.RPS < float64(e.Phase.Load)*0.95) {
-		st.Reason = "generator_or_sut_limited"
-		return st, nil
-	}
-	if p.Unit == "vus" && (st.VUs == nil || *st.VUs < float64(e.Phase.Load)) {
-		st.Reason = "vus_not_reached"
-		return st, nil
 	}
 	if st.Requests < 10 || st.DurationS < float64(e.Phase.DurationS)*0.95 {
 		st.Reason = "insufficient_samples"
