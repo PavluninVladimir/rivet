@@ -241,6 +241,40 @@ erDiagram
     uuid updated_by FK "→ data.user.id, может быть пустым"
     jsonb value
   }
+  n_data_load_test_plan["Вопрос и сохранённый профиль нагрузки"] {
+    uuid id PK
+    uuid env_id FK, UK "→ data.environment.id"
+    uuid first_release_id FK "→ data.release.id"
+    jsonb profile "может быть пустым"
+    text state "awaiting_target, deferred, answered"
+    timestamptz updated_at
+  }
+  n_data_load_test_run["Попытка нагрузочного тестирования"] {
+    uuid id PK
+    text assignment_id
+    boolean cancel_pending "запрет повторной нагрузки и мутации публикации до остановки процесса"
+    timestamptz created_at
+    timestamptz deadline_at "может быть пустым"
+    uuid env_id FK "→ data.environment.id"
+    jsonb evidence "измерения фиксированного summary без stdout и секретов"
+    timestamptz finished_at "может быть пустым"
+    bigint generation
+    jsonb limits "снимок конечных лимитов исполнения"
+    jsonb profile "GET-пути и ссылка на тестовый секрет без значения"
+    uuid project_id FK "→ data.project.id"
+    uuid publication_id
+    jsonb reason "может быть пустым"
+    uuid release_id FK "→ data.release.id"
+    jsonb report "может быть пустым"
+    uuid request_id UK
+    text runner_boot_id
+    text runner_id
+    text stage
+    timestamptz started_at "может быть пустым"
+    text state "queued, running, passed, failed, inconclusive, config_needed, cancelled, interrupted"
+    jsonb target "закрытая привязка контейнера и loopback-порта"
+    text version
+  }
   n_data_model_connection["Подключение модели"] {
     text id PK
     text api "anthropic, openai"
@@ -368,6 +402,7 @@ erDiagram
     text features "тип: text[]"
     text host
     timestamptz last_seen
+    uuid load_test_id FK "→ data.load-test-run.id, может быть пустым"
     text model
     text models "тип: text[]"
     boolean network_isolated
@@ -575,6 +610,11 @@ erDiagram
   n_data_incident }o--o| n_data_team_agent : "description_agent_id"
   n_data_incident_event }o--|| n_data_incident : "incident_id"
   n_data_installation_setting }o--o| n_data_user : "updated_by"
+  n_data_load_test_plan }o--|| n_data_environment : "env_id"
+  n_data_load_test_plan }o--|| n_data_release : "first_release_id"
+  n_data_load_test_run }o--|| n_data_environment : "env_id"
+  n_data_load_test_run }o--|| n_data_project : "project_id"
+  n_data_load_test_run }o--|| n_data_release : "release_id"
   n_data_model_connection }o--|| n_data_user : "updated_by"
   n_data_monitor_run }o--|| n_data_environment : "env_id"
   n_data_monitor_state }o--|| n_data_environment : "env_id"
@@ -588,6 +628,7 @@ erDiagram
   n_data_release }o--|| n_data_project : "project_id"
   n_data_release }o--o| n_data_team_agent : "notes_agent_id"
   n_data_runner }o--o| n_data_deployment : "deployment_id"
+  n_data_runner }o--o| n_data_load_test_run : "load_test_id"
   n_data_runner }o--o| n_data_runner_token : "token_id"
   n_data_runner }o--o| n_data_task : "task_id"
   n_data_runner_token }o--|| n_data_user : "created_by"
@@ -927,6 +968,50 @@ erDiagram
 | `updated_by` | uuid | FK → `data.user.id` | да |  |
 | `value` | jsonb |  | нет |  |
 
+## Вопрос и сохранённый профиль нагрузки (`data.load-test-plan`)
+
+Хранится в: PostgreSQL.
+
+| Атрибут | Тип | Ключ | Пусто | Описание |
+|---|---|---|---|---|
+| `id` | uuid | PK | нет |  |
+| `env_id` | uuid | FK → `data.environment.id`, UK | нет |  |
+| `first_release_id` | uuid | FK → `data.release.id` | нет |  |
+| `profile` | jsonb |  | да |  |
+| `state` | text |  | нет | awaiting_target, deferred, answered |
+| `updated_at` | timestamptz |  | нет |  |
+
+## Попытка нагрузочного тестирования (`data.load-test-run`)
+
+Хранится в: PostgreSQL.
+
+| Атрибут | Тип | Ключ | Пусто | Описание |
+|---|---|---|---|---|
+| `id` | uuid | PK | нет |  |
+| `assignment_id` | text |  | нет |  |
+| `cancel_pending` | boolean |  | нет | запрет повторной нагрузки и мутации публикации до остановки процесса |
+| `created_at` | timestamptz |  | нет |  |
+| `deadline_at` | timestamptz |  | да |  |
+| `env_id` | uuid | FK → `data.environment.id` | нет |  |
+| `evidence` | jsonb |  | нет | измерения фиксированного summary без stdout и секретов |
+| `finished_at` | timestamptz |  | да |  |
+| `generation` | bigint |  | нет |  |
+| `limits` | jsonb |  | нет | снимок конечных лимитов исполнения |
+| `profile` | jsonb |  | нет | GET-пути и ссылка на тестовый секрет без значения |
+| `project_id` | uuid | FK → `data.project.id` | нет |  |
+| `publication_id` | uuid |  | нет |  |
+| `reason` | jsonb |  | да |  |
+| `release_id` | uuid | FK → `data.release.id` | нет |  |
+| `report` | jsonb |  | да |  |
+| `request_id` | uuid | UK | нет |  |
+| `runner_boot_id` | text |  | нет |  |
+| `runner_id` | text |  | нет |  |
+| `stage` | text |  | нет |  |
+| `started_at` | timestamptz |  | да |  |
+| `state` | text |  | нет | queued, running, passed, failed, inconclusive, config_needed, cancelled, interrupted |
+| `target` | jsonb |  | нет | закрытая привязка контейнера и loopback-порта |
+| `version` | text |  | нет |  |
+
 ## Подключение модели (`data.model-connection`)
 
 Хранится в: PostgreSQL.
@@ -1099,6 +1184,7 @@ erDiagram
 | `features` | text[] |  | нет |  |
 | `host` | text |  | нет |  |
 | `last_seen` | timestamptz |  | нет |  |
+| `load_test_id` | uuid | FK → `data.load-test-run.id` | да |  |
 | `model` | text |  | нет |  |
 | `models` | text[] |  | нет |  |
 | `network_isolated` | boolean |  | нет |  |

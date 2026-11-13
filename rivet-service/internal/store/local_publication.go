@@ -126,6 +126,9 @@ func (s *Store) EnqueueLocalPublication(ctx context.Context, envID, version, ini
 		if e = env.Config.Validate(env.ExecType); e != nil {
 			return e
 		}
+		if e = interruptLoadEnvTx(ctx, tx, envID); e != nil {
+			return e
+		}
 		busy, e := localBusy(ctx, tx, envID)
 		if e != nil {
 			return e
@@ -234,6 +237,11 @@ func (s *Store) QueueLocalOperation(ctx context.Context, envID, action, initiato
 		}
 		if !ok {
 			return ErrNoDockerRunner
+		}
+		if action == "stop" || action == "restart" || action == "remove" {
+			if e = interruptLoadEnvTx(ctx, tx, envID); e != nil {
+				return e
+			}
 		}
 		var depID string
 		e = tx.QueryRow(ctx, `INSERT INTO deployments(env_id,version,initiator) VALUES($1,$2,$3) RETURNING id::text`, envID, p.Version, initiator).Scan(&depID)
@@ -604,6 +612,9 @@ func (s *Store) RequestLocalDeletion(ctx context.Context, envID string) error {
 		}
 		if running {
 			return fmt.Errorf("перед удалением остановите публикацию: %w", ErrConflict)
+		}
+		if e = interruptLoadEnvTx(ctx, tx, envID); e != nil {
+			return e
 		}
 		_, e = tx.Exec(ctx, `UPDATE environments SET local_delete_requested=true,paused=true WHERE id=$1`, envID)
 		return e

@@ -13,6 +13,7 @@ elements:
       - {type: composition, to: app.planner}
       - {type: composition, to: app.cycle}
       - {type: composition, to: app.ops}
+      - {type: composition, to: app.load-testing}
       - {type: composition, to: app.overview}
       - {type: composition, to: app.policy}
       - {type: composition, to: app.architecture}
@@ -31,6 +32,7 @@ elements:
     relations:
       - {type: composition, to: app.runner.engine}
       - {type: composition, to: app.runner.agent}
+      - {type: composition, to: app.runner.k6}
 
   - id: app.cli
     type: component
@@ -60,6 +62,7 @@ elements:
     props: {technology: "Go net/http"}
     relations:
       - {type: composition, to: app.console-api}
+      - {type: flow, to: app.load-testing}
       - {type: serving, to: biz.owner}
       - {type: serving, to: biz.member}
       - {type: serving, to: biz.admin}
@@ -376,3 +379,22 @@ elements:
     relations:
       - {type: serving, to: app.llm}
       - {type: serving, to: app.runner.agent}
+
+  - id: app.load-testing
+    type: component
+    name: Управление нагрузочными тестами
+    description: Вопрос после первого рабочего релиза, явный профиль владельца, конечные лимиты, очередь с fencing и сохранённые отчёты. Никогда не запускает нагрузку только по появлению релиза.
+    props: {technology: "Go, PostgreSQL, REST, SSE"}
+    relations:
+      - {type: flow, to: app.stream}
+      - {type: access, to: data.load-test-plan, mode: readwrite}
+      - {type: access, to: data.load-test-run, mode: readwrite}
+      - {type: flow, to: app.runner.k6}
+
+  - id: app.runner.k6
+    type: component
+    name: Выделенный нагрузочный runner
+    description: Единственная capability load, без агента и моделей. Native k6 на хосте публикации; только фиксированная GET-смесь с явным секретом. Следующая ступень ждёт сохранения предыдущей и отдельного разрешения control plane.
+    props: {technology: "Go, gRPC, native k6 2.3.x"}
+    relations:
+      - {type: flow, to: app.stream}

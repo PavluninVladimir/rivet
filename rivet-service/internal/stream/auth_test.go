@@ -233,7 +233,7 @@ func TestRegisterRejectsNonRivetAgents(t *testing.T) {
 	reasons := map[string]string{
 		"cc":      "агентом может быть только агент Rivet: запустите rivet-runner -agent rivet",
 		"nofeat":  "runner прежней версии без агентского цикла Rivet: обновите rivet-runner",
-		"noagent": "runner без агента допускается только с единственной capability deploy (runner выкатки)",
+		"noagent": "runner без агента допускается только для выкатки или выделенного нагрузочного тестирования",
 	}
 	// Отказанный runner переподключается снова и снова: событие одно на
 	// runner и причину за окно (ревью P2-2), отказ — на каждую попытку.

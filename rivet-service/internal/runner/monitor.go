@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/PavluninVladimir/rivet/internal/loadtest"
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
 )
@@ -194,6 +195,9 @@ func (a *agent) executeMonitor(ctx context.Context, job *pb.MonitorJob, emit fun
 // runner'а с capability deploy (он исполняет команды окружений). Одна
 // функция для всех feature, чтобы регистрация не теряла ни одну.
 func (c Config) features() []string {
+	if loadOnly(c.Capabilities) {
+		return []string{loadtest.Feature}
+	}
 	out := []string{featureRoles}
 	if c.Adapter == AdapterNative {
 		out = append(out, featureNative)

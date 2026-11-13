@@ -211,9 +211,18 @@ type TaskFailure struct {
 	Merged     bool     `json:"merged"`
 }
 
+type LoadTestRef struct {
+	ID            string `json:"id"`
+	ProjectID     string `json:"project_id"`
+	EnvironmentID string `json:"environment_id"`
+	ReleaseID     string `json:"release_id"`
+	Stage         string `json:"stage"`
+}
+
 type Runner struct {
-	ID    string
-	Agent string
+	CurrentLoadTest *LoadTestRef `json:"CurrentLoadTest,omitempty"`
+	ID              string
+	Agent           string
 	// Model — модель по умолчанию (первая в Models); Models — все
 	// поддерживаемые (спека runners «Регистрация runner'а», протокол v11).
 	Model  string

@@ -80,12 +80,13 @@ C4Container
   System_Ext(n_ext_gitlab, "GitLab", "Хостинг репозитория: REST API, клонирование, MR и webhook'и.")
   System_Ext(n_ext_llm, "LLM-провайдеры", "Внешние API моделей: OpenAI, Anthropic, DeepSeek, OpenRouter, Ollama и LM Studio.")
   Rel(n_app_cli, n_app_rivetd, "использует")
+  Rel(n_app_rivetd, n_app_runner, "передаёт")
   Rel(n_app_rivetd, n_ext_gitea, "использует")
   Rel(n_app_rivetd, n_ext_github, "использует")
   Rel(n_app_rivetd, n_ext_gitlab, "использует")
   Rel(n_app_rivetd, n_ext_llm, "использует")
-  Rel(n_app_rivetd, n_tech_postgres, "читает Epic, читает Runner, читает Версия политики, читает Задача, читает Запись использования модели, читает Запуск исследования, читает Интервью и отзыв, читает Инцидент, читает Потребность Epic, читает Привязка токена runner'а, читает Проект, читает Публикация, читает Релиз, читает Сессия агента, читает Событие журнала, читает Токен runner'а, читает Этап задачи, читает и пишет Epic, читает и пишет Runner, читает и пишет Агент, читает и пишет Агент команды, читает и пишет Версия политики, читает и пишет Задача, читает и пишет Запрос внимания, читает и пишет Запуск исследования, читает и пишет Интервью и отзыв, читает и пишет Инцидент, читает и пишет Конспект исследования, читает и пишет Настройка установки, читает и пишет Окружение, читает и пишет Подключение модели, читает и пишет Пользователь, читает и пишет Потребность Epic, читает и пишет Проект, читает и пишет Публикация, читает и пишет Релиз, читает и пишет Роль агента, читает и пишет Сессия агента, читает и пишет Сессия входа, читает и пишет Снимок архитектуры, читает и пишет Событие журнала, читает и пишет Токен доступа, читает и пишет Участник проекта, читает и пишет Учётные данные SCM, читает и пишет Этап задачи")
-  Rel(n_app_runner, n_app_rivetd, "использует")
+  Rel(n_app_rivetd, n_tech_postgres, "читает Epic, читает Runner, читает Версия политики, читает Задача, читает Запись использования модели, читает Запуск исследования, читает Интервью и отзыв, читает Инцидент, читает Потребность Epic, читает Привязка токена runner'а, читает Проект, читает Публикация, читает Релиз, читает Сессия агента, читает Событие журнала, читает Токен runner'а, читает Этап задачи, читает и пишет Epic, читает и пишет Runner, читает и пишет Агент, читает и пишет Агент команды, читает и пишет Версия политики, читает и пишет Вопрос и сохранённый профиль нагрузки, читает и пишет Задача, читает и пишет Запрос внимания, читает и пишет Запуск исследования, читает и пишет Интервью и отзыв, читает и пишет Инцидент, читает и пишет Конспект исследования, читает и пишет Настройка установки, читает и пишет Окружение, читает и пишет Подключение модели, читает и пишет Пользователь, читает и пишет Попытка нагрузочного тестирования, читает и пишет Потребность Epic, читает и пишет Проект, читает и пишет Публикация, читает и пишет Релиз, читает и пишет Роль агента, читает и пишет Сессия агента, читает и пишет Сессия входа, читает и пишет Снимок архитектуры, читает и пишет Событие журнала, читает и пишет Токен доступа, читает и пишет Участник проекта, читает и пишет Учётные данные SCM, читает и пишет Этап задачи")
+  Rel(n_app_runner, n_app_rivetd, "использует, передаёт")
   Rel(n_app_runner, n_ext_llm, "использует")
   Rel(n_biz_admin, n_app_rivetd, "использует")
   Rel(n_biz_analyst, n_app_rivetd, "использует")
@@ -138,6 +139,8 @@ C4Container
 | Инцидент (`data.incident`) | REST API и SSE, Оркестратор, Релизы и инциденты, Цикл разработки | REST API и SSE, Оркестратор, Релизы и инциденты | PostgreSQL |
 | Событие инцидента (`data.incident-event`) | нет | нет | PostgreSQL |
 | Настройка установки (`data.installation-setting`) | REST API и SSE | REST API и SSE | PostgreSQL |
+| Вопрос и сохранённый профиль нагрузки (`data.load-test-plan`) | Управление нагрузочными тестами | Управление нагрузочными тестами | PostgreSQL |
+| Попытка нагрузочного тестирования (`data.load-test-run`) | Управление нагрузочными тестами | Управление нагрузочными тестами | PostgreSQL |
 | Подключение модели (`data.model-connection`) | REST API и SSE | REST API и SSE | PostgreSQL |
 | Проверка наблюдения (`data.monitor-run`) | нет | нет | PostgreSQL |
 | Состояние наблюдения (`data.monitor-state`) | нет | нет | PostgreSQL |
@@ -165,6 +168,9 @@ ERD: [общая схема](erd/all.md), по хранилищам: [PostgreSQL
 ```mermaid
 C4Deployment
   title Развёртывание: Rivet
+  Deployment_Node(n_tech_k6, "Native k6", "k6 2.3.x", "Отдельный процесс k6 2.3.x с очищенными env/config, закрытым временным файлом тестового секрета и абсолютным конечным дедлайном. Генератор делит хост с приложением; жёсткая OS CPU/memory-изоляция не заявляется.") {
+    Container(n_inst_tech_k6_app_runner, "rivet-runner", "Go 1.26, gRPC", "Агент на машине пользователя: подключается к control plane и выполняет этапы задач, публикации и проверки.")
+  }
   Deployment_Node(n_tech_node_plane, "Сервер установки Rivet", "Docker Compose (Linux)", "Docker-хост, на котором разворачиваются rivetd, PostgreSQL и объектное хранилище.") {
     Container(n_inst_tech_node_plane_app_rivetd, "rivetd", "Go 1.26, net/http, gRPC, pgx", "Control plane Rivet: HTTP API, gRPC-хаб runner'ов, оркестрация и встроенная веб-консоль.")
     ContainerDb(n_inst_tech_node_plane_tech_postgres, "PostgreSQL", "PostgreSQL 17", "Реляционная база с изменяемой моделью Rivet: проекты, эпики, задачи, сессии, релизы, агенты и настройки.")
@@ -193,6 +199,7 @@ C4Deployment
 | Описание архитектуры проекта (`sc.architecture-describe`) | Владелец проекта, REST API и SSE, Оркестратор, gRPC-хаб runner'ов, Движок runner'а, Агентский цикл Rivet, LLM-провайдеры, Снимок архитектуры, PostgreSQL | [scenarios/sc.architecture-describe.md](scenarios/sc.architecture-describe.md) |
 | Публикация окружения и release notes (`sc.deployment`) | Релиз-инженер, REST API и SSE, Оркестратор, gRPC-хаб runner'ов, Движок runner'а, Релизы и инциденты, PostgreSQL | [scenarios/sc.deployment.md](scenarios/sc.deployment.md) |
 | Декомпозиция Epic в план задач (`sc.epic-decompose`) | Владелец проекта, REST API и SSE, Планировщик, Клиенты моделей, LLM-провайдеры, PostgreSQL | [scenarios/sc.epic-decompose.md](scenarios/sc.epic-decompose.md) |
+| Явное нагрузочное тестирование рабочего локального релиза (`sc.load-testing`) | Владелец проекта, REST API и SSE, Управление нагрузочными тестами, gRPC-хаб runner'ов, Выделенный нагрузочный runner, Native k6, PostgreSQL | [scenarios/sc.load-testing.md](scenarios/sc.load-testing.md) |
 | Анализ интервью и утверждение бэклога (`sc.product-discovery`) | Владелец проекта, REST API и SSE, Аналитик продукта, Проверка исследования, Клиенты моделей, LLM-провайдеры, PostgreSQL | [scenarios/sc.product-discovery.md](scenarios/sc.product-discovery.md) |
 | Назначение и выполнение этапа runner'ом (`sc.runner-execution`) | Оркестратор, gRPC-хаб runner'ов, Движок runner'а, Агентский цикл Rivet, LLM-провайдеры, PostgreSQL | [scenarios/sc.runner-execution.md](scenarios/sc.runner-execution.md) |
 

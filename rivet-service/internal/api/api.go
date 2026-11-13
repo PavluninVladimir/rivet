@@ -92,6 +92,7 @@ type Server struct {
 func (s *Server) Handler() http.Handler {
 	s.throttle = newLoginThrottle()
 	mux := http.NewServeMux()
+	s.registerLoadTesting(mux)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.logout)
 	mux.HandleFunc("GET /api/v1/auth/me", s.me)
@@ -1189,6 +1190,23 @@ func (s *Server) listRunners(w http.ResponseWriter, r *http.Request) {
 		}
 		if !member {
 			out[i].TaskID = ""
+		}
+	}
+	refs, err := s.St.LoadRunnerRefs(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	for i := range out {
+		if ref := refs[out[i].ID]; ref != nil {
+			member, e := s.St.IsMember(r.Context(), ref.ProjectID, currentUser(r).ID)
+			if e != nil {
+				writeErr(w, e)
+				return
+			}
+			if member {
+				out[i].CurrentLoadTest = ref
+			}
 		}
 	}
 	// Роли, которые runner может выполнять (add-agent-roles).

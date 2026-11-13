@@ -457,6 +457,7 @@ elements:
       - {name: capabilities, type: "text[]"}
       - {name: status, type: text, description: "idle, running, testing, review, deploying, offline"}
       - {name: task_id, type: uuid, nullable: true, fk: {to: data.task, attribute: id}}
+      - {name: load_test_id, type: uuid, nullable: true, fk: {to: data.load-test-run, attribute: id}}
       - {name: ctx_pct, type: integer, nullable: true}
       - {name: draining, type: boolean}
       - {name: last_seen, type: timestamptz}
@@ -727,3 +728,45 @@ elements:
       - {name: depends_on, type: uuid, pk: true, fk: {to: data.epic, attribute: id}}
     relations:
       - {type: association, to: data.epic, cardinality: many-to-many, label: зависит от}
+
+  - id: data.load-test-plan
+    type: data-object
+    name: Вопрос и сохранённый профиль нагрузки
+    props: {table: load_test_plans}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: env_id, type: uuid, unique: true, fk: {to: data.environment, attribute: id}}
+      - {name: first_release_id, type: uuid, fk: {to: data.release, attribute: id}}
+      - {name: state, type: text, description: "awaiting_target, deferred, answered"}
+      - {name: profile, type: jsonb, nullable: true}
+      - {name: updated_at, type: timestamptz}
+
+  - id: data.load-test-run
+    type: data-object
+    name: Попытка нагрузочного тестирования
+    props: {table: load_test_runs}
+    attributes:
+      - {name: id, type: uuid, pk: true}
+      - {name: request_id, type: uuid, unique: true}
+      - {name: env_id, type: uuid, fk: {to: data.environment, attribute: id}}
+      - {name: project_id, type: uuid, fk: {to: data.project, attribute: id}}
+      - {name: release_id, type: uuid, fk: {to: data.release, attribute: id}}
+      - {name: publication_id, type: uuid}
+      - {name: version, type: text}
+      - {name: generation, type: bigint}
+      - {name: profile, type: jsonb, description: GET-пути и ссылка на тестовый секрет без значения}
+      - {name: limits, type: jsonb, description: снимок конечных лимитов исполнения}
+      - {name: target, type: jsonb, description: закрытая привязка контейнера и loopback-порта}
+      - {name: state, type: text, description: "queued, running, passed, failed, inconclusive, config_needed, cancelled, interrupted"}
+      - {name: reason, type: jsonb, nullable: true}
+      - {name: runner_id, type: text}
+      - {name: assignment_id, type: text}
+      - {name: runner_boot_id, type: text}
+      - {name: stage, type: text}
+      - {name: cancel_pending, type: boolean, description: запрет повторной нагрузки и мутации публикации до остановки процесса}
+      - {name: evidence, type: jsonb, description: измерения фиксированного summary без stdout и секретов}
+      - {name: report, type: jsonb, nullable: true}
+      - {name: created_at, type: timestamptz}
+      - {name: started_at, type: timestamptz, nullable: true}
+      - {name: finished_at, type: timestamptz, nullable: true}
+      - {name: deadline_at, type: timestamptz, nullable: true}

@@ -23,6 +23,7 @@ C4Component
     Component(n_app_discovery, "Проверка исследования", "Go", "Проверяет и нормализует результаты анализа, связи потребностей и бэклог.")
     Component(n_app_history, "Импорт истории", "Go", "Разбирает архив OpenSpec и манифест истории, привязывает PR к Epic'ам и задачам.")
     Component(n_app_llm, "Клиенты моделей", "Go", "Единый клиент к API-совместимым моделям разных провайдеров.")
+    Component(n_app_load_testing, "Управление нагрузочными тестами", "Go, PostgreSQL, REST, SSE", "Вопрос после первого рабочего релиза, явный профиль владельца, конечные лимиты, очередь с fencing и сохранённые отчёты. Никогда не запускает нагрузку только по появлению релиза.")
     Component(n_app_ops, "Релизы и инциденты", "Go", "Формирует release notes и описания инцидентов с помощью модели.")
     Component(n_app_orchestrator, "Оркестратор", "Go", "Детерминированный конвейер: диспетчеризация этапов, реакции на вердикты, публикации и слияние.")
     Component(n_app_overview, "Обзор проекта", "Go", "Строит отчёт о ходе проекта для руководителя.")
@@ -46,6 +47,7 @@ C4Component
   Rel(n_app_api, n_app_analyst, "передаёт")
   Rel(n_app_api, n_app_history, "передаёт")
   Rel(n_app_api, n_app_llm, "передаёт")
+  Rel(n_app_api, n_app_load_testing, "передаёт")
   Rel(n_app_api, n_app_orchestrator, "передаёт")
   Rel(n_app_api, n_app_planner, "передаёт")
   Rel(n_app_api, n_app_scm, "использует")
@@ -56,6 +58,9 @@ C4Component
   Rel(n_app_discovery, n_tech_postgres, "читает Запуск исследования, читает и пишет Epic, читает и пишет Потребность Epic")
   Rel(n_app_history, n_tech_postgres, "читает и пишет Epic, читает и пишет Задача, читает и пишет Событие журнала")
   Rel(n_app_llm, n_ext_llm, "использует")
+  Rel(n_app_load_testing, n_app_runner, "передаёт")
+  Rel(n_app_load_testing, n_app_stream, "передаёт")
+  Rel(n_app_load_testing, n_tech_postgres, "читает и пишет Вопрос и сохранённый профиль нагрузки, читает и пишет Попытка нагрузочного тестирования")
   Rel(n_app_ops, n_app_llm, "использует, передаёт")
   Rel(n_app_ops, n_tech_postgres, "читает и пишет Инцидент, читает и пишет Релиз")
   Rel(n_app_orchestrator, n_app_architecture, "передаёт")
@@ -67,7 +72,7 @@ C4Component
   Rel(n_app_planner, n_app_llm, "использует, передаёт")
   Rel(n_app_planner, n_tech_postgres, "читает Потребность Epic, читает и пишет Epic, читает и пишет Задача")
   Rel(n_app_policy, n_tech_postgres, "читает Версия политики")
-  Rel(n_app_runner, n_app_stream, "использует")
+  Rel(n_app_runner, n_app_stream, "использует, передаёт")
   Rel(n_app_scm, n_ext_gitea, "использует")
   Rel(n_app_scm, n_ext_github, "использует")
   Rel(n_app_scm, n_ext_gitlab, "использует")
@@ -121,6 +126,7 @@ C4Component
 | `app.discovery` | Проверка исследования | компонент | Go | Проверяет и нормализует результаты анализа, связи потребностей и бэклог. |
 | `app.history` | Импорт истории | компонент | Go | Разбирает архив OpenSpec и манифест истории, привязывает PR к Epic'ам и задачам. |
 | `app.llm` | Клиенты моделей | компонент | Go | Единый клиент к API-совместимым моделям разных провайдеров. |
+| `app.load-testing` | Управление нагрузочными тестами | компонент | Go, PostgreSQL, REST, SSE | Вопрос после первого рабочего релиза, явный профиль владельца, конечные лимиты, очередь с fencing и сохранённые отчёты. Никогда не запускает нагрузку только по появлению релиза. |
 | `app.ops` | Релизы и инциденты | компонент | Go | Формирует release notes и описания инцидентов с помощью модели. |
 | `app.orchestrator` | Оркестратор | компонент | Go | Детерминированный конвейер: диспетчеризация этапов, реакции на вердикты, публикации и слияние. |
 | `app.overview` | Обзор проекта | компонент | Go | Строит отчёт о ходе проекта для руководителя. |

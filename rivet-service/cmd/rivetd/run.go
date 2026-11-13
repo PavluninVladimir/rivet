@@ -143,6 +143,7 @@ func run(ctx context.Context, cfg config.Config) error {
 
 	engine := orchestrator.New(st, adapter, bl, reg, cfg.RunnerHeartbeatTimeout)
 	engine.Box = box
+	engine.LoadLimits = cfg.LoadLimits
 	engine.Policy = polEngine
 	urlPolicy, err := orchestrator.ParseURLPolicy(cfg.AllowPrivateURLs)
 	if err != nil {

@@ -24,6 +24,7 @@
 - [Описание архитектуры проекта](scenarios/sc.architecture-describe.md)
 - [Публикация окружения и release notes](scenarios/sc.deployment.md)
 - [Декомпозиция Epic в план задач](scenarios/sc.epic-decompose.md)
+- [Явное нагрузочное тестирование рабочего локального релиза](scenarios/sc.load-testing.md)
 - [Анализ интервью и утверждение бэклога](scenarios/sc.product-discovery.md)
 - [Назначение и выполнение этапа runner'ом](scenarios/sc.runner-execution.md)
 
@@ -43,9 +44,9 @@
 ## Viewpoint'ы
 
 - [Бизнес](business.md): записей 35
-- [Приложения](application.md): записей 35
-- [Данные](data.md): записей 36
-- [Технологии](technology.md): записей 4
+- [Приложения](application.md): записей 37
+- [Данные](data.md): записей 38
+- [Технологии](technology.md): записей 5
 
 ## Процессы
 

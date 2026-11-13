@@ -425,6 +425,7 @@ type RunnerMsg struct {
 	//	*RunnerMsg_DeployResult
 	//	*RunnerMsg_MonitorResult
 	//	*RunnerMsg_HostJobResult
+	//	*RunnerMsg_LoadTestResult
 	Kind          isRunnerMsg_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -564,6 +565,15 @@ func (x *RunnerMsg) GetHostJobResult() *HostJobResult {
 	return nil
 }
 
+func (x *RunnerMsg) GetLoadTestResult() *LoadTestResult {
+	if x != nil {
+		if x, ok := x.Kind.(*RunnerMsg_LoadTestResult); ok {
+			return x.LoadTestResult
+		}
+	}
+	return nil
+}
+
 type isRunnerMsg_Kind interface {
 	isRunnerMsg_Kind()
 }
@@ -608,6 +618,10 @@ type RunnerMsg_HostJobResult struct {
 	HostJobResult *HostJobResult `protobuf:"bytes,11,opt,name=host_job_result,json=hostJobResult,proto3,oneof"`
 }
 
+type RunnerMsg_LoadTestResult struct {
+	LoadTestResult *LoadTestResult `protobuf:"bytes,12,opt,name=load_test_result,json=loadTestResult,proto3,oneof"`
+}
+
 func (*RunnerMsg_Hello) isRunnerMsg_Kind() {}
 
 func (*RunnerMsg_Heartbeat) isRunnerMsg_Kind() {}
@@ -627,6 +641,8 @@ func (*RunnerMsg_DeployResult) isRunnerMsg_Kind() {}
 func (*RunnerMsg_MonitorResult) isRunnerMsg_Kind() {}
 
 func (*RunnerMsg_HostJobResult) isRunnerMsg_Kind() {}
+
+func (*RunnerMsg_LoadTestResult) isRunnerMsg_Kind() {}
 
 type Hello struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1280,6 +1296,9 @@ type PlaneMsg struct {
 	//	*PlaneMsg_Context
 	//	*PlaneMsg_Monitor
 	//	*PlaneMsg_HostJob
+	//	*PlaneMsg_LoadTest
+	//	*PlaneMsg_LoadTestCancel
+	//	*PlaneMsg_LoadTestContinue
 	Kind          isPlaneMsg_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1410,6 +1429,33 @@ func (x *PlaneMsg) GetHostJob() *HostJob {
 	return nil
 }
 
+func (x *PlaneMsg) GetLoadTest() *LoadTestJob {
+	if x != nil {
+		if x, ok := x.Kind.(*PlaneMsg_LoadTest); ok {
+			return x.LoadTest
+		}
+	}
+	return nil
+}
+
+func (x *PlaneMsg) GetLoadTestCancel() *LoadTestCancel {
+	if x != nil {
+		if x, ok := x.Kind.(*PlaneMsg_LoadTestCancel); ok {
+			return x.LoadTestCancel
+		}
+	}
+	return nil
+}
+
+func (x *PlaneMsg) GetLoadTestContinue() *LoadTestContinue {
+	if x != nil {
+		if x, ok := x.Kind.(*PlaneMsg_LoadTestContinue); ok {
+			return x.LoadTestContinue
+		}
+	}
+	return nil
+}
+
 type isPlaneMsg_Kind interface {
 	isPlaneMsg_Kind()
 }
@@ -1450,6 +1496,18 @@ type PlaneMsg_HostJob struct {
 	HostJob *HostJob `protobuf:"bytes,10,opt,name=host_job,json=hostJob,proto3,oneof"`
 }
 
+type PlaneMsg_LoadTest struct {
+	LoadTest *LoadTestJob `protobuf:"bytes,11,opt,name=load_test,json=loadTest,proto3,oneof"`
+}
+
+type PlaneMsg_LoadTestCancel struct {
+	LoadTestCancel *LoadTestCancel `protobuf:"bytes,12,opt,name=load_test_cancel,json=loadTestCancel,proto3,oneof"`
+}
+
+type PlaneMsg_LoadTestContinue struct {
+	LoadTestContinue *LoadTestContinue `protobuf:"bytes,13,opt,name=load_test_continue,json=loadTestContinue,proto3,oneof"`
+}
+
 func (*PlaneMsg_Ack) isPlaneMsg_Kind() {}
 
 func (*PlaneMsg_Assign) isPlaneMsg_Kind() {}
@@ -1467,6 +1525,12 @@ func (*PlaneMsg_Context) isPlaneMsg_Kind() {}
 func (*PlaneMsg_Monitor) isPlaneMsg_Kind() {}
 
 func (*PlaneMsg_HostJob) isPlaneMsg_Kind() {}
+
+func (*PlaneMsg_LoadTest) isPlaneMsg_Kind() {}
+
+func (*PlaneMsg_LoadTestCancel) isPlaneMsg_Kind() {}
+
+func (*PlaneMsg_LoadTestContinue) isPlaneMsg_Kind() {}
 
 // Context — контекст работающему агенту от control plane (обратный канал):
 // предупреждение о пересечении работ и т.п. Доставляется во время
@@ -3107,6 +3171,264 @@ func (x *HostJobResult) GetHostKey() string {
 	return ""
 }
 
+// Additive k6_load_v1 messages. Payload is a bounded deterministic contract;
+// the assignment can contain an ephemeral test-auth value, never persisted.
+type LoadTestJob struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	AssignmentId  string                 `protobuf:"bytes,2,opt,name=assignment_id,json=assignmentId,proto3" json:"assignment_id,omitempty"`
+	BootId        string                 `protobuf:"bytes,3,opt,name=boot_id,json=bootId,proto3" json:"boot_id,omitempty"`
+	Payload       []byte                 `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LoadTestJob) Reset() {
+	*x = LoadTestJob{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LoadTestJob) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LoadTestJob) ProtoMessage() {}
+
+func (x *LoadTestJob) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LoadTestJob.ProtoReflect.Descriptor instead.
+func (*LoadTestJob) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *LoadTestJob) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *LoadTestJob) GetAssignmentId() string {
+	if x != nil {
+		return x.AssignmentId
+	}
+	return ""
+}
+
+func (x *LoadTestJob) GetBootId() string {
+	if x != nil {
+		return x.BootId
+	}
+	return ""
+}
+
+func (x *LoadTestJob) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+type LoadTestResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	AssignmentId  string                 `protobuf:"bytes,2,opt,name=assignment_id,json=assignmentId,proto3" json:"assignment_id,omitempty"`
+	Stage         string                 `protobuf:"bytes,3,opt,name=stage,proto3" json:"stage,omitempty"`
+	Payload       []byte                 `protobuf:"bytes,4,opt,name=payload,proto3" json:"payload,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LoadTestResult) Reset() {
+	*x = LoadTestResult{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LoadTestResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LoadTestResult) ProtoMessage() {}
+
+func (x *LoadTestResult) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LoadTestResult.ProtoReflect.Descriptor instead.
+func (*LoadTestResult) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *LoadTestResult) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *LoadTestResult) GetAssignmentId() string {
+	if x != nil {
+		return x.AssignmentId
+	}
+	return ""
+}
+
+func (x *LoadTestResult) GetStage() string {
+	if x != nil {
+		return x.Stage
+	}
+	return ""
+}
+
+func (x *LoadTestResult) GetPayload() []byte {
+	if x != nil {
+		return x.Payload
+	}
+	return nil
+}
+
+type LoadTestCancel struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	RunId          string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	AssignmentId   string                 `protobuf:"bytes,2,opt,name=assignment_id,json=assignmentId,proto3" json:"assignment_id,omitempty"`
+	DeadlineUnixMs int64                  `protobuf:"varint,3,opt,name=deadline_unix_ms,json=deadlineUnixMs,proto3" json:"deadline_unix_ms,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *LoadTestCancel) Reset() {
+	*x = LoadTestCancel{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LoadTestCancel) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LoadTestCancel) ProtoMessage() {}
+
+func (x *LoadTestCancel) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LoadTestCancel.ProtoReflect.Descriptor instead.
+func (*LoadTestCancel) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *LoadTestCancel) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *LoadTestCancel) GetAssignmentId() string {
+	if x != nil {
+		return x.AssignmentId
+	}
+	return ""
+}
+
+func (x *LoadTestCancel) GetDeadlineUnixMs() int64 {
+	if x != nil {
+		return x.DeadlineUnixMs
+	}
+	return 0
+}
+
+type LoadTestContinue struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	AssignmentId  string                 `protobuf:"bytes,2,opt,name=assignment_id,json=assignmentId,proto3" json:"assignment_id,omitempty"`
+	Stage         string                 `protobuf:"bytes,3,opt,name=stage,proto3" json:"stage,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LoadTestContinue) Reset() {
+	*x = LoadTestContinue{}
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LoadTestContinue) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LoadTestContinue) ProtoMessage() {}
+
+func (x *LoadTestContinue) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_protocol_rivet_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LoadTestContinue.ProtoReflect.Descriptor instead.
+func (*LoadTestContinue) Descriptor() ([]byte, []int) {
+	return file_pkg_protocol_rivet_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *LoadTestContinue) GetRunId() string {
+	if x != nil {
+		return x.RunId
+	}
+	return ""
+}
+
+func (x *LoadTestContinue) GetAssignmentId() string {
+	if x != nil {
+		return x.AssignmentId
+	}
+	return ""
+}
+
+func (x *LoadTestContinue) GetStage() string {
+	if x != nil {
+		return x.Stage
+	}
+	return ""
+}
+
 var File_pkg_protocol_rivet_proto protoreflect.FileDescriptor
 
 const file_pkg_protocol_rivet_proto_rawDesc = "" +
@@ -3135,7 +3457,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x120\n" +
 	"\x14heartbeat_interval_s\x18\x03 \x01(\x05R\x12heartbeatIntervalS\x12\x18\n" +
 	"\acatalog\x18\x04 \x01(\bR\acatalog\x12\x16\n" +
-	"\x06secure\x18\x05 \x01(\bR\x06secure\"\xd3\x04\n" +
+	"\x06secure\x18\x05 \x01(\bR\x06secure\"\x99\x05\n" +
 	"\tRunnerMsg\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12'\n" +
 	"\x05hello\x18\x02 \x01(\v2\x0f.rivet.v1.HelloH\x00R\x05hello\x123\n" +
@@ -3150,7 +3472,8 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\rdeploy_result\x18\t \x01(\v2\x16.rivet.v1.DeployResultH\x00R\fdeployResult\x12@\n" +
 	"\x0emonitor_result\x18\n" +
 	" \x01(\v2\x17.rivet.v1.MonitorResultH\x00R\rmonitorResult\x12A\n" +
-	"\x0fhost_job_result\x18\v \x01(\v2\x17.rivet.v1.HostJobResultH\x00R\rhostJobResultB\x06\n" +
+	"\x0fhost_job_result\x18\v \x01(\v2\x17.rivet.v1.HostJobResultH\x00R\rhostJobResult\x12D\n" +
+	"\x10load_test_result\x18\f \x01(\v2\x18.rivet.v1.LoadTestResultH\x00R\x0eloadTestResultB\x06\n" +
 	"\x04kind\"$\n" +
 	"\x05Hello\x12\x1b\n" +
 	"\trunner_id\x18\x01 \x01(\tR\brunnerId\"5\n" +
@@ -3232,7 +3555,7 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1a\n" +
 	"\bquestion\x18\x02 \x01(\tR\bquestion\x12\x1d\n" +
 	"\n" +
-	"session_id\x18\x03 \x01(\tR\tsessionId\"\xc7\x03\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"\x8f\x05\n" +
 	"\bPlaneMsg\x12\x15\n" +
 	"\x06msg_id\x18\x01 \x01(\tR\x05msgId\x12!\n" +
 	"\x03ack\x18\x02 \x01(\v2\r.rivet.v1.AckH\x00R\x03ack\x12.\n" +
@@ -3244,7 +3567,10 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\acontext\x18\b \x01(\v2\x11.rivet.v1.ContextH\x00R\acontext\x120\n" +
 	"\amonitor\x18\t \x01(\v2\x14.rivet.v1.MonitorJobH\x00R\amonitor\x12.\n" +
 	"\bhost_job\x18\n" +
-	" \x01(\v2\x11.rivet.v1.HostJobH\x00R\ahostJobB\x06\n" +
+	" \x01(\v2\x11.rivet.v1.HostJobH\x00R\ahostJob\x124\n" +
+	"\tload_test\x18\v \x01(\v2\x15.rivet.v1.LoadTestJobH\x00R\bloadTest\x12D\n" +
+	"\x10load_test_cancel\x18\f \x01(\v2\x18.rivet.v1.LoadTestCancelH\x00R\x0eloadTestCancel\x12J\n" +
+	"\x12load_test_continue\x18\r \x01(\v2\x1a.rivet.v1.LoadTestContinueH\x00R\x10loadTestContinueB\x06\n" +
 	"\x04kind\"i\n" +
 	"\aContext\x12\x17\n" +
 	"\atask_id\x18\x01 \x01(\tR\x06taskId\x12\x1d\n" +
@@ -3418,7 +3744,25 @@ const file_pkg_protocol_rivet_proto_rawDesc = "" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\x12\x0e\n" +
 	"\x02ok\x18\x02 \x01(\bR\x02ok\x12\x16\n" +
 	"\x06output\x18\x03 \x01(\tR\x06output\x12\x19\n" +
-	"\bhost_key\x18\x04 \x01(\tR\ahostKey2\x8a\x01\n" +
+	"\bhost_key\x18\x04 \x01(\tR\ahostKey\"|\n" +
+	"\vLoadTestJob\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12#\n" +
+	"\rassignment_id\x18\x02 \x01(\tR\fassignmentId\x12\x17\n" +
+	"\aboot_id\x18\x03 \x01(\tR\x06bootId\x12\x18\n" +
+	"\apayload\x18\x04 \x01(\fR\apayload\"|\n" +
+	"\x0eLoadTestResult\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12#\n" +
+	"\rassignment_id\x18\x02 \x01(\tR\fassignmentId\x12\x14\n" +
+	"\x05stage\x18\x03 \x01(\tR\x05stage\x12\x18\n" +
+	"\apayload\x18\x04 \x01(\fR\apayload\"v\n" +
+	"\x0eLoadTestCancel\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12#\n" +
+	"\rassignment_id\x18\x02 \x01(\tR\fassignmentId\x12(\n" +
+	"\x10deadline_unix_ms\x18\x03 \x01(\x03R\x0edeadlineUnixMs\"d\n" +
+	"\x10LoadTestContinue\x12\x15\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12#\n" +
+	"\rassignment_id\x18\x02 \x01(\tR\fassignmentId\x12\x14\n" +
+	"\x05stage\x18\x03 \x01(\tR\x05stage2\x8a\x01\n" +
 	"\rRunnerService\x12A\n" +
 	"\bRegister\x12\x19.rivet.v1.RegisterRequest\x1a\x1a.rivet.v1.RegisterResponse\x126\n" +
 	"\aChannel\x12\x13.rivet.v1.RunnerMsg\x1a\x12.rivet.v1.PlaneMsg(\x010\x01B0Z.github.com/PavluninVladimir/rivet/pkg/protocolb\x06proto3"
@@ -3436,7 +3780,7 @@ func file_pkg_protocol_rivet_proto_rawDescGZIP() []byte {
 }
 
 var file_pkg_protocol_rivet_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 32)
+var file_pkg_protocol_rivet_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
 var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(StageResult_Stage)(0),   // 0: rivet.v1.StageResult.Stage
 	(DeployResult_Stage)(0),  // 1: rivet.v1.DeployResult.Stage
@@ -3469,9 +3813,13 @@ var file_pkg_protocol_rivet_proto_goTypes = []any{
 	(*MonitorResult)(nil),    // 28: rivet.v1.MonitorResult
 	(*HostJob)(nil),          // 29: rivet.v1.HostJob
 	(*HostJobResult)(nil),    // 30: rivet.v1.HostJobResult
-	nil,                      // 31: rivet.v1.Assignment.AgentEnvEntry
-	nil,                      // 32: rivet.v1.ModelEndpoint.HeadersEntry
-	nil,                      // 33: rivet.v1.HostJob.EnvEntry
+	(*LoadTestJob)(nil),      // 31: rivet.v1.LoadTestJob
+	(*LoadTestResult)(nil),   // 32: rivet.v1.LoadTestResult
+	(*LoadTestCancel)(nil),   // 33: rivet.v1.LoadTestCancel
+	(*LoadTestContinue)(nil), // 34: rivet.v1.LoadTestContinue
+	nil,                      // 35: rivet.v1.Assignment.AgentEnvEntry
+	nil,                      // 36: rivet.v1.ModelEndpoint.HeadersEntry
+	nil,                      // 37: rivet.v1.HostJob.EnvEntry
 }
 var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	5,  // 0: rivet.v1.RunnerMsg.hello:type_name -> rivet.v1.Hello
@@ -3484,36 +3832,40 @@ var file_pkg_protocol_rivet_proto_depIdxs = []int32{
 	26, // 7: rivet.v1.RunnerMsg.deploy_result:type_name -> rivet.v1.DeployResult
 	28, // 8: rivet.v1.RunnerMsg.monitor_result:type_name -> rivet.v1.MonitorResult
 	30, // 9: rivet.v1.RunnerMsg.host_job_result:type_name -> rivet.v1.HostJobResult
-	0,  // 10: rivet.v1.StageResult.stage:type_name -> rivet.v1.StageResult.Stage
-	10, // 11: rivet.v1.StageResult.criteria:type_name -> rivet.v1.CriterionResult
-	15, // 12: rivet.v1.PlaneMsg.ack:type_name -> rivet.v1.Ack
-	16, // 13: rivet.v1.PlaneMsg.assign:type_name -> rivet.v1.Assignment
-	22, // 14: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
-	23, // 15: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
-	24, // 16: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
-	25, // 17: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
-	14, // 18: rivet.v1.PlaneMsg.context:type_name -> rivet.v1.Context
-	27, // 19: rivet.v1.PlaneMsg.monitor:type_name -> rivet.v1.MonitorJob
-	29, // 20: rivet.v1.PlaneMsg.host_job:type_name -> rivet.v1.HostJob
-	0,  // 21: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
-	21, // 22: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
-	20, // 23: rivet.v1.Assignment.policy:type_name -> rivet.v1.Policy
-	31, // 24: rivet.v1.Assignment.agent_env:type_name -> rivet.v1.Assignment.AgentEnvEntry
-	19, // 25: rivet.v1.Assignment.role:type_name -> rivet.v1.AgentRole
-	17, // 26: rivet.v1.Assignment.endpoint:type_name -> rivet.v1.ModelEndpoint
-	18, // 27: rivet.v1.ModelEndpoint.limits:type_name -> rivet.v1.SessionLimits
-	32, // 28: rivet.v1.ModelEndpoint.headers:type_name -> rivet.v1.ModelEndpoint.HeadersEntry
-	1,  // 29: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
-	33, // 30: rivet.v1.HostJob.env:type_name -> rivet.v1.HostJob.EnvEntry
-	2,  // 31: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
-	4,  // 32: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
-	3,  // 33: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
-	13, // 34: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
-	33, // [33:35] is the sub-list for method output_type
-	31, // [31:33] is the sub-list for method input_type
-	31, // [31:31] is the sub-list for extension type_name
-	31, // [31:31] is the sub-list for extension extendee
-	0,  // [0:31] is the sub-list for field type_name
+	32, // 10: rivet.v1.RunnerMsg.load_test_result:type_name -> rivet.v1.LoadTestResult
+	0,  // 11: rivet.v1.StageResult.stage:type_name -> rivet.v1.StageResult.Stage
+	10, // 12: rivet.v1.StageResult.criteria:type_name -> rivet.v1.CriterionResult
+	15, // 13: rivet.v1.PlaneMsg.ack:type_name -> rivet.v1.Ack
+	16, // 14: rivet.v1.PlaneMsg.assign:type_name -> rivet.v1.Assignment
+	22, // 15: rivet.v1.PlaneMsg.answer:type_name -> rivet.v1.Answer
+	23, // 16: rivet.v1.PlaneMsg.cancel:type_name -> rivet.v1.CancelTask
+	24, // 17: rivet.v1.PlaneMsg.pause:type_name -> rivet.v1.PauseRunner
+	25, // 18: rivet.v1.PlaneMsg.deploy:type_name -> rivet.v1.DeployJob
+	14, // 19: rivet.v1.PlaneMsg.context:type_name -> rivet.v1.Context
+	27, // 20: rivet.v1.PlaneMsg.monitor:type_name -> rivet.v1.MonitorJob
+	29, // 21: rivet.v1.PlaneMsg.host_job:type_name -> rivet.v1.HostJob
+	31, // 22: rivet.v1.PlaneMsg.load_test:type_name -> rivet.v1.LoadTestJob
+	33, // 23: rivet.v1.PlaneMsg.load_test_cancel:type_name -> rivet.v1.LoadTestCancel
+	34, // 24: rivet.v1.PlaneMsg.load_test_continue:type_name -> rivet.v1.LoadTestContinue
+	0,  // 25: rivet.v1.Assignment.stage:type_name -> rivet.v1.StageResult.Stage
+	21, // 26: rivet.v1.Assignment.checks:type_name -> rivet.v1.Check
+	20, // 27: rivet.v1.Assignment.policy:type_name -> rivet.v1.Policy
+	35, // 28: rivet.v1.Assignment.agent_env:type_name -> rivet.v1.Assignment.AgentEnvEntry
+	19, // 29: rivet.v1.Assignment.role:type_name -> rivet.v1.AgentRole
+	17, // 30: rivet.v1.Assignment.endpoint:type_name -> rivet.v1.ModelEndpoint
+	18, // 31: rivet.v1.ModelEndpoint.limits:type_name -> rivet.v1.SessionLimits
+	36, // 32: rivet.v1.ModelEndpoint.headers:type_name -> rivet.v1.ModelEndpoint.HeadersEntry
+	1,  // 33: rivet.v1.DeployResult.stage:type_name -> rivet.v1.DeployResult.Stage
+	37, // 34: rivet.v1.HostJob.env:type_name -> rivet.v1.HostJob.EnvEntry
+	2,  // 35: rivet.v1.RunnerService.Register:input_type -> rivet.v1.RegisterRequest
+	4,  // 36: rivet.v1.RunnerService.Channel:input_type -> rivet.v1.RunnerMsg
+	3,  // 37: rivet.v1.RunnerService.Register:output_type -> rivet.v1.RegisterResponse
+	13, // 38: rivet.v1.RunnerService.Channel:output_type -> rivet.v1.PlaneMsg
+	37, // [37:39] is the sub-list for method output_type
+	35, // [35:37] is the sub-list for method input_type
+	35, // [35:35] is the sub-list for extension type_name
+	35, // [35:35] is the sub-list for extension extendee
+	0,  // [0:35] is the sub-list for field type_name
 }
 
 func init() { file_pkg_protocol_rivet_proto_init() }
@@ -3532,6 +3884,7 @@ func file_pkg_protocol_rivet_proto_init() {
 		(*RunnerMsg_DeployResult)(nil),
 		(*RunnerMsg_MonitorResult)(nil),
 		(*RunnerMsg_HostJobResult)(nil),
+		(*RunnerMsg_LoadTestResult)(nil),
 	}
 	file_pkg_protocol_rivet_proto_msgTypes[4].OneofWrappers = []any{}
 	file_pkg_protocol_rivet_proto_msgTypes[7].OneofWrappers = []any{}
@@ -3545,6 +3898,9 @@ func file_pkg_protocol_rivet_proto_init() {
 		(*PlaneMsg_Context)(nil),
 		(*PlaneMsg_Monitor)(nil),
 		(*PlaneMsg_HostJob)(nil),
+		(*PlaneMsg_LoadTest)(nil),
+		(*PlaneMsg_LoadTestCancel)(nil),
+		(*PlaneMsg_LoadTestContinue)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -3552,7 +3908,7 @@ func file_pkg_protocol_rivet_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_protocol_rivet_proto_rawDesc), len(file_pkg_protocol_rivet_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   32,
+			NumMessages:   36,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

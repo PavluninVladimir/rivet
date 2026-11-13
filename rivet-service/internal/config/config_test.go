@@ -307,3 +307,18 @@ func TestReadmeGoMatchesGoMod(t *testing.T) {
 		t.Fatalf("go.mod требует go %s, а README не упоминает %q: поднимайте их вместе", m[1], want)
 	}
 }
+
+func TestLoadLimitsFiniteAndConfigurable(t *testing.T) {
+	t.Setenv("RIVET_LOAD_MAX_VUS", "2000")
+	t.Setenv("RIVET_LOAD_MAX_RPS", "9000")
+	c, err := FromEnv()
+	if err != nil || c.LoadLimits.MaxVUs != 2000 || c.LoadLimits.MaxRPS != 9000 {
+		t.Fatalf("limits %+v %v", c.LoadLimits, err)
+	}
+	for _, bad := range []string{"0", "-1", "NaN", "99999999999999999999999"} {
+		t.Setenv("RIVET_LOAD_MAX_VUS", bad)
+		if _, err := FromEnv(); err == nil {
+			t.Fatal("accepted unbounded/invalid limits", bad)
+		}
+	}
+}

@@ -24,6 +24,7 @@ workspace "Rivet" "Автономная система разработки: п�
                 app_discovery = component "Проверка исследования" "Проверяет и нормализует результаты анализа, связи потребностей и бэклог." "Go" ""
                 app_history = component "Импорт истории" "Разбирает архив OpenSpec и манифест истории, привязывает PR к Epic'ам и задачам." "Go" ""
                 app_llm = component "Клиенты моделей" "Единый клиент к API-совместимым моделям разных провайдеров." "Go" ""
+                app_load_testing = component "Управление нагрузочными тестами" "Вопрос после первого рабочего релиза, явный профиль владельца, конечные лимиты, очередь с fencing и сохранённые отчёты. Никогда не запускает нагрузку только по появлению релиза." "Go, PostgreSQL, REST, SSE" ""
                 app_ops = component "Релизы и инциденты" "Формирует release notes и описания инцидентов с помощью модели." "Go" ""
                 app_orchestrator = component "Оркестратор" "Детерминированный конвейер: диспетчеризация этапов, реакции на вердикты, публикации и слияние." "Go" ""
                 app_overview = component "Обзор проекта" "Строит отчёт о ходе проекта для руководителя." "Go" ""
@@ -37,6 +38,7 @@ workspace "Rivet" "Автономная система разработки: п�
             app_runner = container "rivet-runner" "Агент на машине пользователя: подключается к control plane и выполняет этапы задач, публикации и проверки." "Go 1.26, gRPC" "" {
                 app_runner_agent = component "Агентский цикл Rivet" "Цикл агента роли: чтение репозитория, вызов модели, инструменты и формирование вердикта." "Go" ""
                 app_runner_engine = component "Движок runner'а" "Подключение к control plane, получение назначений, исполнение стадий публикации и наблюдения." "Go" ""
+                app_runner_k6 = component "Выделенный нагрузочный runner" "Единственная capability load, без агента и моделей. Native k6 на хосте публикации; только фиксированная GET-смесь с явным секретом. Следующая ступень ждёт сохранения предыдущей и отдельного разрешения control plane." "Go, gRPC, native k6 2.3.x" ""
             }
             tech_postgres = container "PostgreSQL" "Реляционная база с изменяемой моделью Rivet: проекты, эпики, задачи, сессии, релизы, агенты и настройки." "PostgreSQL 17" "Database"
             tech_s3 = container "Объектное хранилище" "Хранит тяжёлые артефакты сессий — транскрипты; в базе остаются только ссылки s3://." "S3-совместимое хранилище (RustFS в dev, S3 в проде)" "Database"
@@ -52,6 +54,7 @@ workspace "Rivet" "Автономная система разработки: п�
         app_api -> app_analyst "передаёт"
         app_api -> app_history "передаёт"
         app_api -> app_llm "передаёт"
+        app_api -> app_load_testing "передаёт"
         app_api -> app_orchestrator "передаёт"
         app_api -> app_planner "передаёт"
         app_api -> app_scm "использует"
@@ -62,6 +65,9 @@ workspace "Rivet" "Автономная система разработки: п�
         app_discovery -> tech_postgres "читает Запуск исследования, читает и пишет Epic, читает и пишет Потребность Epic"
         app_history -> tech_postgres "читает и пишет Epic, читает и пишет Задача, читает и пишет Событие журнала"
         app_llm -> ext_llm "использует"
+        app_load_testing -> app_runner_k6 "передаёт"
+        app_load_testing -> app_stream "передаёт"
+        app_load_testing -> tech_postgres "читает и пишет Вопрос и сохранённый профиль нагрузки, читает и пишет Попытка нагрузочного тестирования"
         app_ops -> app_llm "использует, передаёт"
         app_ops -> tech_postgres "читает и пишет Инцидент, читает и пишет Релиз"
         app_orchestrator -> app_architecture "передаёт"
@@ -77,6 +83,7 @@ workspace "Rivet" "Автономная система разработки: п�
         app_runner_agent -> ext_llm "использует"
         app_runner_engine -> app_runner_agent "передаёт"
         app_runner_engine -> app_stream "использует"
+        app_runner_k6 -> app_stream "передаёт"
         app_scm -> ext_gitea "использует"
         app_scm -> ext_github "использует"
         app_scm -> ext_gitlab "использует"
@@ -105,6 +112,9 @@ workspace "Rivet" "Автономная система разработки: п�
         ext_gitlab -> app_api "передаёт"
 
         deploymentEnvironment "Основное" {
+            deploymentNode "Native k6" "Отдельный процесс k6 2.3.x с очищенными env/config, закрытым временным файлом тестового секрета и абсолютным конечным дедлайном. Генератор делит хост с приложением; жёсткая OS CPU/memory-изоляция не заявляется." "k6 2.3.x" {
+                containerInstance app_runner
+            }
             deploymentNode "Сервер установки Rivet" "Docker-хост, на котором разворачиваются rivetd, PostgreSQL и объектное хранилище." "Docker Compose (Linux)" {
                 containerInstance app_rivetd
                 containerInstance tech_postgres
