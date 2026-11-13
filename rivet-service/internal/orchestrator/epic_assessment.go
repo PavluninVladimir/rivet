@@ -10,6 +10,7 @@ import (
 
 	"github.com/PavluninVladimir/rivet/internal/architecture"
 	"github.com/PavluninVladimir/rivet/internal/cycle"
+	"github.com/PavluninVladimir/rivet/internal/discovery"
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/store"
 )
@@ -67,12 +68,12 @@ func (e *Engine) runEpicAssessment(ctx context.Context, job OpsJob, agentID stri
 	if err != nil {
 		return err
 	}
-	if len(needs) > 20 {
-		return wait("оценка ожидает ограниченный набор: не больше 20 потребностей")
+	if len(needs) > discovery.MaxNeeds {
+		return wait("набор потребностей превышает лимит результата исследования")
 	}
 	for i := range needs {
-		if len(needs[i].Evidence) > 3 {
-			return wait("оценка ожидает ограниченный набор: не больше 3 цитат на потребность")
+		if len(needs[i].Evidence) > discovery.MaxQuotesPerNeed {
+			return wait("число цитат превышает лимит результата исследования")
 		}
 	}
 	// Quotes select related materials, but do not replace their full scope:
@@ -120,8 +121,9 @@ func (e *Engine) runEpicAssessment(ctx context.Context, job OpsJob, agentID stri
 	for _, task := range tasks {
 		plan = append(plan, map[string]any{"id": task.ID, "title": task.Title, "description": task.Description, "criteria": task.Criteria, "deps": task.Deps, "estimate": task.Estimate, "status": task.Status})
 	}
+	projection := projectAssessmentNeeds(needs)
 	input, err := json.Marshal(map[string]any{"epic_id": job.RefID, "title": v.Title, "goal": v.Goal, "revision": v.Revision,
-		"discovery_run_id": v.Assessment.RunID, "needs": needs, "source_materials": materials, "existing_plan": plan,
+		"discovery_run_id": v.Assessment.RunID, "needs": projection.Needs, "needs_projection": projection, "source_materials": materials, "existing_plan": plan,
 		"implementation_evidence": "not_inspected", "architecture_status": snap.Status, "architecture_sha": sha, "architecture_snapshot": json.RawMessage(data)})
 	if err != nil {
 		return err
