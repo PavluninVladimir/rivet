@@ -272,6 +272,7 @@ func (e *Engine) completeBounded(ctx context.Context, a opsAgent, projectID, pro
 	start := time.Now()
 	var out string
 	var use llm.Usage
+	var price *domain.ModelEntry
 	var err error
 	if e.OpsComplete != nil {
 		out, err = e.OpsComplete(ctx, a.connID, a.model, prompt)
@@ -283,13 +284,15 @@ func (e *Engine) completeBounded(ctx context.Context, a opsAgent, projectID, pro
 		case !c.Enabled:
 			return "", fmt.Errorf("подключение %s отключено", c.ID)
 		}
+		price = opsPriceSnapshot(c.Models, a.model)
 		out, use, err = cl.CompleteWithUsage(ctx, a.model, prompt, maxTokens)
 	}
 	// Usage проекта с ролью шаблона: runner'а у задания нет, токены — как
 	// сообщил провайдер (nil — не сообщил).
 	if uerr := e.St.RecordUsage(context.WithoutCancel(ctx), store.UsageInput{
 		ProjectID: projectID, Role: a.role.ID, Model: a.model, TokensIn: use.InputTokens, TokensOut: use.OutputTokens,
-		DurationS: int(time.Since(start).Seconds()),
+		TokensCached: use.CachedInputTokens, TokensCacheWrite: use.CacheWriteTokens,
+		CostUSD: opsCost(use, price), DurationS: int(time.Since(start).Seconds()),
 	}); uerr != nil {
 		slog.Error("usage задания control plane", "role", a.role.ID, "err", uerr)
 	}

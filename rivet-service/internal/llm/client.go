@@ -155,6 +155,13 @@ func (c Client) ListModels(ctx context.Context) ([]Model, error) {
 type Usage struct {
 	InputTokens  *int64
 	OutputTokens *int64
+	// Кешированные токены входят в InputTokens. nil — провайдер не
+	// сообщил разбивку. CacheWriteTokens имеет отдельную схему цены.
+	CachedInputTokens *int64
+	CacheWriteTokens  *int64
+	// CostIncomplete — есть неучтённая попытка или неполная разбивка:
+	// известные токены сохраняются, но итоговую стоимость считать нельзя.
+	CostIncomplete bool
 	// MaxTokens — лимит ответа, с которым прошёл запрос: ниже запрошенного,
 	// если провайдер отклонил большой лимит и запрос повторён.
 	MaxTokens int
@@ -245,6 +252,7 @@ func (c Client) anthropicComplete(ctx context.Context, model, prompt string, max
 	// Провайдер с меньшим потолком ответа отклоняет max_tokens (400):
 	// повтор с потолком из текста ошибки или на шаг ниже.
 	limit := maxTokens
+	retried := false
 	for attempt := 0; ; attempt++ {
 		text, usage, err := c.anthropicOnce(ctx, model, prompt, limit)
 		usage.MaxTokens = limit
@@ -252,9 +260,11 @@ func (c Client) anthropicComplete(ctx context.Context, model, prompt string, max
 		if err != nil && attempt < 2 && errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
 			if next := lowerLimit(err.Error(), limit); next > 0 {
 				limit = next
+				retried = true
 				continue
 			}
 		}
+		usage.CostIncomplete = usage.CostIncomplete || retried
 		return text, usage, err
 	}
 }
@@ -269,14 +279,34 @@ func (c Client) anthropicOnce(ctx context.Context, model, prompt string, maxToke
 		Messages:  []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt))},
 	}
 	var resp *anthropic.Message
+	var usage Usage
 	if maxTokens >= anthropicStreamFrom {
 		// Длинный ответ — потоком, сообщение собирается из событий.
 		stream := cl.Messages.NewStreaming(ctx, params)
 		msg := anthropic.Message{}
 		stopped := false
 		var accErr error
+		var reported anthropic.Usage
+		var finalOutput *int64
 		for stream.Next() {
 			ev := stream.Current()
+			if ev.Type == "message_start" {
+				reported = ev.Message.Usage
+			}
+			if ev.Type == "message_delta" {
+				if ev.Usage.JSON.OutputTokens.Valid() {
+					finalOutput = reportedToken(ev.Usage.OutputTokens, true)
+				}
+				if ev.Usage.JSON.InputTokens.Valid() {
+					reported.InputTokens, reported.JSON.InputTokens = ev.Usage.InputTokens, ev.Usage.JSON.InputTokens
+				}
+				if ev.Usage.JSON.CacheReadInputTokens.Valid() {
+					reported.CacheReadInputTokens, reported.JSON.CacheReadInputTokens = ev.Usage.CacheReadInputTokens, ev.Usage.JSON.CacheReadInputTokens
+				}
+				if ev.Usage.JSON.CacheCreationInputTokens.Valid() {
+					reported.CacheCreationInputTokens, reported.JSON.CacheCreationInputTokens = ev.Usage.CacheCreationInputTokens, ev.Usage.JSON.CacheCreationInputTokens
+				}
+			}
 			if accErr = msg.Accumulate(ev); accErr != nil {
 				break
 			}
@@ -286,12 +316,11 @@ func (c Client) anthropicOnce(ctx context.Context, model, prompt string, maxToke
 		}
 		err := stream.Err()
 		_ = stream.Close()
-		// Токены message_start известны и при обрыве: расход учитывается.
-		var usage Usage
-		if msg.ID != "" {
-			in, out := msg.Usage.InputTokens, msg.Usage.OutputTokens
-			usage = Usage{InputTokens: &in, OutputTokens: &out}
-		}
+		// Вход message_start известен и при обрыве. Начальный output не
+		// является полным расходом ответа: нужен сообщённый финальный delta.
+		usage = anthropicCompleteUsage(reported)
+		usage.OutputTokens = finalOutput
+		usage.CostIncomplete = usage.CostIncomplete || !stopped || accErr != nil || err != nil
 		switch {
 		case accErr != nil:
 			return "", usage, accErr
@@ -309,9 +338,8 @@ func (c Client) anthropicOnce(ctx context.Context, model, prompt string, maxToke
 			return "", Usage{}, anthropicErr(err)
 		}
 		resp = r
+		usage = anthropicCompleteUsage(resp.Usage)
 	}
-	in, out := resp.Usage.InputTokens, resp.Usage.OutputTokens
-	usage := Usage{InputTokens: &in, OutputTokens: &out}
 	switch resp.StopReason {
 	case anthropic.StopReasonRefusal:
 		return "", usage, fmt.Errorf("модель отклонила запрос (refusal)")
@@ -325,6 +353,41 @@ func (c Client) anthropicOnce(ctx context.Context, model, prompt string, maxToke
 		}
 	}
 	return text, usage, nil
+}
+
+// reportedToken сохраняет различие между отсутствующим значением и явным0.
+// Отрицательный счётчик не является допустимым расходом провайдера.
+func reportedToken(n int64, present bool) *int64 {
+	if !present || n < 0 {
+		return nil
+	}
+	return &n
+}
+
+func anthropicCompleteUsage(raw anthropic.Usage) Usage {
+	u := Usage{
+		InputTokens:       reportedToken(raw.InputTokens, raw.JSON.InputTokens.Valid()),
+		OutputTokens:      reportedToken(raw.OutputTokens, raw.JSON.OutputTokens.Valid()),
+		CachedInputTokens: reportedToken(raw.CacheReadInputTokens, raw.JSON.CacheReadInputTokens.Valid()),
+		CacheWriteTokens:  reportedToken(raw.CacheCreationInputTokens, raw.JSON.CacheCreationInputTokens.Valid()),
+	}
+	// Anthropic input_tokens исключает чтение/запись кеша. Без разбивки
+	// сохраняем известный fresh-вход, но не объявляем его полным расходом.
+	if u.InputTokens == nil || u.CachedInputTokens == nil || u.CacheWriteTokens == nil {
+		u.CostIncomplete = true
+		return u
+	}
+	const maxInt64 = int64(1<<63 - 1)
+	total := *u.InputTokens
+	for _, n := range []int64{*u.CachedInputTokens, *u.CacheWriteTokens} {
+		if n > maxInt64-total {
+			u.CostIncomplete = true
+			return u
+		}
+		total += n
+	}
+	u.InputTokens = &total
+	return u
 }
 
 // limitRes — потолок ответа в тексте отказа провайдера: «valid range of
@@ -496,6 +559,7 @@ func (c Client) openaiComplete(ctx context.Context, model, prompt string, maxTok
 	// Провайдер с меньшим потолком ответа отклоняет большой max_tokens
 	// (HTTP 400): повтор с потолком из текста ошибки или на шаг ниже.
 	limit := maxTokens
+	retried := false
 	raw, err := request(limit)
 	for attempt := 0; err != nil && attempt < 2; attempt++ {
 		var bad *httpStatusError
@@ -507,10 +571,11 @@ func (c Client) openaiComplete(ctx context.Context, model, prompt string, maxTok
 			break
 		}
 		limit = next
+		retried = true
 		raw, err = request(limit)
 	}
 	if err != nil {
-		return "", Usage{MaxTokens: limit}, err
+		return "", Usage{MaxTokens: limit, CostIncomplete: retried}, err
 	}
 	var out struct {
 		Choices []struct {
@@ -520,16 +585,36 @@ func (c Client) openaiComplete(ctx context.Context, model, prompt string, maxTok
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage *struct {
-			PromptTokens     *int64 `json:"prompt_tokens"`
-			CompletionTokens *int64 `json:"completion_tokens"`
+			PromptTokens         *int64 `json:"prompt_tokens"`
+			CompletionTokens     *int64 `json:"completion_tokens"`
+			PromptCacheHitTokens *int64 `json:"prompt_cache_hit_tokens"`
+			PromptTokensDetails  *struct {
+				CachedTokens *int64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
 		return "", Usage{}, fmt.Errorf("невалидный ответ: %w", err)
 	}
-	usage := Usage{MaxTokens: limit}
+	usage := Usage{MaxTokens: limit, CostIncomplete: retried}
 	if out.Usage != nil {
-		usage.InputTokens, usage.OutputTokens = out.Usage.PromptTokens, out.Usage.CompletionTokens
+		if n := out.Usage.PromptTokens; n != nil {
+			usage.InputTokens = reportedToken(*n, true)
+		}
+		if n := out.Usage.CompletionTokens; n != nil {
+			usage.OutputTokens = reportedToken(*n, true)
+		}
+		cache := out.Usage.PromptCacheHitTokens
+		if details := out.Usage.PromptTokensDetails; details != nil && details.CachedTokens != nil {
+			if cache != nil && *cache != *details.CachedTokens {
+				usage.CostIncomplete = true
+			}
+			cache = details.CachedTokens
+		}
+		if cache != nil {
+			usage.CachedInputTokens = reportedToken(*cache, true)
+			usage.CostIncomplete = usage.CostIncomplete || usage.CachedInputTokens == nil
+		}
 	}
 	if len(out.Choices) == 0 {
 		return "", usage, fmt.Errorf("пустой ответ")
