@@ -50,7 +50,7 @@ func TestCSPStrict(t *testing.T) {
 	}
 	for name, want := range map[string]string{
 		"default-src":     "'self'",
-		"script-src":      "'self'",
+		"script-src":      "'self' " + DesignPreviewScriptHash,
 		"connect-src":     "'self'",
 		"object-src":      "'none'",
 		"base-uri":        "'none'",

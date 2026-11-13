@@ -60,6 +60,9 @@ func forbidden(w http.ResponseWriter, msg string) {
 // сборке (ссылка на исходники видна до входа, спека source-availability),
 // вход и webhook (у него собственная HMAC-подпись, спека scm-integration).
 func authExempt(r *http.Request) bool {
+	if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/design-assets/") {
+		return true
+	}
 	switch r.URL.Path {
 	case "/api/v1/health", "/api/v1/about", "/api/v1/auth/login",
 		// Webhook'и аутентифицируются подписью хостинга, а не сессией.

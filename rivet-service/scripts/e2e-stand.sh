@@ -23,6 +23,8 @@ mkdir -p "$STAND_DIR/repos/e2e"
 
 # Чистая база на прогон: команда нашего CLI, работает без psql.
 DB_NAME="rivet_e2e_$$_$(date +%s)"
+# Non-secret identity for guarded E2E fixtures; never expose DB_URL/credentials.
+printf '%s\n' "$DB_NAME" > "$STAND_DIR/database-name"
 DB_URL=$(cd "$SERVICE_DIR" && RIVET_DATABASE_URL="$DB_BASE" go run ./cmd/rivet createdb "$DB_NAME")
 
 # Локальный bare-репозиторий с веткой main: клонируется как file://.../e2e/demo.git

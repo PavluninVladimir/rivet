@@ -12,7 +12,9 @@ import (
 )
 
 type Config struct {
-	LoadLimits loadtest.Limits
+	// DesignChromiumPath is an operator-selected trusted executable, never model input.
+	DesignChromiumPath string
+	LoadLimits         loadtest.Limits
 	// DatabaseURL — DSN PostgreSQL, например postgres://rivet:rivet@localhost:5432/rivet.
 	DatabaseURL string
 	// HTTPAddr: адрес клиентского API (REST + SSE). По умолчанию loopback:
@@ -112,6 +114,7 @@ func FromEnv() (Config, error) {
 	c := Config{
 		LoadLimits:             loadtest.DefaultLimits(),
 		DatabaseURL:            getenv("RIVET_DATABASE_URL", "postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable"),
+		DesignChromiumPath:     getenv("RIVET_DESIGN_CHROMIUM_PATH", "chromium"),
 		HTTPAddr:               getenv("RIVET_HTTP_ADDR", DefaultHTTPAddr),
 		GRPCAddr:               getenv("RIVET_GRPC_ADDR", DefaultGRPCAddr),
 		GRPCTLSCert:            os.Getenv("RIVET_GRPC_TLS_CERT"),

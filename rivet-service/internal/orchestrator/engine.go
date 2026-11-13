@@ -597,6 +597,13 @@ func (e *Engine) dispatchRun(ctx context.Context, task domain.Task, run store.St
 	if err != nil {
 		return "", false, err
 	}
+	designContext, err := e.St.DesignTaskContext(ctx, task.ID)
+	if err != nil {
+		return "", false, fmt.Errorf("контекст дизайна: %w", err)
+	}
+	if designContext != "" {
+		description += "\n\n" + designContext
+	}
 	// Сессия создаётся до отправки Assignment: runner повторяет session_id
 	// во всех сообщениях стадии, сообщения без него отбрасываются (design,
 	// решение 4). Без сессии стадию не запускаем — задачу вернёт

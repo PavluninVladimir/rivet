@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -199,6 +200,11 @@ func run(ctx context.Context, cfg config.Config) error {
 		Secrets: box, PublicURL: cfg.PublicURL, Policy: polEngine,
 		WebhookSecret: cfg.GitHubWebhookSecret,
 		TrustProxy:    cfg.TrustProxy,
+	}
+	if browser, err := exec.LookPath(cfg.DesignChromiumPath); err == nil {
+		apiSrv.DesignScreenshot = api.NewDesignScreenshotRenderer(browser)
+	} else {
+		slog.Warn("дизайн: Chromium недоступен, передача снимка вернёт screenshot_unavailable")
 	}
 	go apiSrv.RunAssistant(ctx)
 	if err := apiSrv.ReloadPlanner(ctx); err != nil {
