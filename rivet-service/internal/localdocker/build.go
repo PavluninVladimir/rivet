@@ -18,6 +18,7 @@ const NodeImage = "node:24-bookworm@sha256:8fa96264f302f58bbb13aa7339c541547b569
 const NginxImage = "nginx:alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11"
 const GoImage = "golang:1.26.11-alpine@sha256:ae52b5bc6ed045a9ed26ab03dc19327a802a9cc9aa8b27ed57f5c6b60579b0bb"
 const AlpineImage = "alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc"
+const PythonImage = "python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72"
 
 // Failure — машинный код публикации и понятное описание без вывода секретов.
 type Failure struct {
@@ -57,12 +58,15 @@ func recipe(root string, selected string) (string, string, bool, error) {
 			selected = "go"
 		case hasPackage && pkg.Scripts["start"] != "":
 			selected = "node"
+		case regular(filepath.Join(root, "app.py")):
+			// Python is an internal auto recipe, not a public config value.
+			return "python", "", false, nil
 		case hasPackage && build:
 			selected = "static"
 		case regular(filepath.Join(root, "index.html")):
 			selected = "static"
 		default:
-			return "", "", false, fail("recipe_not_detected", "добавьте go.mod, package.json или index.html")
+			return "", "", false, fail("recipe_not_detected", "добавьте go.mod, package.json, app.py или index.html")
 		}
 	}
 	switch selected {
@@ -150,6 +154,12 @@ func Prepare(root string, config domain.LocalDockerEnvironmentConfig) (*BuildCon
 			dockerfile += "RUN npm run build\n"
 		}
 		dockerfile += "RUN mkdir -p /data && chown 65532:65532 /data\n" + common + "CMD [\"npm\",\"start\"]\n"
+	case "python":
+		dockerfile = fmt.Sprintf("FROM %s\nWORKDIR /app\nENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1\nCOPY . .\n", PythonImage)
+		if regular(filepath.Join(source, "requirements.txt")) {
+			dockerfile += "RUN python3 -m pip install --no-cache-dir -r requirements.txt\n"
+		}
+		dockerfile += "RUN mkdir -p /data && chown 65532:65532 /data\n" + common + "CMD [\"python3\",\"app.py\"]\n"
 	case "static":
 		prefix := ""
 		copyFrom := "COPY . /app/public\n"
