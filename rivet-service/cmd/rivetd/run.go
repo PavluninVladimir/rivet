@@ -200,6 +200,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		WebhookSecret: cfg.GitHubWebhookSecret,
 		TrustProxy:    cfg.TrustProxy,
 	}
+	go apiSrv.RunAssistant(ctx)
 	if err := apiSrv.ReloadPlanner(ctx); err != nil {
 		return err
 	}
