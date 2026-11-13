@@ -125,3 +125,34 @@ func Fingerprint(envID, source, output string) string {
 	sum := sha256.Sum256([]byte(envID + "|" + source + "|" + Normalize(ErrorLine(output))))
 	return hex.EncodeToString(sum[:])
 }
+
+// LocalPublishFingerprint uses only a bounded, versioned machine identity.
+// Generic build/runtime failures keep the legacy log fingerprint because
+// independent compiler and application errors must remain distinguishable.
+func LocalPublishFingerprint(envID, operation, phase, code string) (string, bool) {
+	if operation != "publish" {
+		return "", false
+	}
+	if phase != "build" && phase != "start" && phase != "verify" {
+		return "", false
+	}
+	switch code {
+	case "recipe_not_detected", "port_conflict", "loopback_not_bound", "image_missing":
+	default:
+		return "", false
+	}
+	sum := sha256.Sum256([]byte("local-publish-v1|" + envID + "|release|publish|" + phase + "|" + code))
+	return hex.EncodeToString(sum[:]), true
+}
+func LocalFailurePhase(code string) string {
+	switch code {
+	case "recipe_not_detected":
+		return "build"
+	case "port_conflict", "image_missing":
+		return "start"
+	case "loopback_not_bound":
+		return "verify"
+	default:
+		return ""
+	}
+}

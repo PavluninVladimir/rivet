@@ -83,6 +83,9 @@ func (e *Engine) onLocalDockerResult(ctx context.Context, runnerID string, dr *p
 	if err != nil || !accepted {
 		return err
 	}
+	// A repeated delivery may disagree with the result already committed.
+	// Only the accepted durable state may finalize the deployment.
+	res.Status, res.Reason = p.Status, p.Reason
 	switch res.Status {
 	case "building", "starting", "verifying":
 		return nil
@@ -183,4 +186,28 @@ func (e *Engine) sendLocalDocker(a store.DeployAssignment, msg *pb.PlaneMsg, req
 		e.dropDeploy(a.Deployment.ID)
 	}
 	return false
+}
+
+// Replay accepted terminal publications before runner/watchdog loss handling.
+// The regular Fail/CompleteDeployment CAS owns the single durable effect.
+func (e *Engine) replayLocalTerminals(ctx context.Context) error {
+	pending, err := e.St.PendingLocalTerminals(ctx)
+	if err != nil {
+		return err
+	}
+	for _, p := range pending {
+		if p.Status == "running" {
+			err = e.finishDeploy(ctx, p.ActiveDeploymentID, p.RunnerID, "done", "")
+		} else {
+			detail := "локальная публикация не выполнена"
+			if p.Reason != nil {
+				detail = p.Reason.Code + ": " + p.Reason.Message
+			}
+			err = e.failDeployNow(ctx, p.ActiveDeploymentID, p.RunnerID, detail)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

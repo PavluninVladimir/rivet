@@ -185,6 +185,9 @@ func (e *Engine) Tick(ctx context.Context) error {
 	// Наблюдение и задания control plane идут и при сбое тика конвейера.
 	defer e.tickLoadTests(ctx)
 	defer e.tickOps(ctx)
+	if err := e.replayLocalTerminals(ctx); err != nil {
+		return fmt.Errorf("replay local terminal: %w", err)
+	}
 	lost, lostDeps, err := e.St.MarkStaleRunnersOffline(ctx, int(e.HeartbeatTimeout.Seconds()))
 	if err != nil {
 		return fmt.Errorf("stale runners: %w", err)

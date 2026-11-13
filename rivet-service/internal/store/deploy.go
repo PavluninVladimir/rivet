@@ -597,7 +597,11 @@ func (s *Store) CompleteDeployment(ctx context.Context, depID, runnerID string) 
 		}
 		// Релиз окружения с составом по времени merge и переходы его
 		// инцидентов — в той же транзакции (add-sdlc-cycle).
-		return createReleaseTx(ctx, tx, depID)
+		if err := createReleaseTx(ctx, tx, depID); err != nil {
+			return err
+		}
+		_, err = resolveStaleDeployAttentionTx(ctx, tx, envID)
+		return err
 	})
 	return claimed, err
 }
