@@ -1035,7 +1035,7 @@ type AgentProfile struct {
 type AgentLimits struct {
 	MaxTurns   int   `json:"max_turns,omitempty"`
 	MaxTokens  int64 `json:"max_tokens,omitempty"`
-	MaxMinutes int   `json:"max_minutes,omitempty"`
+	MaxMinutes int   `json:"max_minutes,omitempty"` // 0 — без собственного временного предела.
 }
 
 // AgentRole — роль агента в команде (спека backend/agent-roles «Каталог

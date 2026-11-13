@@ -278,6 +278,52 @@ func TestLoopLimits(t *testing.T) {
 	}
 }
 
+// Незаданный лимит не создаёт скрытый 30-минутный deadline, но родитель
+// по-прежнему может прервать уже начатое ожидание модели.
+func TestLoopWithoutTimeLimit(t *testing.T) {
+	rec := &recorder{}
+	cfg, _ := newCfg(t, nil, rec)
+	cfg.Client = chatFunc(func(ctx context.Context, _ llm.ChatRequest) (llm.ChatResponse, error) {
+		if deadline, ok := ctx.Deadline(); ok {
+			t.Fatalf("неожиданный deadline по умолчанию: %v", deadline)
+		}
+		return call(ToolFinish, map[string]any{"verdict": "ok", "summary": "готово"}), nil
+	})
+	if res, err := Run(context.Background(), cfg, "x"); err != nil || res.Verdict != "ok" {
+		t.Fatalf("сессия без временного предела: %+v, %v", res, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	cfg.Client = chatFunc(func(ctx context.Context, _ llm.ChatRequest) (llm.ChatResponse, error) {
+		close(started)
+		<-ctx.Done()
+		return llm.ChatResponse{}, ctx.Err()
+	})
+	go func() {
+		<-started
+		cancel()
+	}()
+	if _, err := Run(ctx, cfg, "x"); !errors.Is(err, context.Canceled) || errors.Is(err, ErrLimit) {
+		t.Fatalf("отмена начатого запроса без временного предела: %v", err)
+	}
+
+	deadline := time.Now().Add(20 * time.Millisecond)
+	ctx, expire := context.WithDeadline(context.Background(), deadline)
+	defer expire()
+	cfg.Client = chatFunc(func(ctx context.Context, _ llm.ChatRequest) (llm.ChatResponse, error) {
+		if got, ok := ctx.Deadline(); !ok || !got.Equal(deadline) {
+			t.Fatalf("потерян родительский deadline: %v, %v", got, ok)
+		}
+		<-ctx.Done()
+		return llm.ChatResponse{}, ctx.Err()
+	})
+	if _, err := Run(ctx, cfg, "x"); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrLimit) {
+		t.Fatalf("родительский deadline стал лимитом сессии: %v", err)
+	}
+}
+
 type chatFunc func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error)
 
 func (f chatFunc) Chat(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
