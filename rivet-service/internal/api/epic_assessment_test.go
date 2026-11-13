@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/PavluninVladimir/rivet/internal/cycle"
+	"github.com/PavluninVladimir/rivet/internal/discovery"
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/planner"
@@ -337,7 +338,7 @@ func TestRecoveredQueuedPlanIsArchitectInputWithoutReplanning(t *testing.T) {
 	}
 }
 
-func TestAssessmentDoesNotSilentlyOmitExcessNeeds(t *testing.T) {
+func TestAssessmentRejectsNeedsBeyondDiscoveryLimit(t *testing.T) {
 	llm := fakeAnalystLLM(t, nil)
 	f := seedDiscovery(t, llm.URL)
 	enableAssessmentAPI(t, f)
@@ -354,7 +355,7 @@ func TestAssessmentDoesNotSilentlyOmitExcessNeeds(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = f.st.Pool.Exec(ctx, `INSERT INTO epic_needs(epic_id,run_id,need_id,need)
-		SELECT $1,$2,'n'||g,jsonb_build_object('id','n'||g,'title','requirement','evidence','[]'::jsonb) FROM generate_series(1,21) g`, e.ID, run.ID); err != nil {
+		SELECT $1,$2,'n'||g,jsonb_build_object('id','n'||g,'title','requirement','evidence','[]'::jsonb) FROM generate_series(1,$3::int) g`, e.ID, run.ID, discovery.MaxNeeds+1); err != nil {
 		t.Fatal(err)
 	}
 	var calls atomic.Int32
@@ -367,7 +368,7 @@ func TestAssessmentDoesNotSilentlyOmitExcessNeeds(t *testing.T) {
 	}
 	f.api.Engine.WaitOps()
 	v := waitAssessment(t, f, e.ID, "waiting")
-	if calls.Load() != 0 || !strings.Contains(v.Assessment.Error, "20 потребностей") {
+	if calls.Load() != 0 || v.Assessment.Attempts != 0 || !strings.Contains(v.Assessment.Error, "лимит результата исследования") {
 		t.Fatalf("unseen requirements silently accepted: %+v", v)
 	}
 }
