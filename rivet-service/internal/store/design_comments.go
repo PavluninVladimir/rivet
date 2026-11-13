@@ -393,7 +393,7 @@ func (s *Store) DesignGetHandoff(ctx context.Context, pid, actor, id string) (De
 }
 func (s *Store) DesignLinkHandoff(ctx context.Context, pid, actor, id, key string, ref DesignContextRef, verifiedGit bool) (json.RawMessage, error) {
 	return s.designDo(ctx, pid, actor, key, "handoff.link:"+id, ref, true, func(tx pgx.Tx, role string) (any, string, string, int, error) {
-		h, err := designHandoffTx(ctx, tx, pid, id)
+		_, err := designHandoffTx(ctx, tx, pid, id)
 		if err != nil {
 			return nil, "", "", 0, err
 		}
@@ -408,7 +408,7 @@ func (s *Store) DesignLinkHandoff(ctx context.Context, pid, actor, id, key strin
 		if err != nil {
 			return nil, "", "", 0, err
 		}
-		h, err = designHandoffTx(ctx, tx, pid, id)
+		h, err := designHandoffTx(ctx, tx, pid, id)
 		return h, "design.handoff.created", id, h.Revision, err
 	})
 }

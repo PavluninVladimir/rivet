@@ -379,3 +379,118 @@ func TestAssistantDailyTokenCapAndFencedRestart(t *testing.T) {
 		t.Fatal("fenced executor performed mutation")
 	}
 }
+
+// Unknown charges must not disappear from the monetary cap after an owner
+// enables it or selects a model whose current prices happen to be known.
+func TestAssistantDailyUnknownCostBeforeEnablingCap(t *testing.T) {
+	s, u, p, _, c := assistantFixture(t)
+	ctx := context.Background()
+	prior := assistantJob(t, s, u, p, "unknown-prior")
+	if err := s.FinishAssistantJob(ctx, prior, "completed", assistant.Diagnosis{Summary: "проверено", Uncertainties: []string{}}, assistant.Usage{}); err != nil {
+		t.Fatal(err)
+	}
+	var priorTokens int64
+	var priorCost *float64
+	if err := s.Pool.QueryRow(ctx, `SELECT reserved_tokens,reserved_cost_usd FROM assistant_runs WHERE id=$1`, prior.Run.ID).Scan(&priorTokens, &priorCost); err != nil || priorTokens == 0 || priorCost != nil {
+		t.Fatalf("expected an unknown-cost reservation: tokens=%d cost=%v err=%v", priorTokens, priorCost, err)
+	}
+	assistantTestKnownPrice(t, s, u)
+	capUSD := 1.0
+	c.Limits.DailyCostUSD = &capUSD
+	if _, err := s.SaveAssistantConfig(ctx, p.ID, u.ID, c.Revision, c); err != nil {
+		t.Fatal(err)
+	}
+	_, run, _, err := s.CreateAssistantRun(ctx, p.ID, u.ID, "known-after-cap", "статус", "question", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job, err := s.ClaimAssistantJob(ctx); err != nil || job != nil {
+		t.Fatalf("unknown prior cost admitted a provider call: job=%+v err=%v", job, err)
+	}
+	got, _, err := s.AssistantRun(ctx, p.ID, u.ID, run.ID)
+	if err != nil || got.Status != "budget_exhausted" || got.Summary == nil || !strings.Contains(*got.Summary, "стоимость предыдущих вызовов") {
+		t.Fatalf("unknown daily cost must explain the refusal: %+v %v", got, err)
+	}
+	var reasons, reservations int
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE project_id=$1 AND type='assistant.run.updated' AND payload->>'run_id'=$2 AND payload->>'reason'='daily_cost_unknown'`, p.ID, run.ID).Scan(&reasons); err != nil || reasons != 1 {
+		t.Fatalf("distinct daily_cost_unknown audit reason: count=%d err=%v", reasons, err)
+	}
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM assistant_runs WHERE id=$1 AND reserved_tokens>0`, run.ID).Scan(&reservations); err != nil || reservations != 0 {
+		t.Fatalf("refused run reserved a provider call: count=%d err=%v", reservations, err)
+	}
+}
+
+func TestAssistantYesterdayUnknownCostDoesNotBlockToday(t *testing.T) {
+	s, u, p, _, c := assistantFixture(t)
+	ctx := context.Background()
+	prior := assistantJob(t, s, u, p, "yesterday-unknown")
+	if err := s.FinishAssistantJob(ctx, prior, "completed", assistant.Diagnosis{Summary: "проверено", Uncertainties: []string{}}, assistant.Usage{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Pool.Exec(ctx, `UPDATE assistant_runs SET reserved_at=(date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')-interval '1 second' WHERE id=$1`, prior.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+	assistantTestKnownPrice(t, s, u)
+	capUSD := 1.0
+	c.Limits.DailyCostUSD = &capUSD
+	if _, err := s.SaveAssistantConfig(ctx, p.ID, u.ID, c.Revision, c); err != nil {
+		t.Fatal(err)
+	}
+	job := assistantJob(t, s, u, p, "today-known")
+	if job.Run.Status != "running" || job.Model.InputPrice == nil || job.Model.OutputPrice == nil {
+		t.Fatalf("yesterday's unknown cost blocked today's known-price call: %+v", job)
+	}
+}
+
+func TestAssistantKnownDailyCostSumStillEnforcesCap(t *testing.T) {
+	s, u, p, _, c := assistantFixture(t)
+	ctx := context.Background()
+	assistantTestKnownPrice(t, s, u)
+	// The default 36k reserved tokens cost $0.036 at these fixture prices.
+	// The second call would cost $0.072 in total, above this $0.05 cap.
+	capUSD := 0.05
+	c.Limits.DailyCostUSD = &capUSD
+	if _, err := s.SaveAssistantConfig(ctx, p.ID, u.ID, c.Revision, c); err != nil {
+		t.Fatal(err)
+	}
+	prior := assistantJob(t, s, u, p, "known-prior")
+	if err := s.FinishAssistantJob(ctx, prior, "completed", assistant.Diagnosis{Summary: "проверено", Uncertainties: []string{}}, assistant.Usage{}); err != nil {
+		t.Fatal(err)
+	}
+	_, run, _, err := s.CreateAssistantRun(ctx, p.ID, u.ID, "known-over-cap", "статус", "question", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job, err := s.ClaimAssistantJob(ctx); err != nil || job != nil {
+		t.Fatalf("known charges exceeded the cap: job=%+v err=%v", job, err)
+	}
+	got, _, err := s.AssistantRun(ctx, p.ID, u.ID, run.ID)
+	if err != nil || got.Status != "budget_exhausted" || got.Summary == nil || *got.Summary != "дневной бюджет исчерпан" {
+		t.Fatalf("known cost cap result: %+v %v", got, err)
+	}
+	var unknownReasons int
+	if err := s.Pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE project_id=$1 AND payload->>'run_id'=$2 AND payload->>'reason'='daily_cost_unknown'`, p.ID, run.ID).Scan(&unknownReasons); err != nil || unknownReasons != 0 {
+		t.Fatalf("known sum was mislabeled unknown: %d %v", unknownReasons, err)
+	}
+}
+
+func TestAssistantUnknownDailyCostWithoutCapRemainsAllowed(t *testing.T) {
+	s, u, p, _, _ := assistantFixture(t)
+	ctx := context.Background()
+	prior := assistantJob(t, s, u, p, "no-cap-prior")
+	if err := s.FinishAssistantJob(ctx, prior, "completed", assistant.Diagnosis{Summary: "проверено", Uncertainties: []string{}}, assistant.Usage{}); err != nil {
+		t.Fatal(err)
+	}
+	job := assistantJob(t, s, u, p, "no-cap-next")
+	if job.Config.Limits.DailyCostUSD != nil || job.Run.Status != "running" {
+		t.Fatalf("unknown cost without a monetary cap must remain allowed: %+v", job)
+	}
+}
+
+func assistantTestKnownPrice(t *testing.T, s *Store, u domain.User) {
+	t.Helper()
+	price := int64(1_000_000) // microdollars per million tokens
+	if _, err := s.SetConnectionModels(context.Background(), "mtplx-local", []domain.ModelEntry{{ID: "test-model", Label: "Test", Source: "manual", InputPrice: &price, OutputPrice: &price}}, u.ID, u.Login); err != nil {
+		t.Fatal(err)
+	}
+}

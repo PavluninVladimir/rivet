@@ -388,8 +388,19 @@ func (s *Store) ClaimAssistantJob(ctx context.Context) (*AssistantJob, error) {
 		}
 		var used int64
 		var cost float64
-		if err = tx.QueryRow(ctx, `SELECT COALESCE(sum(reserved_tokens),0),COALESCE(sum(reserved_cost_usd),0) FROM assistant_runs WHERE project_id=$1 AND reserved_at>=date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`, project).Scan(&used, &cost); err != nil {
+		var costUnknown bool
+		if err = tx.QueryRow(ctx, `SELECT COALESCE(sum(reserved_tokens),0),COALESCE(sum(reserved_cost_usd),0),COALESCE(bool_or(reserved_tokens>0 AND reserved_cost_usd IS NULL),false) FROM assistant_runs WHERE project_id=$1 AND reserved_at>=date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`, project).Scan(&used, &cost, &costUnknown); err != nil {
 			return err
+		}
+		// A later known-price model does not make earlier unknown charges
+		// disappear. Keep the same project/UTC reservation window as both
+		// daily sums and refuse a new call while its cost cap is unverifiable.
+		if c.Limits.DailyCostUSD != nil && costUnknown {
+			const why = "стоимость предыдущих вызовов ассистента за сегодня неизвестна: дневной денежный лимит не может быть проверен"
+			if _, err = tx.Exec(ctx, `UPDATE assistant_runs SET status='budget_exhausted',revision=revision+1,finished_at=now(),summary=$2 WHERE id=$1`, id, why); err != nil {
+				return err
+			}
+			return assistantEventTx(ctx, tx, project, id, "assistant.run.updated", why, map[string]any{"status": "budget_exhausted", "reason": "daily_cost_unknown"})
 		}
 		reserve := int64(c.Limits.MaxInputTokens + c.Limits.MaxOutputTokens)
 		var reserveCost *float64
