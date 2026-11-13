@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/PavluninVladimir/rivet/internal/domain"
+	"github.com/PavluninVladimir/rivet/internal/loadtest"
 	"github.com/PavluninVladimir/rivet/internal/orchestrator"
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/store"
@@ -360,6 +361,9 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 // агента с единственной capability deploy (runner выкатки).
 func agentAllowed(req *pb.RegisterRequest) (string, bool) {
 	const reject = "агентом может быть только агент Rivet: запустите rivet-runner -agent rivet"
+	if slices.Contains(req.Capabilities, "load") && (len(req.Capabilities) != 1 || req.Agent != "" || req.Model != "" || len(req.Models) > 0 || req.BootId == "" || !slices.Contains(req.Features, loadtest.Feature)) {
+		return "нужен выделенный load runner без агента и моделей с k6_load_v1", false
+	}
 	switch req.Agent {
 	case "rivet":
 		// Агент уже rivet, но бинарник прежней версии без агентского цикла:
@@ -369,13 +373,16 @@ func agentAllowed(req *pb.RegisterRequest) (string, bool) {
 		}
 		return "", true
 	case "":
+		if len(req.Capabilities) == 1 && req.Capabilities[0] == "load" && slices.Contains(req.Features, loadtest.Feature) && req.Model == "" && len(req.Models) == 0 && req.BootId != "" {
+			return "", true
+		}
 		if len(req.Capabilities) == 2 && slices.Contains(req.Capabilities, "deploy") && slices.Contains(req.Capabilities, "docker") && slices.Contains(req.Features, "local_docker_v1") {
 			return "", true
 		}
 		if len(req.Capabilities) == 1 && req.Capabilities[0] == "deploy" {
 			return "", true
 		}
-		return "runner без агента допускается только с единственной capability deploy (runner выкатки)", false
+		return "runner без агента допускается только для выкатки или выделенного нагрузочного тестирования", false
 	}
 	return reject, false
 }
@@ -843,6 +850,8 @@ func (s *Server) handle(ctx context.Context, runnerID string, msg *pb.RunnerMsg)
 		}
 		return s.Engine.OnDeployResult(ctx, runnerID, dr)
 
+	case *pb.RunnerMsg_LoadTestResult:
+		return s.Engine.OnLoadTestResult(ctx, runnerID, k.LoadTestResult)
 	case *pb.RunnerMsg_MonitorResult:
 		return s.Engine.OnMonitorResult(ctx, runnerID, k.MonitorResult)
 

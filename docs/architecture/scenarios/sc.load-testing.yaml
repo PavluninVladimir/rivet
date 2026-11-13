@@ -1,0 +1,15 @@
+id: sc.load-testing
+title: Явное нагрузочное тестирование рабочего локального релиза
+participants: [biz.owner, app.api, app.load-testing, app.stream, app.runner.k6, tech.k6, tech.postgres]
+steps:
+  - {from: biz.owner, to: app.api, message: Задать target и конечный профиль после первого рабочего релиза, kind: sync}
+  - {from: app.api, to: app.load-testing, message: Проверить ownership и актуальную привязку публикации, kind: sync}
+  - {from: app.load-testing, to: tech.postgres, message: Сохранить запрос и назначение выделенному runner на том же хосте, kind: sync}
+  - {from: app.load-testing, to: app.stream, message: LoadTestJob с fencing и приватным явно выбранным секретом, kind: async}
+  - {from: app.stream, to: app.runner.k6, message: Проверить Docker identity и GET-сценарий, kind: async}
+  - {from: app.runner.k6, to: app.load-testing, message: Запросить разрешение ступени с предыдущими измерениями, kind: async}
+  - {from: app.load-testing, to: tech.postgres, message: Сохранить измерения и проверить активность назначения, kind: sync}
+  - {from: app.load-testing, to: app.runner.k6, message: LoadTestContinue только после commit, kind: async}
+  - {from: app.runner.k6, to: tech.k6, message: Выполнить ограниченную GET-ступень с абсолютным дедлайном, kind: sync}
+  - {from: app.runner.k6, to: app.load-testing, message: Вернуть финальные измерения после остановки процесса и удаления секрета, kind: async}
+  - {from: app.load-testing, to: tech.postgres, message: Сохранить target и capacity отдельно и освободить runner, kind: sync}

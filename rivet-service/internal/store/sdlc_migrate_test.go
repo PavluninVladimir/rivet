@@ -193,7 +193,8 @@ func TestMigrationsTeamWorkFirst(t *testing.T) {
 	}
 	before := map[string][]byte{}
 	for name, raw := range files {
-		if name != "0032_sdlc_cycle.sql" {
+		// Load testing has real release FKs and therefore depends on SDLC.
+		if name != "0032_sdlc_cycle.sql" && name != "0053_load_testing.sql" {
 			before[name] = raw
 		}
 	}

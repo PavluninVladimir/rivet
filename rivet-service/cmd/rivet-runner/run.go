@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +42,7 @@ func run(args []string, secrets map[string]string) error {
 	fs.StringVar(&cfg.Model, "model", os.Getenv("RIVET_MODEL"), "модель агента по умолчанию (если назначение её не задаёт)")
 	models := fs.String("models", os.Getenv("RIVET_MODELS"),
 		"поддерживаемые модели через запятую: модель сессии приходит в назначении; пусто — модели каталога подключений")
+	fs.StringVar(&cfg.K6Bin, "k6-bin", envDef("RIVET_K6_BIN", "k6"), "путь к native k6 2.3.x для выделенного -caps load")
 	caps := fs.String("caps", envDef("RIVET_CAPS", "coding"), "capabilities через запятую")
 	fs.StringVar(&cfg.Workdir, "workdir", envDef("RIVET_WORKDIR", os.ExpandEnv("$HOME/.rivet-runner")), "рабочий каталог")
 	fs.StringVar(&cfg.GitBase, "git-base", envDef("RIVET_GIT_BASE", "https://github.com/"), "префикс URL клонирования репозиториев")
@@ -121,7 +123,16 @@ func run(args []string, secrets map[string]string) error {
 	// Runner выкатки (единственная capability deploy) работает без агента:
 	// он исполняет только задания выкатки.
 	deployOnly := deliveryOnly(cfg.Capabilities)
+	loadOnly := len(cfg.Capabilities) == 1 && cfg.Capabilities[0] == "load"
+	if slices.Contains(cfg.Capabilities, "load") && !loadOnly {
+		return fmt.Errorf("capability load должна быть единственной")
+	}
+	if loadOnly && (cfg.Model != "" || len(cfg.Models) != 0) {
+		return fmt.Errorf("выделенный load runner не принимает модели")
+	}
 	switch {
+	case loadOnly && (cfg.Agent == "" || cfg.Agent == runner.AgentRivet):
+		cfg.Agent, cfg.Adapter = "", ""
 	case deployOnly && (cfg.Agent == "" || cfg.Agent == runner.AgentRivet):
 		cfg.Agent, cfg.Adapter = "", ""
 	case cfg.Agent == runner.AgentRivet:

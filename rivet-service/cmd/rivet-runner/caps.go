@@ -22,6 +22,9 @@ func withArchitectureCapability(caps []string) []string {
 		}
 		out = append(out, c)
 	}
+	if len(out) == 1 && out[0] == "load" {
+		return out
+	}
 	if !has && !onlyDeploy {
 		out = append(out, "architecture")
 	}

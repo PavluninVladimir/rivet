@@ -152,6 +152,17 @@ func allocateLocalPort(ctx context.Context, tx pgx.Tx, env *domain.Environment) 
 // коммита и будет видна как активная — окружение не удалится из-под неё.
 func (s *Store) DeleteEnvironment(ctx context.Context, envID string) error {
 	return pgx.BeginFunc(ctx, s.Pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT id FROM environments WHERE id=$1 FOR NO KEY UPDATE`, envID); err != nil {
+			return err
+		}
+		var loadBusy bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM load_test_runs WHERE env_id=$1 AND (state IN('queued','running') OR cancel_pending))`, envID).Scan(&loadBusy); err != nil {
+			return err
+		}
+		if loadBusy {
+			return loadErr("load_test_busy", "сначала дождитесь подтверждённой остановки нагрузки")
+		}
+
 		if _, err := tx.Exec(ctx,
 			`SELECT 1 FROM deployments WHERE env_id=$1 FOR UPDATE`, envID); err != nil {
 			return err
@@ -341,6 +352,7 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 			JOIN environments e ON e.id = d.env_id
                 AND (NOT e.paused OR EXISTS(SELECT 1 FROM local_publications lp WHERE lp.active_deployment_id=d.id AND lp.operation<>'publish'))
                 AND e.exec_type IN ('ssh','k8s','local_docker')
+ AND (e.exec_type<>'local_docker' OR NOT EXISTS(SELECT 1 FROM load_test_runs lt WHERE lt.env_id=e.id AND (lt.state='running' OR lt.cancel_pending)))
  AND (e.config->'provision' IS NULL OR EXISTS (SELECT 1 FROM env_hosts h WHERE h.env_id=e.id AND h.state='ready'))
 			JOIN LATERAL (
 				SELECT r.id FROM runners r
@@ -373,6 +385,16 @@ func (s *Store) StartNextDeployment(ctx context.Context) (DeployAssignment, bool
 				return nil
 			}
 			return err
+		}
+		if err := lockLocalExecutionClaim(ctx, tx, envID); err != nil {
+			return err
+		}
+		var loadBusy bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM load_test_runs lt JOIN environments e ON e.id=lt.env_id WHERE lt.env_id=$1 AND e.exec_type='local_docker' AND (lt.state='running' OR lt.cancel_pending))`, envID).Scan(&loadBusy); err != nil {
+			return err
+		}
+		if loadBusy {
+			return nil
 		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE deployments SET status='deploying', runner_id=$2, started_at=now()

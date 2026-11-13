@@ -23,6 +23,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/PavluninVladimir/rivet/internal/loadtest"
 	"github.com/PavluninVladimir/rivet/internal/runner/native"
 	"github.com/PavluninVladimir/rivet/internal/runnertls"
 	pb "github.com/PavluninVladimir/rivet/pkg/protocol"
@@ -58,6 +59,7 @@ func (c Config) networkIsolated() bool {
 }
 
 type Config struct {
+	K6Bin     string
 	PlaneAddr string
 	// Token — токен регистрации, выданный администратором (спека runners);
 	// без него runner не подключается.
@@ -133,6 +135,14 @@ type Config struct {
 }
 
 func Run(ctx context.Context, cfg Config) error {
+	if loadOnly(cfg.Capabilities) {
+		if cfg.Agent != "" || cfg.Adapter != "" || cfg.Model != "" || len(cfg.Models) != 0 {
+			return errors.New("выделенный load runner не принимает агента и модели")
+		}
+		if err := loadtest.CheckBinary(ctx, cfg.K6Bin); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(cfg.Workdir, 0o755); err != nil {
 		return err
 	}
@@ -217,8 +227,10 @@ type agent struct {
 	// contexts — очереди контекста выполняющихся стадий (обратный канал).
 	contexts *contextHub
 
-	mu     sync.Mutex
-	cancel map[string]*stageCancel // отмена стадий по task_id
+	mu          sync.Mutex
+	cancel      map[string]*stageCancel // отмена стадий по task_id
+	loadActive  map[string]loadControl
+	loadStopped map[string]time.Time
 
 	// gen — стадии и публикации текущего подключения (поколения): новое
 	// подключение регистрируется только после отката стадий прошлого, а
@@ -654,9 +666,24 @@ func (a *agent) session(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if loadOnly(a.cfg.Capabilities) && !loadMessageAllowed(msg) {
+			continue
+		}
 		switch k := msg.Kind.(type) {
 		case *pb.PlaneMsg_Ack:
 			a.outbox.ack(k.Ack.AckedMsgId)
+		case *pb.PlaneMsg_LoadTest:
+			if loadOnly(a.cfg.Capabilities) {
+				a.startLoad(sctx, k.LoadTest, bootID, emit)
+			}
+		case *pb.PlaneMsg_LoadTestContinue:
+			if loadOnly(a.cfg.Capabilities) {
+				a.continueLoad(k.LoadTestContinue)
+			}
+		case *pb.PlaneMsg_LoadTestCancel:
+			if loadOnly(a.cfg.Capabilities) {
+				a.cancelLoad(k.LoadTestCancel)
+			}
 		case *pb.PlaneMsg_Assign:
 			as := k.Assign
 			a.goStage(stageInfo{Task: as.TaskId, Session: as.SessionId, Stage: as.Stage.String()},

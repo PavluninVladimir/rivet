@@ -93,6 +93,7 @@ message RunnerMsg {
     DeployResult deploy_result = 9;
     MonitorResult monitor_result = 10;
     HostJobResult host_job_result = 11;
+    LoadTestResult load_test_result = 12;
   }
 }
 
@@ -197,6 +198,9 @@ message PlaneMsg {
     Context context = 8;
     MonitorJob monitor = 9;
     HostJob host_job = 10;
+    LoadTestJob load_test = 11;
+    LoadTestCancel load_test_cancel = 12;
+    LoadTestContinue load_test_continue = 13;
   }
 }
 
@@ -461,3 +465,25 @@ message HostJobResult {
   string output = 3;            // хвост вывода, замаскирован
   string host_key = 4;          // строки known_hosts, принятые при первом подключении
 }
+
+// Additive k6_load_v1 messages. Payload is a bounded deterministic contract;
+// the assignment can contain an ephemeral test-auth value, never persisted.
+message LoadTestJob {
+ string run_id = 1;
+ string assignment_id = 2;
+ string boot_id = 3;
+ bytes payload = 4;
+}
+message LoadTestResult {
+ string run_id = 1;
+ string assignment_id = 2;
+ string stage = 3;
+ bytes payload = 4;
+}
+message LoadTestCancel {
+ string run_id = 1;
+ string assignment_id = 2;
+ int64 deadline_unix_ms = 3;
+}
+
+message LoadTestContinue { string run_id = 1; string assignment_id = 2; string stage = 3; }

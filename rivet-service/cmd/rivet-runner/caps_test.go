@@ -38,3 +38,10 @@ func TestDeliveryOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadCapabilityDoesNotAcquireArchitecture(t *testing.T) {
+	got := withArchitectureCapability([]string{" load "})
+	if len(got) != 1 || got[0] != "load" {
+		t.Fatal(got)
+	}
+}

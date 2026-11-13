@@ -22,6 +22,8 @@ flowchart LR
     n_data_incident["Инцидент"]
     n_data_incident_event["Событие инцидента"]
     n_data_installation_setting["Настройка установки"]
+    n_data_load_test_plan["Вопрос и сохранённый профиль нагрузки"]
+    n_data_load_test_run["Попытка нагрузочного тестирования"]
     n_data_model_connection["Подключение модели"]
     n_data_monitor_run["Проверка наблюдения"]
     n_data_monitor_state["Состояние наблюдения"]
@@ -48,6 +50,7 @@ flowchart LR
   n_app_cycle["Цикл разработки"]
   n_app_discovery["Проверка исследования"]
   n_app_history["Импорт истории"]
+  n_app_load_testing["Управление нагрузочными тестами"]
   n_app_ops["Релизы и инциденты"]
   n_app_orchestrator["Оркестратор"]
   n_app_overview["Обзор проекта"]
@@ -113,6 +116,8 @@ flowchart LR
   n_app_history -->|"access: readwrite"| n_data_epic
   n_app_history -->|"access: readwrite"| n_data_event
   n_app_history -->|"access: readwrite"| n_data_task
+  n_app_load_testing -->|"access: readwrite"| n_data_load_test_plan
+  n_app_load_testing -->|"access: readwrite"| n_data_load_test_run
   n_app_ops -->|"access: readwrite"| n_data_incident
   n_app_ops -->|"access: readwrite"| n_data_release
   n_app_orchestrator -->|"access: readwrite"| n_data_deployment
@@ -174,6 +179,8 @@ flowchart LR
   n_tech_postgres -->|"access: readwrite"| n_data_incident
   n_tech_postgres -->|"access: readwrite"| n_data_incident_event
   n_tech_postgres -->|"access: readwrite"| n_data_installation_setting
+  n_tech_postgres -->|"access: readwrite"| n_data_load_test_plan
+  n_tech_postgres -->|"access: readwrite"| n_data_load_test_run
   n_tech_postgres -->|"access: readwrite"| n_data_model_connection
   n_tech_postgres -->|"access: readwrite"| n_data_monitor_run
   n_tech_postgres -->|"access: readwrite"| n_data_monitor_state
@@ -197,7 +204,7 @@ flowchart LR
   classDef modified fill:#fef7e0,stroke:#e37400,color:#7a4100
   classDef removed fill:#fce8e6,stroke:#d93025,color:#a50e0e,stroke-dasharray: 5 5
   classDef ext fill:#f1f3f4,stroke:#9aa0a6,color:#5f6368,stroke-dasharray: 3 3
-  class n_app_analyst,n_app_api,n_app_architecture,n_app_cycle,n_app_discovery,n_app_history,n_app_ops,n_app_orchestrator,n_app_overview,n_app_planner,n_app_policy,n_app_stream,n_biz_architecture_snapshot,n_biz_deployment,n_biz_environment,n_biz_epic,n_biz_event,n_biz_incident,n_biz_interview,n_biz_model_connection,n_biz_need,n_biz_project,n_biz_release,n_biz_runner,n_biz_session,n_biz_step_run,n_biz_task,n_biz_user,n_tech_postgres ext
+  class n_app_analyst,n_app_api,n_app_architecture,n_app_cycle,n_app_discovery,n_app_history,n_app_load_testing,n_app_ops,n_app_orchestrator,n_app_overview,n_app_planner,n_app_policy,n_app_stream,n_biz_architecture_snapshot,n_biz_deployment,n_biz_environment,n_biz_epic,n_biz_event,n_biz_incident,n_biz_interview,n_biz_model_connection,n_biz_need,n_biz_project,n_biz_release,n_biz_runner,n_biz_session,n_biz_step_run,n_biz_task,n_biz_user,n_tech_postgres ext
 ```
 
 | Элемент | Тип | Название | Описание |
@@ -219,6 +226,8 @@ flowchart LR
 | `data.incident` | data-object | Инцидент |  |
 | `data.incident-event` | data-object | Событие инцидента |  |
 | `data.installation-setting` | data-object | Настройка установки |  |
+| `data.load-test-plan` | data-object | Вопрос и сохранённый профиль нагрузки |  |
+| `data.load-test-run` | data-object | Попытка нагрузочного тестирования |  |
 | `data.model-connection` | data-object | Подключение модели |  |
 | `data.monitor-run` | data-object | Проверка наблюдения |  |
 | `data.monitor-state` | data-object | Состояние наблюдения |  |

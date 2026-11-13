@@ -21,6 +21,8 @@ elements:
       - {type: access, to: data.environment, mode: readwrite}
       - {type: access, to: data.deployment, mode: readwrite}
       - {type: access, to: data.release, mode: readwrite}
+      - {type: access, to: data.load-test-plan, mode: readwrite}
+      - {type: access, to: data.load-test-run, mode: readwrite}
       - {type: access, to: data.incident, mode: readwrite}
       - {type: access, to: data.incident-event, mode: readwrite}
       - {type: access, to: data.monitor-state, mode: readwrite}
@@ -65,3 +67,11 @@ elements:
     props: {technology: "Linux"}
     relations:
       - {type: serving, to: app.runner}
+
+  - id: tech.k6
+    type: system-software
+    name: Native k6
+    description: Отдельный процесс k6 2.3.x с очищенными env/config, закрытым временным файлом тестового секрета и абсолютным конечным дедлайном. Генератор делит хост с приложением; жёсткая OS CPU/memory-изоляция не заявляется.
+    props: {technology: "k6 2.3.x"}
+    relations:
+      - {type: serving, to: app.runner.k6}

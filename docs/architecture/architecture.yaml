@@ -25,5 +25,5 @@ principles:
     rationale: >-
       Код и песочница находятся на машине runner'а; control plane хранит только
       отчёты и метаданные сессий.
-scenarios: [sc.epic-decompose, sc.runner-execution, sc.product-discovery, sc.architecture-describe, sc.deployment]
+scenarios: [sc.epic-decompose, sc.runner-execution, sc.product-discovery, sc.architecture-describe, sc.deployment, sc.load-testing]
 decisions: [0001-postgres-single-store, 0002-go-deployable-layout, 0003-pull-protocol, 0004-embedded-policy-engine, 0005-scm-and-llm-adapters, 0006-s3-transcripts]

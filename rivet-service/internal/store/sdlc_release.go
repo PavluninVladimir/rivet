@@ -276,6 +276,9 @@ func createReleaseTx(ctx context.Context, tx pgx.Tx, depID string) error {
 		WHERE env_id = $1`, envID); err != nil {
 		return err
 	}
+	if err := ensureLoadPlanTx(ctx, tx, relID); err != nil {
+		return err
+	}
 	return releaseIncidentsTx(ctx, tx, projectID, envID, relID, version, created, comp)
 }
 

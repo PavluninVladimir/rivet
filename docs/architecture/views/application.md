@@ -14,6 +14,7 @@ flowchart LR
     n_app_fake_llm["fake-llm"]
     n_app_history["Импорт истории"]
     n_app_llm["Клиенты моделей"]
+    n_app_load_testing["Управление нагрузочными тестами"]
     n_app_ops["Релизы и инциденты"]
     n_app_orchestrator["Оркестратор"]
     n_app_overview["Обзор проекта"]
@@ -24,6 +25,7 @@ flowchart LR
     n_app_runner["rivet-runner"]
     n_app_runner_agent["Агентский цикл Rivet"]
     n_app_runner_engine["Движок runner'а"]
+    n_app_runner_k6["Выделенный нагрузочный runner"]
     n_app_scm["SCM-адаптеры"]
     n_app_stream["gRPC-хаб runner'ов"]
     n_app_webui["Веб-консоль"]
@@ -72,6 +74,8 @@ flowchart LR
   n_data_event["Событие журнала"]
   n_data_incident["Инцидент"]
   n_data_installation_setting["Настройка установки"]
+  n_data_load_test_plan["Вопрос и сохранённый профиль нагрузки"]
+  n_data_load_test_run["Попытка нагрузочного тестирования"]
   n_data_model_connection["Подключение модели"]
   n_data_policy_version["Версия политики"]
   n_data_project["Проект"]
@@ -88,6 +92,7 @@ flowchart LR
   n_data_team_agent["Агент команды"]
   n_data_usage_record["Запись использования модели"]
   n_data_user["Пользователь"]
+  n_tech_k6["Native k6"]
   n_tech_node_plane["Сервер установки Rivet"]
   n_tech_node_runner["Машина runner'а"]
   n_app_analyst -->|"flow"| n_app_discovery
@@ -100,6 +105,7 @@ flowchart LR
   n_app_api -->|"composition"| n_app_console_api
   n_app_api -->|"flow"| n_app_history
   n_app_api -->|"flow"| n_app_llm
+  n_app_api -->|"flow"| n_app_load_testing
   n_app_api -->|"flow"| n_app_orchestrator
   n_app_api -->|"flow"| n_app_planner
   n_app_api -->|"serving"| n_biz_admin
@@ -164,6 +170,10 @@ flowchart LR
   n_app_llm -->|"serving"| n_app_analyst
   n_app_llm -->|"serving"| n_app_ops
   n_app_llm -->|"serving"| n_app_planner
+  n_app_load_testing -->|"flow"| n_app_runner_k6
+  n_app_load_testing -->|"flow"| n_app_stream
+  n_app_load_testing -->|"access: readwrite"| n_data_load_test_plan
+  n_app_load_testing -->|"access: readwrite"| n_data_load_test_run
   n_app_ops -->|"flow"| n_app_llm
   n_app_ops -->|"realization"| n_app_release_service
   n_app_ops -->|"access: readwrite"| n_data_incident
@@ -210,6 +220,7 @@ flowchart LR
   n_app_rivetd -->|"composition"| n_app_discovery
   n_app_rivetd -->|"composition"| n_app_history
   n_app_rivetd -->|"composition"| n_app_llm
+  n_app_rivetd -->|"composition"| n_app_load_testing
   n_app_rivetd -->|"composition"| n_app_ops
   n_app_rivetd -->|"composition"| n_app_orchestrator
   n_app_rivetd -->|"composition"| n_app_overview
@@ -221,8 +232,10 @@ flowchart LR
   n_app_rivetd -->|"composition"| n_app_webui
   n_app_runner -->|"composition"| n_app_runner_agent
   n_app_runner -->|"composition"| n_app_runner_engine
+  n_app_runner -->|"composition"| n_app_runner_k6
   n_app_runner_grpc -->|"serving"| n_app_runner
   n_app_runner_engine -->|"flow"| n_app_runner_agent
+  n_app_runner_k6 -->|"flow"| n_app_stream
   n_app_scm -->|"serving"| n_app_api
   n_app_scm -->|"serving"| n_app_orchestrator
   n_app_stream -->|"flow"| n_app_orchestrator
@@ -240,13 +253,14 @@ flowchart LR
   n_ext_gitlab -->|"serving"| n_app_scm
   n_ext_llm -->|"serving"| n_app_llm
   n_ext_llm -->|"serving"| n_app_runner_agent
+  n_tech_k6 -->|"serving"| n_app_runner_k6
   n_tech_node_plane -->|"serving"| n_app_rivetd
   n_tech_node_runner -->|"serving"| n_app_runner
   classDef added fill:#e6f4ea,stroke:#1e8e3e,color:#0d652d
   classDef modified fill:#fef7e0,stroke:#e37400,color:#7a4100
   classDef removed fill:#fce8e6,stroke:#d93025,color:#a50e0e,stroke-dasharray: 5 5
   classDef ext fill:#f1f3f4,stroke:#9aa0a6,color:#5f6368,stroke-dasharray: 3 3
-  class n_biz_admin,n_biz_analyst,n_biz_architect,n_biz_devops,n_biz_lead,n_biz_member,n_biz_owner,n_biz_proc_architecture,n_biz_proc_discovery,n_biz_proc_epic,n_biz_proc_release,n_biz_sre,n_data_access_token,n_data_agent,n_data_agent_role,n_data_attention,n_data_auth_session,n_data_deployment,n_data_discovery_interview,n_data_discovery_run,n_data_discovery_summary,n_data_environment,n_data_epic,n_data_epic_need,n_data_event,n_data_incident,n_data_installation_setting,n_data_model_connection,n_data_policy_version,n_data_project,n_data_project_architecture,n_data_project_member,n_data_release,n_data_runner,n_data_runner_token,n_data_runner_token_binding,n_data_scm_credential,n_data_session,n_data_task,n_data_task_step_run,n_data_team_agent,n_data_usage_record,n_data_user,n_tech_node_plane,n_tech_node_runner ext
+  class n_biz_admin,n_biz_analyst,n_biz_architect,n_biz_devops,n_biz_lead,n_biz_member,n_biz_owner,n_biz_proc_architecture,n_biz_proc_discovery,n_biz_proc_epic,n_biz_proc_release,n_biz_sre,n_data_access_token,n_data_agent,n_data_agent_role,n_data_attention,n_data_auth_session,n_data_deployment,n_data_discovery_interview,n_data_discovery_run,n_data_discovery_summary,n_data_environment,n_data_epic,n_data_epic_need,n_data_event,n_data_incident,n_data_installation_setting,n_data_load_test_plan,n_data_load_test_run,n_data_model_connection,n_data_policy_version,n_data_project,n_data_project_architecture,n_data_project_member,n_data_release,n_data_runner,n_data_runner_token,n_data_runner_token_binding,n_data_scm_credential,n_data_session,n_data_task,n_data_task_step_run,n_data_team_agent,n_data_usage_record,n_data_user,n_tech_k6,n_tech_node_plane,n_tech_node_runner ext
 ```
 
 | Элемент | Тип | Название | Описание |
@@ -264,6 +278,7 @@ flowchart LR
 | `app.fake-llm` | component | fake-llm | Подставная модель для e2e-тестов; в продакшене не разворачивается. |
 | `app.history` | component | Импорт истории | Разбирает архив OpenSpec и манифест истории, привязывает PR к Epic'ам и задачам. |
 | `app.llm` | component | Клиенты моделей | Единый клиент к API-совместимым моделям разных провайдеров. |
+| `app.load-testing` | component | Управление нагрузочными тестами | Вопрос после первого рабочего релиза, явный профиль владельца, конечные лимиты, очередь с fencing и сохранённые отчёты. Никогда не запускает нагрузку только по появлению релиза. |
 | `app.ops` | component | Релизы и инциденты | Формирует release notes и описания инцидентов с помощью модели. |
 | `app.orchestration-service` | application-service | Оркестрация задач |  |
 | `app.orchestrator` | component | Оркестратор | Детерминированный конвейер: диспетчеризация этапов, реакции на вердикты, публикации и слияние. |
@@ -279,6 +294,7 @@ flowchart LR
 | `app.runner-grpc` | interface | Протокол runner'ов |  |
 | `app.runner.agent` | component | Агентский цикл Rivet | Цикл агента роли: чтение репозитория, вызов модели, инструменты и формирование вердикта. |
 | `app.runner.engine` | component | Движок runner'а | Подключение к control plane, получение назначений, исполнение стадий публикации и наблюдения. |
+| `app.runner.k6` | component | Выделенный нагрузочный runner | Единственная capability load, без агента и моделей. Native k6 на хосте публикации; только фиксированная GET-смесь с явным секретом. Следующая ступень ждёт сохранения предыдущей и отдельного разрешения control plane. |
 | `app.scm` | component | SCM-адаптеры | Адаптеры хостингов репозиториев и разбор событий webhook. |
 | `app.stream` | component | gRPC-хаб runner'ов | Двунаправленный gRPC-поток PlaneMsg между control plane и runner'ами. |
 | `app.webui` | component | Веб-консоль | Встроенная одностраничная консоль, раздаваемая rivetd. |

@@ -20,6 +20,7 @@ import (
 	"github.com/PavluninVladimir/rivet/internal/domain"
 	"github.com/PavluninVladimir/rivet/internal/infra"
 	"github.com/PavluninVladimir/rivet/internal/llm"
+	"github.com/PavluninVladimir/rivet/internal/loadtest"
 	"github.com/PavluninVladimir/rivet/internal/policy"
 	"github.com/PavluninVladimir/rivet/internal/redact"
 	"github.com/PavluninVladimir/rivet/internal/scm"
@@ -34,7 +35,8 @@ type Sender interface {
 }
 
 type Engine struct {
-	St *store.Store
+	LoadLimits loadtest.Limits
+	St         *store.Store
 	// SCM — запасной адаптер установки (глобальный токен, fake на стендах);
 	// у проекта с учётными данными адаптер берётся через SCMFor.
 	SCM      scm.Adapter
@@ -142,7 +144,7 @@ type Engine struct {
 
 func New(st *store.Store, adapter scm.Adapter, bl *blob.Store, send Sender, heartbeat time.Duration) *Engine {
 	return &Engine{
-		St: st, SCM: adapter, Adapters: &scm.Factory{Fallback: adapter}, Blob: bl, Out: send,
+		LoadLimits: loadtest.DefaultLimits(), St: st, SCM: adapter, Adapters: &scm.Factory{Fallback: adapter}, Blob: bl, Out: send,
 		Policy:           policy.Default(),
 		HeartbeatTimeout: heartbeat, BaseBranch: "main",
 		stageContext:       map[string]string{},
@@ -181,6 +183,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 	// В проходе PR создаётся одной попыткой без пауз (tickContext).
 	ctx = tickContext(ctx)
 	// Наблюдение и задания control plane идут и при сбое тика конвейера.
+	defer e.tickLoadTests(ctx)
 	defer e.tickOps(ctx)
 	lost, lostDeps, err := e.St.MarkStaleRunnersOffline(ctx, int(e.HeartbeatTimeout.Seconds()))
 	if err != nil {

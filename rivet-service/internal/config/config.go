@@ -4,11 +4,15 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/PavluninVladimir/rivet/internal/loadtest"
 )
 
 type Config struct {
+	LoadLimits loadtest.Limits
 	// DatabaseURL — DSN PostgreSQL, например postgres://rivet:rivet@localhost:5432/rivet.
 	DatabaseURL string
 	// HTTPAddr: адрес клиентского API (REST + SSE). По умолчанию loopback:
@@ -106,6 +110,7 @@ const (
 
 func FromEnv() (Config, error) {
 	c := Config{
+		LoadLimits:             loadtest.DefaultLimits(),
 		DatabaseURL:            getenv("RIVET_DATABASE_URL", "postgres://rivet:rivet@localhost:5432/rivet?sslmode=disable"),
 		HTTPAddr:               getenv("RIVET_HTTP_ADDR", DefaultHTTPAddr),
 		GRPCAddr:               getenv("RIVET_GRPC_ADDR", DefaultGRPCAddr),
@@ -138,6 +143,23 @@ func FromEnv() (Config, error) {
 		PolicyTimeout:          3 * time.Second,
 		RunnerHeartbeatTimeout: 90 * time.Second,
 		DefaultAttemptLimit:    3,
+	}
+	for key, dst := range map[string]*int{
+		"RIVET_LOAD_MAX_VUS":               &c.LoadLimits.MaxVUs,
+		"RIVET_LOAD_MAX_RPS":               &c.LoadLimits.MaxRPS,
+		"RIVET_LOAD_MAX_TARGET_DURATION_S": &c.LoadLimits.MaxTargetDurationS,
+		"RIVET_LOAD_MAX_RUN_DURATION_S":    &c.LoadLimits.MaxRunDurationS,
+	} {
+		if value := os.Getenv(key); value != "" {
+			n, err := strconv.Atoi(value)
+			if err != nil {
+				return c, fmt.Errorf("%s: expected a finite integer", key)
+			}
+			*dst = n
+		}
+	}
+	if err := c.LoadLimits.Validate(); err != nil {
+		return c, err
 	}
 	if c.LLMProvider == "" {
 		if c.AnthropicAPIKey != "" {
