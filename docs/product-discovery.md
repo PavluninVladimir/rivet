@@ -134,3 +134,7 @@ Epic может зависеть от других Epic'ов того же пр�
 Контракт API: `GET /api/v1/projects/{id}/discovery`, операции с интервью и версиями в `/api/v1/projects/{id}/discovery/...`, отзыв `POST /api/v1/projects/{id}/discovery/feedback` и `PUT /api/v1/epics/{id}/deps`. Полная форма лежит в change `add-product-discovery` в OpenSpec-store `rivet` (`api-contract.md`).
 
 События идут в поток проекта: `discovery.interview_added`, `discovery.interview_deleted`, `discovery.analysis_started`, `discovery.analysis_progress`, `discovery.analysis_ready`, `discovery.analysis_failed`, `discovery.backlog_edited`, `discovery.approved`, `feedback.created`, `epic.deps_changed`, `epic.waiting_deps`, `epic.deps_ready`.
+
+## Исход анализа
+
+Статус ready означает валидный результат анализа. Отдельный outcome: backlog_ready разрешает правку/утверждение 1–12 Epic, needs_clarification показывает вопросы и не создаёт Epic, no_development_recommended объясняет отсутствие новой разработки. Сервер проверяет неизменяемый исход даже при запросе старого клиента. Ответ добавляется новым материалом; новый анализ запускается отдельно. Подробнее: validation/discovery-outcomes.md.

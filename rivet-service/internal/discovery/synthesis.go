@@ -108,6 +108,8 @@ type BacklogEpic struct {
 
 // Synthesis — принятый результат синтеза.
 type Synthesis struct {
+	Decision
+
 	Personas []Persona     `json:"personas"`
 	Needs    []Need        `json:"needs"`
 	Epics    []BacklogEpic `json:"epics"`
@@ -130,6 +132,8 @@ type rawNeed struct {
 }
 
 type rawSynthesis struct {
+	Decision
+
 	Personas []Persona     `json:"personas"`
 	Needs    []rawNeed     `json:"needs"`
 	Epics    []BacklogEpic `json:"epics"`
@@ -176,6 +180,13 @@ func CheckSynthesis(interviews []InterviewInput, existing []ExistingEpic, raw st
 		existingBy[e.ID] = e
 	}
 
+	out.Result.Decision = in.Decision
+	if in.Personas == nil || in.Needs == nil || in.Epics == nil {
+		fatal("personas, needs, epics: обязательны массивы, не null")
+	}
+	for _, defect := range checkDecision(&out.Result.Decision, in.Epics, byInterview) {
+		fatal("%s", defect)
+	}
 	// Персоны: идентификаторы уникальны, ссылки на интервью разрешаются.
 	personaIDs := map[string]bool{}
 	for i, p := range in.Personas {
@@ -417,7 +428,7 @@ func CheckSynthesis(interviews []InterviewInput, existing []ExistingEpic, raw st
 		fatal("зависимости Epic'ов образуют цикл: %s", strings.Join(cycle, " → "))
 	}
 	switch n := len(out.Result.Epics); {
-	case n == 0:
+	case n == 0 && in.Outcome == OutcomeBacklogReady:
 		fatal("нет ни одного принятого Epic'а: каждый Epic должен опираться на принятые потребности")
 	case n > MaxEpics:
 		fatal("Epic'ов %d, допустимо не больше %d", n, MaxEpics)

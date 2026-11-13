@@ -83,7 +83,7 @@ func fakeAnalystLLM(t *testing.T, gate chan struct{}) *httptest.Server {
 						"evidence": []map[string]any{{"interview": iv.ID, "quote": f.Quotes[0].Text}}})
 				}
 			}
-			b, _ := json.Marshal(map[string]any{"personas": personas, "needs": needs, "epics": []map[string]any{
+			b, _ := json.Marshal(map[string]any{"outcome": "backlog_ready", "rationale": "Есть подтвержденные потребности", "questions": []any{}, "sources": []any{}, "personas": personas, "needs": needs, "epics": []map[string]any{
 				{"key": "e1", "title": "Сделки и воронка", "goal": "Менеджер видит этап каждой сделки и не теряет клиентов в воронке.",
 					"needs": ids[:1], "priority": "must", "size": "M", "depends_on": []string{}, "existing_epic": nil},
 				{"key": "e2", "title": "Дашборд продаж", "goal": "Руководитель видит выручку и конверсию воронки за период на одном экране.",

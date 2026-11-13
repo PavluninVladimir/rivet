@@ -158,7 +158,7 @@ func synthesisReply(prompt string) string {
 				"evidence": []map[string]any{{"interview": iv.ID, "quote": f.Quotes[0].Text}}})
 		}
 	}
-	out, _ := json.Marshal(map[string]any{"personas": personas, "needs": needs, "epics": []map[string]any{{
+	out, _ := json.Marshal(map[string]any{"outcome": "backlog_ready", "rationale": "Есть подтвержденные требования", "questions": []any{}, "sources": []any{}, "personas": personas, "needs": needs, "epics": []map[string]any{{
 		"key": "e1", "title": "Сделки и воронка", "goal": "Менеджер видит этап каждой сделки и не теряет клиентов в воронке продаж.",
 		"needs": ids, "priority": "must", "size": "M", "depends_on": []string{}, "existing_epic": nil,
 	}}})

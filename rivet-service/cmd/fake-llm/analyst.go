@@ -220,7 +220,7 @@ func synthesisReply(prompt string) string {
 		{"key": "e2", "title": "Развитие по интервью", "goal": "Развить продукт по оставшимся потребностям из интервью пользователей (fake-llm).",
 			"rationale": "Закрывает вторую половину потребностей.", "needs": nonNil(second), "priority": "should", "size": "S", "depends_on": []string{"e1"}, "existing_epic": nil},
 	}
-	out, _ := json.Marshal(map[string]any{"personas": personas, "needs": needs, "epics": epics})
+	out, _ := json.Marshal(map[string]any{"outcome": "backlog_ready", "rationale": "Синтетические подтвержденные требования", "questions": []any{}, "sources": []any{}, "personas": personas, "needs": needs, "epics": epics})
 	return string(out)
 }
 
