@@ -83,7 +83,7 @@ func TestNativeK6RealSummaryPassAndCleanSettings(t *testing.T) {
 		b, _ := json.Marshal(report)
 		t.Fatalf("real k6: state=%s reason=%+v report=%s err=%v", result.State, result.Reason, b, err)
 	}
-	if result.K6Version != "2.3.0" && !strings.HasPrefix(result.K6Version, "2.3.") {
+	if !strings.HasPrefix(result.K6Version, "2.3.") && !strings.HasPrefix(result.K6Version, "2.4.") {
 		t.Fatal(result.K6Version)
 	}
 	if proxyCalls.Load() != 0 {

@@ -42,7 +42,7 @@ func run(args []string, secrets map[string]string) error {
 	fs.StringVar(&cfg.Model, "model", os.Getenv("RIVET_MODEL"), "модель агента по умолчанию (если назначение её не задаёт)")
 	models := fs.String("models", os.Getenv("RIVET_MODELS"),
 		"поддерживаемые модели через запятую: модель сессии приходит в назначении; пусто — модели каталога подключений")
-	fs.StringVar(&cfg.K6Bin, "k6-bin", envDef("RIVET_K6_BIN", "k6"), "путь к native k6 2.3.x для выделенного -caps load")
+	fs.StringVar(&cfg.K6Bin, "k6-bin", envDef("RIVET_K6_BIN", "k6"), "путь к native k6 2.3.x или 2.4.x для выделенного -caps load")
 	caps := fs.String("caps", envDef("RIVET_CAPS", "coding"), "capabilities через запятую")
 	fs.StringVar(&cfg.Workdir, "workdir", envDef("RIVET_WORKDIR", os.ExpandEnv("$HOME/.rivet-runner")), "рабочий каталог")
 	fs.StringVar(&cfg.GitBase, "git-base", envDef("RIVET_GIT_BASE", "https://github.com/"), "префикс URL клонирования репозиториев")
