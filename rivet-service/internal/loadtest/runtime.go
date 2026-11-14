@@ -29,7 +29,18 @@ type Runtime struct {
 }
 
 var containerID = regexp.MustCompile(`^[a-f0-9]{64}$`)
-var versionRE = regexp.MustCompile(`^k6 v(2\.3\.\d+)\b`)
+var versionRE = regexp.MustCompile(`^k6 v(2\.(?:3|4)\.(?:0|[1-9]\d*))(?:[ \t\r\n]|$)`)
+
+func checkedK6Version(output []byte) string {
+	if len(output) > 4096 {
+		return ""
+	}
+	match := versionRE.FindSubmatch(output)
+	if len(match) != 2 {
+		return ""
+	}
+	return string(match[1])
+}
 
 func cleanEnv(dir string) []string {
 	return []string{"PATH=/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin", "HOME=" + dir, "TMPDIR=" + dir, "XDG_CONFIG_HOME=" + dir, "LANG=C", "LC_ALL=C"}
@@ -191,12 +202,11 @@ func (r Runtime) Execute(ctx context.Context, j Job) (result Result) {
 	versionCmd.Stdout = &versionOutput
 	versionCmd.Stderr = io.Discard
 	err = versionCmd.Run()
-	version := versionOutput.data
-	match := versionRE.FindSubmatch(version)
-	if err != nil || len(version) > 4096 || len(match) != 2 {
-		return fail("config_needed", "k6_version", "нужен проверенный k6 2.3.x")
+	version := checkedK6Version(versionOutput.data)
+	if err != nil || version == "" {
+		return fail("config_needed", "k6_version", "нужен проверенный k6 2.3.x или 2.4.x")
 	}
-	result.K6Version = string(match[1])
+	result.K6Version = version
 	if privateFile(dir, "script.js", program) != nil || privateFile(dir, "config.json", []byte(`{}`)) != nil {
 		return fail("config_needed", "workspace", "не удалось подготовить private k6 config")
 	}
@@ -297,11 +307,11 @@ func CheckBinary(ctx context.Context, bin string) error {
 	cmd.WaitDelay = time.Second
 	protectProcess(cmd)
 	var output boundedOutput
-	output.limit = 4096
+	output.limit = 4097
 	cmd.Stdout = &output
 	cmd.Stderr = io.Discard
-	if cmd.Run() != nil || !versionRE.Match(output.data) {
-		return fmt.Errorf("нужен проверенный native k6 2.3.x")
+	if cmd.Run() != nil || checkedK6Version(output.data) == "" {
+		return fmt.Errorf("нужен проверенный native k6 2.3.x или 2.4.x")
 	}
 	return nil
 }
